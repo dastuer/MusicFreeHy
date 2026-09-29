@@ -1,0 +1,24 @@
+node_modules/
+dist/
+dist-electron/
+.DS_Store
+*.local
+
+# Capacitor 原生构建产物
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+android/capacitor-cordova-android-plugins/
+ios/App/Pods/
+ios/App/App/public/
+ios/App/output/
+ios/DerivedData/
+ios/App/capacitor.config.json
+
+# 资源生成产物（保留源 assets/icon-only.png、splash.png）
+assets/*.png.bak
+
+# 签名密钥（含密码，勿入库）
+android/keystore.properties
+android/app/musicfree-hy.keystore

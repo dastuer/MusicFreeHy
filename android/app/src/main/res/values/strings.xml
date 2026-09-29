@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">MusicFree</string>
+    <string name="title_activity_main">MusicFree</string>
+    <string name="package_name">com.huah.musicfree.hy</string>
+    <string name="custom_url_scheme">com.huah.musicfree.hy</string>
+</resources>

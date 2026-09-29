@@ -1,0 +1,49 @@
+{
+    "name": "musicfree-hy",
+    "version": "1.0.0",
+    "private": true,
+    "type": "module",
+    "description": "MusicFree 手机版 - 基于 Capacitor 的混合 App（Android / iOS），核心功能与 MusicFreeDesktop 对齐，数据/插件/备份互通，UI 对齐网易云音乐手机版",
+    "scripts": {
+        "dev": "vite --host",
+        "build": "tsc --noEmit && vite build",
+        "preview": "vite preview --host",
+        "gen:icons": "node scripts/gen-icon.mjs && npx capacitor-assets generate --android --ios --iconBackgroundColor '#27282c' --iconBackgroundColorDark '#27282c' --splashBackgroundColor '#151515' --splashBackgroundColorDark '#151515'",
+        "proxy": "node server/proxy.mjs",
+        "cap:sync": "npm run build && npx cap sync",
+        "cap:android": "npx cap sync android && npx cap open android",
+        "cap:ios": "npx cap sync ios && npx cap open ios"
+    },
+    "dependencies": {
+        "@capacitor/android": "^8.5.2",
+        "@capacitor/app": "^8.1.1",
+        "@capacitor/core": "^8.5.2",
+        "@capacitor/ios": "^8.5.2",
+        "@capacitor/status-bar": "^8.0.3",
+        "axios": "^1.7.9",
+        "big-integer": "^1.6.52",
+        "cheerio": "^1.0.0",
+        "compare-versions": "^6.1.1",
+        "crypto-js": "^4.2.0",
+        "dayjs": "^1.11.13",
+        "eventemitter3": "^5.0.1",
+        "he": "^1.2.0",
+        "jotai": "^2.10.3",
+        "nanoid": "^5.0.9",
+        "qs": "^6.13.0",
+        "react": "18.3.1",
+        "react-dom": "18.3.1"
+    },
+    "devDependencies": {
+        "@capacitor/assets": "^3.0.5",
+        "@capacitor/cli": "^8.5.2",
+        "@types/crypto-js": "^4.2.2",
+        "@types/he": "^1.2.3",
+        "@types/qs": "^6.9.15",
+        "@types/react": "^18.3.12",
+        "@types/react-dom": "^18.3.1",
+        "@vitejs/plugin-react": "^4.3.4",
+        "typescript": "^5.6.3",
+        "vite": "^6.0.3"
+    }
+}
