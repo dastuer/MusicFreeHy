@@ -239,6 +239,14 @@ export const IconSpeed = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
     </svg>
 );
 
+export const IconDownload = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
+    <svg {...base(size)} strokeWidth={strokeWidth}>
+        <path d="M12 4v11" />
+        <path d="M7.5 10.5L12 15l4.5-4.5" />
+        <path d="M4.5 19.5h15" />
+    </svg>
+);
+
 export const IconVolume = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
     <svg {...base(size)} strokeWidth={strokeWidth}>
         <path d="M4 9.5v5h3.5L12 19V5L7.5 9.5H4z" />

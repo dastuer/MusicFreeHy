@@ -13,7 +13,7 @@ import { useBackLayer } from "@/core/systemBack";
 import { IconCheck, IconStar, IconPuzzle } from "./Icons";
 
 /**
- * 音源选择底部面板：「我的 → 音源选择」统一入口。
+ * 音源设置底部面板：「我的 → 音源设置」与首页侧边栏统一入口。
  *  - 点行切换全局音源，所有页面立即生效；
  *  - 点星标设/取消默认音源（冷启动时优先使用，失败自动降级）。
  */
@@ -41,7 +41,7 @@ export default function SourceSelectSheet() {
     return (
         <div className="sheet-mask" onClick={() => closeSourceSelect()}>
             <div className="add-sheet-panel" onClick={(e) => e.stopPropagation()}>
-                <div className="add-sheet-header">音源选择</div>
+                <div className="add-sheet-header">音源设置</div>
                 <div className="source-select-sub">
                     全局生效：发现 / 搜索 / 榜单 / 歌单等页面共用
                 </div>

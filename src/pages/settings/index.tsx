@@ -7,8 +7,21 @@ import { getWebdavConfig, getWebdavLastAt } from "@/core/dav";
 import { setDefaultQuality } from "@/core/trackPlayer";
 import { getProxyBase } from "@/core/net";
 import { isNative } from "@/core/native";
-import { showToast, openPrompt, openMusicActions } from "@/core/uiAtoms";
+import { showToast, openPrompt, openMusicActions, openSingleSelect } from "@/core/uiAtoms";
 import { IconBack } from "@/components/base/Icons";
+
+const THEME_OPTIONS = [
+    { value: "light", label: "浅色" },
+    { value: "dark", label: "深色" },
+    { value: "auto", label: "跟随系统", desc: "跟随时段自动切换浅色 / 深色" },
+];
+
+const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
+    { key: "low", label: "流畅" },
+    { key: "standard", label: "标准" },
+    { key: "high", label: "极高" },
+    { key: "super", label: "无损" },
+];
 
 /**
  * 设置页（一级）：只放简单开关，复杂配置（备份 / WebDAV / 代理）下沉二级页。
@@ -24,13 +37,34 @@ export default function SettingsPage() {
     const webdavConfigured = Boolean(webdav.url || webdav.username);
     const webdavLastUp = getWebdavLastAt("upload");
     const proxy = getProxyBase();
+    const themeLabel =
+        THEME_OPTIONS.find((t) => t.value === theme)?.label ?? "跟随系统";
+    const qualityLabel =
+        QUALITY_OPTIONS.find((q) => q.key === quality)?.label ?? "标准";
 
-    const qualityOptions: { key: IMusic.IQualityKey; label: string }[] = [
-        { key: "low", label: "流畅" },
-        { key: "standard", label: "标准" },
-        { key: "high", label: "极高" },
-        { key: "super", label: "无损" },
-    ];
+    const pickTheme = () =>
+        openSingleSelect({
+            title: "主题",
+            options: THEME_OPTIONS,
+            value: theme,
+            onSelect: (v) => setTheme(v as "light" | "dark" | "auto"),
+        });
+
+    const pickQuality = () =>
+        openSingleSelect({
+            title: "默认音质",
+            subtitle: "音源不支持时自动降级重试",
+            options: QUALITY_OPTIONS.map((q) => ({ value: q.key, label: q.label })),
+            value: quality,
+            onSelect: (v) => {
+                setQualityState(v as IMusic.IQualityKey);
+                setQuality(v as IMusic.IQualityKey);
+                setDefaultQuality(v as IMusic.IQualityKey);
+                showToast(
+                    `默认音质：${QUALITY_OPTIONS.find((q) => q.key === v)?.label}`,
+                );
+            },
+        });
 
     return (
         <div className="page">
@@ -44,42 +78,19 @@ export default function SettingsPage() {
 
             <div className="settings-group">
                 <div className="settings-group-title">外观</div>
-                <div className="settings-row">
+                <div className="settings-row" onClick={pickTheme}>
                     <span className="settings-row-label">主题</span>
-                    <div className="seg">
-                        {(["light", "dark", "auto"] as const).map((t) => (
-                            <span
-                                key={t}
-                                className={`seg-item ${theme === t ? "active" : ""}`}
-                                onClick={() => setTheme(t)}
-                            >
-                                {t === "light" ? "浅色" : t === "dark" ? "深色" : "跟随系统"}
-                            </span>
-                        ))}
-                    </div>
+                    <span className="settings-value">{themeLabel}</span>
+                    <span className="settings-value">›</span>
                 </div>
             </div>
 
             <div className="settings-group">
                 <div className="settings-group-title">播放</div>
-                <div className="settings-row">
+                <div className="settings-row" onClick={pickQuality}>
                     <span className="settings-row-label">默认音质</span>
-                    <div className="seg">
-                        {qualityOptions.map((q) => (
-                            <span
-                                key={q.key}
-                                className={`seg-item ${quality === q.key ? "active" : ""}`}
-                                onClick={() => {
-                                    setQualityState(q.key);
-                                    setQuality(q.key);
-                                    setDefaultQuality(q.key);
-                                    showToast(`默认音质：${q.label}`);
-                                }}
-                            >
-                                {q.label}
-                            </span>
-                        ))}
-                    </div>
+                    <span className="settings-value">{qualityLabel}</span>
+                    <span className="settings-value">›</span>
                 </div>
                 <div
                     className="settings-row"

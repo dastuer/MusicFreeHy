@@ -7,6 +7,7 @@ import { useThemeSetup } from "@/core/theme";
 import { ensureLikesSheet } from "@/core/musicSheet";
 import { showToast } from "@/core/uiAtoms";
 import TabBar from "@/components/layout/TabBar";
+import AppDrawer from "@/components/layout/AppDrawer";
 import MiniPlayer from "@/components/layout/MiniPlayer";
 import NowPlaying from "@/components/layout/NowPlaying";
 import PlayQueuePanel from "@/components/layout/PlayQueuePanel";
@@ -14,6 +15,7 @@ import ToastHost from "@/components/base/ToastHost";
 import MusicActionSheet from "@/components/base/MusicActionSheet";
 import AddToSheetPanel from "@/components/base/AddToSheetPanel";
 import SourceSelectSheet from "@/components/base/SourceSelectSheet";
+import SingleSelectSheet from "@/components/base/SingleSelectSheet";
 import PromptDialog from "@/components/base/PromptDialog";
 import HomePage from "@/pages/home";
 import MyMusicPage from "@/pages/myMusic";
@@ -112,13 +114,17 @@ export default function App() {
                     {renderPage(route.path, route.params)}
                 </div>
                 <MiniPlayer />
-                {isTabRoot && <TabBar />}
+                {/* Tab 栏自带 safe-bottom 内边距；播放条单独贴底时给安卓手势条 / iOS
+                    Home 指示条留出空间 */}
+                {isTabRoot ? <TabBar /> : <div className="safe-bottom-spacer" />}
             </div>
+            <AppDrawer />
             <NowPlaying />
             <PlayQueuePanel />
             <MusicActionSheet />
             <AddToSheetPanel />
             <SourceSelectSheet />
+            <SingleSelectSheet />
             <PromptDialog />
             <ToastHost />
         </div>

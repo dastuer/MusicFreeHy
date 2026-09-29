@@ -12,7 +12,9 @@
         "proxy": "node server/proxy.mjs",
         "cap:sync": "npm run build && npx cap sync",
         "cap:android": "npx cap sync android && npx cap open android",
-        "cap:ios": "npx cap sync ios && npx cap open ios"
+        "cap:ios": "npx cap sync ios && npx cap open ios",
+        "android:run": "scripts/android-run.sh",
+        "android:run:log": "scripts/android-run.sh -l"
     },
     "dependencies": {
         "@capacitor/android": "^8.5.2",

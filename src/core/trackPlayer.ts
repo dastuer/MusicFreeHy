@@ -905,8 +905,9 @@ class TrackPlayer extends EventEmitter {
     /**
      * 解析可播放音源。音质按 resolveQualityLadder 从请求档逐级下降尝试。
      * 找不到可用音源时返回带人话原因的失败（插件缺失 / 被禁用 / 挂载失败是恢复备份后最常见的几种）。
+     * 除播放外，下载模块也用它取直链（source.url 原始地址 + 自定义请求头）。
      */
-    private async resolveMediaUrl(
+    async resolveMediaUrl(
         musicItem: IMusic.IMusicItem,
         qualityOverride?: IMusic.IQualityKey,
         excludeUrl?: string,

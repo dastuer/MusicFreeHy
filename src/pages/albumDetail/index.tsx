@@ -1,5 +1,5 @@
 import { cssUrl } from "@/core/utils";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useCurrentRoute, goBack } from "@/core/router";
 import { tryPluginMethod } from "@/core/pluginUtils";
 import { pickSourcePlugins, useGlobalSource } from "@/core/mediaSource";
@@ -25,6 +25,10 @@ export default function AlbumDetailPage() {
     const [loading, setLoading] = useState(true);
     const [loadingMore, setLoadingMore] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    // 吸顶顶栏：滚过 hero 后变实底并显示专辑名
+    const topbarRef = useRef<HTMLDivElement | null>(null);
+    const heroRef = useRef<HTMLDivElement | null>(null);
+    const [topSolid, setTopSolid] = useState(false);
 
     useEffect(() => {
         getPlugins().then(setPlugins);
@@ -94,22 +98,38 @@ export default function AlbumDetailPage() {
     }
 
     return (
-        <div className="page" style={{ padding: 0 }}>
-            <div className="detail-hero">
+        <div
+            className="page"
+            style={{ padding: 0 }}
+            onScroll={(e) => {
+                const topbar = topbarRef.current;
+                const hero = heroRef.current;
+                if (!topbar || !hero) {
+                    return;
+                }
+                setTopSolid(
+                    e.currentTarget.scrollTop >= hero.offsetHeight - topbar.offsetHeight,
+                );
+            }}
+        >
+            <div
+                className={`sub-header detail-topbar${topSolid ? " solid" : ""}`}
+                ref={topbarRef}
+            >
+                <button className="icon-btn" onClick={() => goBack()}>
+                    <IconBack size={22} />
+                </button>
+                <span className="sub-header-title">
+                    {topSolid ? (albumInfo?.title ?? "专辑") : "专辑"}
+                </span>
+            </div>
+            <div className="detail-hero" ref={heroRef}>
                 <div
                     className="detail-hero-bg"
                     style={{
                         backgroundImage: cssUrl(albumInfo?.artwork),
                     }}
                 />
-                <div className="sub-header" style={{ background: "transparent" }}>
-                    <button className="icon-btn" style={{ color: "#fff" }} onClick={() => goBack()}>
-                        <IconBack size={22} />
-                    </button>
-                    <span className="sub-header-title" style={{ color: "#fff" }}>
-                        专辑
-                    </span>
-                </div>
                 <div className="detail-hero-content">
                     <Cover src={albumInfo?.artwork} size={116} radius={12} fallbackSize={44} />
                     <div style={{ flex: 1, minWidth: 0 }}>

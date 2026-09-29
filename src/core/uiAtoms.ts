@@ -9,6 +9,16 @@ export const nowPlayingOpenAtom = atom(false);
 export const queueOpenAtom = atom(false);
 /** 发现页内部标签 */
 export const homeTabAtom = atom<"recommend" | "sheets" | "toplist">("recommend");
+/** 全局侧边栏抽屉（发现 / 我的页左上角入口） */
+export const drawerOpenAtom = atom(false);
+
+export function openDrawer() {
+    getDefaultStore().set(drawerOpenAtom, true);
+}
+
+export function closeDrawer() {
+    getDefaultStore().set(drawerOpenAtom, false);
+}
 
 /** ---------- Toast ---------- */
 
@@ -95,7 +105,7 @@ export function closePrompt() {
     getDefaultStore().set(promptAtom, null);
 }
 
-/** ---------- 音源选择面板（我的页统一入口） ---------- */
+/** ---------- 音源设置面板（我的页 / 首页侧边栏统一入口） ---------- */
 
 export const sourceSelectOpenAtom = atom(false);
 
@@ -105,4 +115,31 @@ export function openSourceSelect() {
 
 export function closeSourceSelect() {
     getDefaultStore().set(sourceSelectOpenAtom, false);
+}
+
+/** ---------- 单选浮窗（设置等多选一项统一交互） ---------- */
+
+export interface ISingleSelectOption {
+    value: string;
+    label: string;
+    desc?: string;
+}
+
+export interface ISingleSelectState {
+    title: string;
+    subtitle?: string;
+    options: ISingleSelectOption[];
+    /** 当前选中值，浮窗内打勾展示 */
+    value?: string;
+    onSelect: (value: string) => void;
+}
+
+export const singleSelectAtom = atomWithReset<ISingleSelectState | null>(null);
+
+export function openSingleSelect(state: ISingleSelectState) {
+    getDefaultStore().set(singleSelectAtom, state);
+}
+
+export function closeSingleSelect() {
+    getDefaultStore().set(singleSelectAtom, null);
 }

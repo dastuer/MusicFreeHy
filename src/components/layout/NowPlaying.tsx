@@ -18,14 +18,23 @@ import {
     nowPlayingOpenAtom,
     queueOpenAtom,
     openMusicActions,
+    openSingleSelect,
     openAddToSheet,
     showToast,
 } from "@/core/uiAtoms";
 import { isLikedMusic, toggleLike, likesVersionAtom } from "@/core/musicSheet";
 import { navigate } from "@/core/router";
 import { useBackLayer } from "@/core/systemBack";
-import { formatSeconds , cssUrl } from "@/core/utils";
+import { formatSeconds, cssUrl } from "@/core/utils";
+import {
+    QUALITY_LABEL,
+    qualityShortName,
+    formatQualitySize,
+    downloadMusic,
+    downloadingAtom,
+} from "@/core/musicDownload";
 import Slider from "@/components/base/Slider";
+import Spinner from "@/components/base/Spinner";
 import {
     IconChevronDown,
     IconShuffle,
@@ -35,28 +44,15 @@ import {
     IconNext,
     IconPlay,
     IconPause,
-    IconHeart,
     IconQueue,
-    IconLyric,
-    IconSpeed,
-    IconPlus,
+    IconHeart,
+    IconDownload,
     IconMore,
+    IconMusic,
 } from "@/components/base/Icons";
 
-const QUALITY_LABEL: Record<IMusic.IQualityKey, string> = {
-    low: "流畅音质",
-    standard: "标准音质",
-    high: "极高音质",
-    super: "无损音质",
-};
-
 const QUALITY_ORDER: IMusic.IQualityKey[] = ["low", "standard", "high", "super"];
-const RATES = [1, 1.25, 1.5, 0.75];
-
-/** 音质档位的短名（toast / 按钮用） */
-function qualityShortName(q: IMusic.IQualityKey) {
-    return QUALITY_LABEL[q].replace("音质", "");
-}
+const RATE_OPTIONS = [0.75, 1, 1.25, 1.5];
 
 /** 音质切换结果 → 提示语（"cancelled" 时返回空串，不提示） */
 function qualitySwitchToast(res: IQualitySwitchResult, requested: IMusic.IQualityKey): string {
@@ -98,6 +94,7 @@ function NowPlayingInner() {
     const playingQuality = usePlayingQuality();
     const lyric = useCurrentLyric();
     const likesVersion = useAtomValue(likesVersionAtom);
+    const isDownloading = useAtomValue(downloadingAtom);
 
     const [showLyrics, setShowLyrics] = useState(false);
     const [rate, setRate] = useState(1);
@@ -107,7 +104,6 @@ function NowPlayingInner() {
     void likesVersion;
     const liked = currentMusic ? isLikedMusic(currentMusic) : false;
     const playing = musicState === "playing";
-    const spinning = musicState !== "stopped";
     const duration = progress.duration || currentMusic?.duration || 0;
     const position = progress.position || 0;
 
@@ -168,19 +164,90 @@ function NowPlayingInner() {
         touchStartY.current = null;
     };
 
-    const cycleQuality = async () => {
-        const next = QUALITY_ORDER[(QUALITY_ORDER.indexOf(quality) + 1) % QUALITY_ORDER.length];
-        const msg = qualitySwitchToast(await applyQuality(next), next);
-        if (msg) {
-            showToast(msg);
-        }
+    /** 当前歌曲支持的音质档（插件没报 qualities 时给全档） */
+    const qualityOptions = () => {
+        const supported = QUALITY_ORDER.filter((q) => currentMusic.qualities?.[q]);
+        return (supported.length ? supported : QUALITY_ORDER).map((q) => ({
+            value: q,
+            label: QUALITY_LABEL[q],
+            desc: formatQualitySize(currentMusic.qualities?.[q]?.size),
+        }));
     };
 
-    const cycleRate = () => {
-        const idx = RATES.indexOf(rate);
-        const next = RATES[(idx + 1) % RATES.length];
-        setRate(next);
-        TrackPlayerSingleton.setRate(next);
+    const openQualitySheet = () => {
+        openSingleSelect({
+            title: "播放音质",
+            subtitle: switchingQuality ? "正在缓冲新音质，当前播放不中断" : undefined,
+            options: qualityOptions(),
+            value: quality,
+            onSelect: async (v) => {
+                const next = v as IMusic.IQualityKey;
+                const msg = qualitySwitchToast(await applyQuality(next), next);
+                if (msg) {
+                    showToast(msg);
+                }
+            },
+        });
+    };
+
+    const openDownloadSheet = () => {
+        openSingleSelect({
+            title: "下载音质",
+            options: qualityOptions(),
+            onSelect: (v) => {
+                downloadMusic(currentMusic, v as IMusic.IQualityKey);
+            },
+        });
+    };
+
+    const openRateSheet = () => {
+        openSingleSelect({
+            title: "倍速播放",
+            options: RATE_OPTIONS.map((r) => ({ value: String(r), label: `${r}x` })),
+            value: String(rate),
+            onSelect: (v) => {
+                const next = Number(v);
+                setRate(next);
+                TrackPlayerSingleton.setRate(next);
+            },
+        });
+    };
+
+    const openMoreSheet = () => {
+        openMusicActions({
+            musicItem: currentMusic,
+            actions: [
+                {
+                    label: "下一首播放",
+                    onClick: () => TrackPlayerSingleton.addNext(currentMusic),
+                },
+                {
+                    label: "收藏到歌单",
+                    onClick: () => openAddToSheet([currentMusic]),
+                },
+                ...(currentMusic.albumId !== undefined
+                    ? [
+                          {
+                              label: "查看专辑",
+                              onClick: () =>
+                                  navigate("albumDetail", {
+                                      albumItem: {
+                                          id: currentMusic.albumId,
+                                          platform: currentMusic.platform,
+                                          title: currentMusic.album,
+                                          artwork: currentMusic.artwork,
+                                          artist: currentMusic.artist,
+                                      },
+                                  }),
+                          },
+                      ]
+                    : []),
+                {
+                    label: "倍速播放",
+                    onClick: openRateSheet,
+                },
+            ],
+        });
     };
 
     const repeatIcon =
@@ -227,79 +294,40 @@ function NowPlayingInner() {
                         onTouchEnd={onStageTouchEnd}
                         onClick={() => setShowLyrics(true)}
                     >
-                        <div className={`np-arm ${playing ? "playing" : ""}`}>
-                            <div className="np-arm-pivot" />
-                            <div className="np-arm-rod" />
-                            <div className="np-arm-head" />
-                        </div>
-                        <div className="np-vinyl-wrap">
-                            <div className={`np-vinyl ${spinning ? "playing" : ""}`}>
-                                <div className="np-vinyl-label">
-                                    {currentMusic.artwork ? <img src={currentMusic.artwork} alt="" /> : null}
+                        <div className="np-cover">
+                            {currentMusic.artwork ? (
+                                <img src={currentMusic.artwork} alt="" />
+                            ) : (
+                                <div className="np-cover-fallback">
+                                    <IconMusic size={64} />
                                 </div>
-                            </div>
-                            <div className="np-vinyl-hole" />
+                            )}
                         </div>
                     </div>
                 )}
 
-                <div className="np-title-block">
-                    <div className="np-title-main">
-                        <div className="np-title">{currentMusic.title}</div>
-                        <div className="np-artist">{currentMusic.artist}</div>
-                    </div>
-                    <div className="np-title-actions">
-                        <button
-                            className="icon-btn"
-                            onClick={() => toggleLike(currentMusic)}
-                            style={liked ? { color: "var(--primary-color)" } : undefined}
-                        >
-                            <IconHeart size={21} filled={liked} />
-                        </button>
-                        <button
-                            className="icon-btn"
-                            onClick={() => openAddToSheet([currentMusic])}
-                        >
-                            <IconPlus size={21} />
-                        </button>
-                        <button
-                            className="icon-btn"
-                            onClick={() =>
-                                openMusicActions({
-                                    musicItem: currentMusic,
-                                    actions: [
-                                        {
-                                            label: "下一首播放",
-                                            onClick: () => TrackPlayerSingleton.addNext(currentMusic),
-                                        },
-                                        {
-                                            label: "收藏到歌单",
-                                            onClick: () => openAddToSheet([currentMusic]),
-                                        },
-                                        ...(currentMusic.albumId !== undefined
-                                            ? [
-                                                  {
-                                                      label: "查看专辑",
-                                                      onClick: () =>
-                                                          navigate("albumDetail", {
-                                                              albumItem: {
-                                                                  id: currentMusic.albumId,
-                                                                  platform: currentMusic.platform,
-                                                                  title: currentMusic.album,
-                                                                  artwork: currentMusic.artwork,
-                                                                  artist: currentMusic.artist,
-                                                              },
-                                                          }),
-                                                  },
-                                              ]
-                                            : []),
-                                    ],
-                                })
-                            }
-                        >
-                            <IconMore size={21} />
-                        </button>
-                    </div>
+                <div className="np-func-row">
+                    <button
+                        className={`np-func ${switchingQuality ? "switching" : ""}`}
+                        onClick={openQualitySheet}
+                    >
+                        <span className="np-func-quality">
+                            {qualityShortName(playingQuality ?? quality)}
+                        </span>
+                    </button>
+                    <button
+                        className={`np-func ${liked ? "active" : ""}`}
+                        style={liked ? { color: "var(--primary-color)" } : undefined}
+                        onClick={() => toggleLike(currentMusic)}
+                    >
+                        <IconHeart size={24} filled={liked} />
+                    </button>
+                    <button className="np-func" onClick={openDownloadSheet}>
+                        {isDownloading ? <Spinner size={24} /> : <IconDownload size={24} />}
+                    </button>
+                    <button className="np-func" onClick={openMoreSheet}>
+                        <IconMore size={24} />
+                    </button>
                 </div>
 
                 <div className="np-progress">
@@ -333,34 +361,6 @@ function NowPlayingInner() {
                     </button>
                     <button className="np-ctrl" onClick={() => setQueueOpen(true)}>
                         <IconQueue size={22} />
-                    </button>
-                </div>
-
-                <div className="np-toolbar">
-                    <button
-                        className={`np-tool ${showLyrics ? "active" : ""}`}
-                        onClick={() => setShowLyrics((v) => !v)}
-                    >
-                        <IconLyric size={20} />
-                        歌词
-                    </button>
-                    <button
-                        className={`np-tool ${switchingQuality ? "switching" : ""}`}
-                        onClick={cycleQuality}
-                        title={switchingQuality ? "正在缓冲新音质，当前播放不中断" : "音质"}
-                    >
-                        <span style={{ fontSize: 13, fontWeight: 700, letterSpacing: 0.5 }}>
-                            {QUALITY_LABEL[playingQuality ?? quality].replace("音质", "")}
-                        </span>
-                        音质
-                    </button>
-                    <button className="np-tool" onClick={cycleRate}>
-                        <IconSpeed size={20} />
-                        {rate}x
-                    </button>
-                    <button className="np-tool" onClick={() => setQueueOpen(true)}>
-                        <IconQueue size={20} />
-                        队列
                     </button>
                 </div>
             </div>

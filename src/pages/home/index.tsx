@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useAtomValue, useSetAtom } from "jotai";
-import { homeTabAtom } from "@/core/uiAtoms";
+import { homeTabAtom, openDrawer } from "@/core/uiAtoms";
 import { getPlugins, type SerializedPlugin } from "@/core/ipc";
 import { pickSourcePlugins, useGlobalSource } from "@/core/mediaSource";
 import { tryPluginMethod } from "@/core/pluginUtils";
@@ -15,8 +15,7 @@ import {
     IconHistory,
     IconPlay,
     IconHeadphone,
-    IconPuzzle,
-    IconSettings,
+    IconChevronDown,
 } from "@/components/base/Icons";
 import { TrackPlayerSingleton } from "@/core/trackPlayer";
 import { getMusicHistory } from "@/core/musicHistory";
@@ -41,12 +40,11 @@ type HomeTab = (typeof TABS)[number]["id"];
 export default function HomePage() {
     const tab = useAtomValue(homeTabAtom);
     const setTab = useSetAtom(homeTabAtom);
-    const [drawerOpen, setDrawerOpen] = useState(false);
 
     return (
         <div className="page">
             <div className="home-topbar">
-                <button className="icon-btn" onClick={() => setDrawerOpen(true)}>
+                <button className="icon-btn" onClick={() => openDrawer()}>
                     <IconMenu size={22} />
                 </button>
                 <div className="home-tabs">
@@ -72,8 +70,6 @@ export default function HomePage() {
             ) : (
                 <RecommendTab goTab={setTab} />
             )}
-
-            {drawerOpen && <HomeDrawer onClose={() => setDrawerOpen(false)} />}
         </div>
     );
 }
@@ -275,6 +271,13 @@ function SheetsTab() {
     const [loadingMore, setLoadingMore] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const sentinelRef = useRef<HTMLDivElement | null>(null);
+    // 分类标签折叠：默认最多两行，超出时末位显示「更多」
+    const [expanded, setExpanded] = useState(false);
+    const [visibleCount, setVisibleCount] = useState(Number.MAX_SAFE_INTEGER);
+    // 每次窗口尺寸变化都 +1：初始未溢出时 visibleCount 已是最大值，仅改它不会触发重算
+    const [layoutNonce, setLayoutNonce] = useState(0);
+    const tagsRef = useRef<HTMLDivElement | null>(null);
+    const moreRef = useRef<HTMLSpanElement | null>(null);
 
     useEffect(() => {
         getPlugins().then(setPlugins);
@@ -304,6 +307,8 @@ function SheetsTab() {
                 ].filter((t: any) => t && typeof t === "object");
                 setAllTags(tags);
                 setActiveTag(tags[0] ?? null);
+                setExpanded(false);
+                setVisibleCount(Number.MAX_SAFE_INTEGER);
             } else {
                 setAllTags([]);
                 setActiveTag(null);
@@ -385,21 +390,88 @@ function SheetsTab() {
         return () => observer.disconnect();
     }, [isEnd, loadingMore, loading, page, activeTag, fetchSheets]);
 
+    // 分类标签折叠：计算可见数量，保证「更多」落在两行以内
+    useLayoutEffect(() => {
+        const container = tagsRef.current;
+        if (!container || !allTags.length || expanded) {
+            return;
+        }
+        const chips = Array.from(
+            container.querySelectorAll<HTMLElement>("[data-tag-chip]"),
+        );
+        if (!chips.length) {
+            return;
+        }
+        const rowTops = [...new Set(chips.map((el) => el.offsetTop))].sort(
+            (a, b) => a - b,
+        );
+        if (visibleCount >= allTags.length) {
+            // 初次渲染：全部标签都在位，判断是否超过两行
+            if (rowTops.length <= 2) {
+                return;
+            }
+            const twoRowCount = chips.filter(
+                (el) => el.offsetTop <= rowTops[1],
+            ).length;
+            // 末位让给「更多」，保证加上它仍只有两行
+            setVisibleCount(Math.max(1, twoRowCount - 1));
+            return;
+        }
+        // 已折叠：若「更多」掉到第三行，再收起一个
+        const moreEl = moreRef.current;
+        if (moreEl && rowTops.length >= 2 && moreEl.offsetTop > rowTops[1]) {
+            setVisibleCount((prev) => Math.max(1, prev - 1));
+        }
+    }, [allTags, expanded, visibleCount, layoutNonce]);
+
+    // 窗口尺寸变化时重新计算折叠
+    useEffect(() => {
+        if (expanded) {
+            return;
+        }
+        const onResize = () => {
+            setVisibleCount(Number.MAX_SAFE_INTEGER);
+            setLayoutNonce((n) => n + 1);
+        };
+        window.addEventListener("resize", onResize);
+        return () => window.removeEventListener("resize", onResize);
+    }, [expanded]);
+
     return (
         <>
             <div className="section-title" style={{ paddingBottom: 4 }}>
                 推荐歌单
             </div>
-            <div className="history-chips" style={{ paddingBottom: 8 }}>
-                {allTags.slice(0, 14).map((tag: any, idx: number) => (
+            <div ref={tagsRef} className="sheet-tags" style={{ paddingBottom: 8 }}>
+                {(expanded ? allTags : allTags.slice(0, visibleCount)).map((tag: any, idx: number) => (
                     <span
                         key={idx}
-                        className={`chip ${activeTag === tag ? "active" : ""}`}
+                        data-tag-chip
+                        className={`sheet-tag ${activeTag === tag ? "active" : ""}`}
                         onClick={() => setActiveTag(tag)}
                     >
                         {tag.title}
                     </span>
                 ))}
+                {!expanded && visibleCount < allTags.length && (
+                    <span
+                        ref={moreRef}
+                        className="sheet-tag-more"
+                        onClick={() => setExpanded(true)}
+                    >
+                        更多
+                        <IconChevronDown size={12} strokeWidth={2.4} />
+                    </span>
+                )}
+                {expanded && visibleCount < allTags.length && (
+                    <span
+                        className="sheet-tag-more open"
+                        onClick={() => setExpanded(false)}
+                    >
+                        收起
+                        <IconChevronDown size={12} strokeWidth={2.4} />
+                    </span>
+                )}
             </div>
             {error ? (
                 <div className="error-tip">{error}</div>
@@ -544,71 +616,3 @@ function TopListTab() {
     );
 }
 
-/** 汉堡抽屉 */
-function HomeDrawer({ onClose }: { onClose: () => void }) {
-    const [closing, setClosing] = useState(false);
-
-    // 先播放向左滑出的动画，再真正卸载
-    const requestClose = () => {
-        if (closing) {
-            return;
-        }
-        setClosing(true);
-        window.setTimeout(onClose, 200);
-    };
-
-    return (
-        <div
-            className={`drawer-mask ${closing ? "closing" : ""}`}
-            onClick={requestClose}
-        >
-            <div className="drawer" onClick={(e) => e.stopPropagation()}>
-                <div className="drawer-title">
-                    <span className="dot" />
-                    MusicFree
-                </div>
-                <div
-                    className="drawer-item"
-                    onClick={() => {
-                        requestClose();
-                        navigate("history");
-                    }}
-                >
-                    <span className="d-icon">
-                        <IconHistory size={20} />
-                    </span>
-                    播放历史
-                </div>
-                <div
-                    className="drawer-item"
-                    onClick={() => {
-                        requestClose();
-                        navigate("pluginManage");
-                    }}
-                >
-                    <span className="d-icon">
-                        <IconPuzzle size={20} />
-                    </span>
-                    插件管理
-                </div>
-                <div
-                    className="drawer-item"
-                    onClick={() => {
-                        requestClose();
-                        navigate("settings");
-                    }}
-                >
-                    <span className="d-icon">
-                        <IconSettings size={20} />
-                    </span>
-                    设置
-                </div>
-                <div className="drawer-footer">
-                    MusicFree 手机版 · 与 MusicFreeDesktop 数据互通
-                    <br />
-                    支持安装 MusicFree 音源插件
-                </div>
-            </div>
-        </div>
-    );
-}

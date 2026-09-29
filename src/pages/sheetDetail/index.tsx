@@ -1,5 +1,5 @@
 import { cssUrl } from "@/core/utils";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useCurrentRoute, goBack } from "@/core/router";
 import { tryPluginMethod } from "@/core/pluginUtils";
 import { pickSourcePlugins, useGlobalSource } from "@/core/mediaSource";
@@ -44,6 +44,10 @@ export default function SheetDetailPage() {
     const [loading, setLoading] = useState(true);
     const [loadingMore, setLoadingMore] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    // 吸顶顶栏：滚过 hero 后变实底并显示歌单名
+    const topbarRef = useRef<HTMLDivElement | null>(null);
+    const heroRef = useRef<HTMLDivElement | null>(null);
+    const [topSolid, setTopSolid] = useState(false);
 
     useEffect(() => {
         getPlugins().then(setPlugins);
@@ -119,6 +123,8 @@ export default function SheetDetailPage() {
     };
 
     const info = userSheet ?? remoteSheetInfo;
+    // 用户歌单没有独立封面字段，用第一首歌的封面兜底（与「我的音乐」列表一致）
+    const coverSrc = info?.artwork || musicList[0]?.artwork;
     const subtitle = useMemo(() => {
         if (userSheet) {
             return `共 ${userSheet.musicList.length} 首`;
@@ -150,75 +156,87 @@ export default function SheetDetailPage() {
     };
 
     return (
-        <div className="page" style={{ padding: 0 }}>
-            <div className="detail-hero">
+        <div
+            className="page"
+            style={{ padding: 0 }}
+            onScroll={(e) => {
+                const topbar = topbarRef.current;
+                const hero = heroRef.current;
+                if (!topbar || !hero) {
+                    return;
+                }
+                setTopSolid(
+                    e.currentTarget.scrollTop >= hero.offsetHeight - topbar.offsetHeight,
+                );
+            }}
+        >
+            <div
+                className={`sub-header detail-topbar${topSolid ? " solid" : ""}`}
+                ref={topbarRef}
+            >
+                <button className="icon-btn" onClick={() => goBack()}>
+                    <IconBack size={22} />
+                </button>
+                <span className="sub-header-title">
+                    {topSolid ? (info?.title ?? "歌单") : "歌单"}
+                </span>
+                {!!userSheetId && (
+                    <button
+                        className="icon-btn"
+                        onClick={() => {
+                            if (!userSheet) {
+                                return;
+                            }
+                            if (userSheet.id === LIKES_SHEET_ID) {
+                                showToast("「我喜欢的音乐」是默认歌单");
+                                return;
+                            }
+                            openMusicActions({
+                                musicItem: { id: userSheet.id, platform: "__sheet__" } as any,
+                                title: userSheet.title,
+                                subtitle: `${userSheet.musicList.length} 首歌曲`,
+                                actions: [
+                                    {
+                                        label: "重命名歌单",
+                                        onClick: () => {
+                                            openPrompt({
+                                                title: "重命名歌单",
+                                                defaultValue: userSheet.title,
+                                                confirmText: "保存",
+                                                onConfirm: (value) => {
+                                                    if (value.trim()) {
+                                                        renameSheet(userSheet.id, value.trim());
+                                                    }
+                                                },
+                                            });
+                                        },
+                                    },
+                                    {
+                                        label: "删除歌单",
+                                        danger: true,
+                                        onClick: () => {
+                                            deleteSheet(userSheet.id);
+                                            showToast(`已删除「${userSheet.title}」`);
+                                            goBack();
+                                        },
+                                    },
+                                ],
+                            });
+                        }}
+                    >
+                        <IconMore size={20} />
+                    </button>
+                )}
+            </div>
+            <div className="detail-hero" ref={heroRef}>
                 <div
                     className="detail-hero-bg"
                     style={{
-                        backgroundImage: cssUrl(info?.artwork),
+                        backgroundImage: cssUrl(coverSrc),
                     }}
                 />
-                <div className="sub-header" style={{ background: "transparent" }}>
-                    <button className="icon-btn" style={{ color: "#fff" }} onClick={() => goBack()}>
-                        <IconBack size={22} />
-                    </button>
-                    <span className="sub-header-title" style={{ color: "#fff" }}>
-                        歌单
-                    </span>
-                    {!!userSheetId && (
-                        <button
-                            className="icon-btn"
-                            style={{ color: "#fff" }}
-                            onClick={() => {
-                                if (!userSheet) {
-                                    return;
-                                }
-                                if (userSheet.id === LIKES_SHEET_ID) {
-                                    showToast("「我喜欢的音乐」是默认歌单");
-                                    return;
-                                }
-                                openMusicActions({
-                                    musicItem: { id: userSheet.id, platform: "__sheet__" } as any,
-                                    title: userSheet.title,
-                                    subtitle: `${userSheet.musicList.length} 首歌曲`,
-                                    actions: [
-                                        {
-                                            label: "重命名歌单",
-                                            onClick: () => {
-                                                openPrompt({
-                                                    title: "重命名歌单",
-                                                    defaultValue: userSheet.title,
-                                                    confirmText: "保存",
-                                                    onConfirm: (value) => {
-                                                        if (value.trim()) {
-                                                            renameSheet(
-                                                                userSheet.id,
-                                                                value.trim(),
-                                                            );
-                                                        }
-                                                    },
-                                                });
-                                            },
-                                        },
-                                        {
-                                            label: "删除歌单",
-                                            danger: true,
-                                            onClick: () => {
-                                                deleteSheet(userSheet.id);
-                                                showToast(`已删除「${userSheet.title}」`);
-                                                goBack();
-                                            },
-                                        },
-                                    ],
-                                });
-                            }}
-                        >
-                            <IconMore size={20} />
-                        </button>
-                    )}
-                </div>
                 <div className="detail-hero-content">
-                    <Cover src={info?.artwork} size={116} radius={12} fallbackSize={44} />
+                    <Cover src={coverSrc} size={116} radius={12} fallbackSize={44} />
                     <div style={{ flex: 1, minWidth: 0 }}>
                         <div className="detail-hero-title">{info?.title ?? "加载中…"}</div>
                         <div className="detail-hero-meta">{subtitle}</div>

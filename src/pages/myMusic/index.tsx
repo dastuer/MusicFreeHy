@@ -9,34 +9,22 @@ import {
 } from "@/core/musicSheet";
 import { getMusicHistory } from "@/core/musicHistory";
 import { navigate } from "@/core/router";
-import {
-    openPrompt,
-    openMusicActions,
-    openSourceSelect,
-    showToast,
-} from "@/core/uiAtoms";
-import {
-    useGlobalSource,
-    useUsablePlugins,
-    useDefaultPluginHash,
-    getSourceDisplayName,
-} from "@/core/mediaSource";
+import { openPrompt, openMusicActions, openDrawer, showToast } from "@/core/uiAtoms";
 import Cover from "@/components/base/Cover";
 import {
     IconPlus,
     IconMore,
+    IconMenu,
     IconHistory,
-    IconPuzzle,
-    IconSettings,
     IconHeart,
     IconListMusic,
     IconChevronRight,
     IconPlay,
-    IconDisc,
+    IconSearch,
 } from "@/components/base/Icons";
 import { TrackPlayerSingleton } from "@/core/trackPlayer";
 
-/** 我的页：喜欢的音乐 / 我的歌单 / 历史 / 音源选择 / 插件 / 设置 */
+/** 我的页：我的歌单（含我喜欢的音乐）/ 播放历史 / 设置；音源、插件等低频入口收进左上角侧边栏 */
 export default function MyMusicPage() {
     const sheetsVersion = useAtomValue(sheetsVersionAtom);
     void sheetsVersion;
@@ -44,9 +32,6 @@ export default function MyMusicPage() {
     const likesSheet = sheets.find((it) => it.id === LIKES_SHEET_ID);
     const userSheets = sheets.filter((it) => it.id !== LIKES_SHEET_ID);
     const historyCount = getMusicHistory().length;
-    const sourceHash = useGlobalSource();
-    const defaultHash = useDefaultPluginHash();
-    const usablePlugins = useUsablePlugins();
 
     const onCreateSheet = () => {
         openPrompt({
@@ -67,33 +52,14 @@ export default function MyMusicPage() {
 
     return (
         <div className="page">
-            {/* 我喜欢的音乐 */}
-            <div
-                className="mine-likes"
-                onClick={() => navigate("sheetDetail", { userSheetId: LIKES_SHEET_ID })}
-            >
-                <div className="mine-likes-cover">
-                    <IconHeart size={26} filled />
-                </div>
-                <div style={{ flex: 1 }}>
-                    <div className="mine-likes-title">我喜欢的音乐</div>
-                    <div className="mine-likes-sub">{likesSheet?.musicList.length ?? 0} 首</div>
-                </div>
-                <button
-                    className="mini-btn mini-play-btn"
-                    style={{ borderColor: "var(--text-tertiary)" }}
-                    onClick={(e) => {
-                        e.stopPropagation();
-                        const list = likesSheet?.musicList ?? [];
-                        if (list.length) {
-                            TrackPlayerSingleton.playWithReplacePlayList(list[0], list, "my-likes");
-                        } else {
-                            showToast("喜欢的音乐还是空的");
-                        }
-                    }}
-                >
-                    <IconPlay size={18} />
+            <div className="mine-topbar">
+                <button className="icon-btn" onClick={() => openDrawer()}>
+                    <IconMenu size={22} />
                 </button>
+                <div className="mine-search" onClick={() => navigate("search")}>
+                    <IconSearch size={16} />
+                    <span>搜索音乐</span>
+                </div>
             </div>
 
             <div className="mine-list">
@@ -107,40 +73,10 @@ export default function MyMusicPage() {
                         <IconChevronRight size={18} />
                     </span>
                 </div>
-                <div className="mine-row" onClick={openSourceSelect}>
-                    <span className="m-icon">
-                        <IconDisc size={21} />
-                    </span>
-                    <span className="mine-row-label">音源选择</span>
-                    <span className="mine-row-extra">
-                        {getSourceDisplayName(usablePlugins, sourceHash, defaultHash)}
-                    </span>
-                    <span className="chevron">
-                        <IconChevronRight size={18} />
-                    </span>
-                </div>
-                <div className="mine-row" onClick={() => navigate("pluginManage")}>
-                    <span className="m-icon">
-                        <IconPuzzle size={21} />
-                    </span>
-                    <span className="mine-row-label">插件管理</span>
-                    <span className="chevron">
-                        <IconChevronRight size={18} />
-                    </span>
-                </div>
-                <div className="mine-row" onClick={() => navigate("settings")}>
-                    <span className="m-icon">
-                        <IconSettings size={21} />
-                    </span>
-                    <span className="mine-row-label">设置</span>
-                    <span className="chevron">
-                        <IconChevronRight size={18} />
-                    </span>
-                </div>
             </div>
 
             <div className="section-title" style={{ paddingTop: 10 }}>
-                创建的歌单 ({userSheets.length})
+                我的歌单 ({sheets.length})
                 <span className="section-more" onClick={onCreateSheet}>
                     <IconPlus size={12} />
                     新建
@@ -148,6 +84,38 @@ export default function MyMusicPage() {
             </div>
 
             <div className="mine-list">
+                <div
+                    className="mine-sheet-row"
+                    onClick={() => navigate("sheetDetail", { userSheetId: LIKES_SHEET_ID })}
+                >
+                    <div className="mine-likes-cover">
+                        <IconHeart size={22} filled />
+                    </div>
+                    <div className="mine-sheet-info">
+                        <div className="mine-sheet-title">我喜欢的音乐</div>
+                        <div className="mine-sheet-sub">
+                            {likesSheet?.musicList.length ?? 0} 首
+                        </div>
+                    </div>
+                    <button
+                        className="icon-btn"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            const list = likesSheet?.musicList ?? [];
+                            if (list.length) {
+                                TrackPlayerSingleton.playWithReplacePlayList(
+                                    list[0],
+                                    list,
+                                    "my-likes",
+                                );
+                            } else {
+                                showToast("喜欢的音乐还是空的");
+                            }
+                        }}
+                    >
+                        <IconPlay size={18} />
+                    </button>
+                </div>
                 {userSheets.map((sheet) => (
                     <div
                         key={sheet.id}
@@ -163,7 +131,9 @@ export default function MyMusicPage() {
                         </Cover>
                         <div className="mine-sheet-info">
                             <div className="mine-sheet-title">{sheet.title}</div>
-                            <div className="mine-sheet-sub">{sheet.musicList?.length ?? 0} 首</div>
+                            <div className="mine-sheet-sub">
+                                {sheet.musicList?.length ?? 0} 首
+                            </div>
                         </div>
                         <button
                             className="icon-btn"
@@ -183,7 +153,10 @@ export default function MyMusicPage() {
                                                     confirmText: "保存",
                                                     onConfirm: (value) => {
                                                         if (value.trim()) {
-                                                            renameSheet(sheet.id, value.trim());
+                                                            renameSheet(
+                                                                sheet.id,
+                                                                value.trim(),
+                                                            );
                                                         }
                                                     },
                                                 });
@@ -219,18 +192,6 @@ export default function MyMusicPage() {
                         </button>
                     </div>
                 ))}
-                {!userSheets.length && (
-                    <div
-                        className="mine-row"
-                        style={{ color: "var(--text-tertiary)", fontSize: 13 }}
-                        onClick={onCreateSheet}
-                    >
-                        <span className="m-icon">
-                            <IconPlus size={19} />
-                        </span>
-                        新建歌单，把喜欢的歌归归类
-                    </div>
-                )}
             </div>
         </div>
     );

@@ -11,7 +11,7 @@ import {
     type ResumeMode,
     type IResumeSummary,
 } from "@/core/backup";
-import { showToast } from "@/core/uiAtoms";
+import { showToast, openSingleSelect } from "@/core/uiAtoms";
 
 /** 备份与恢复二级页：本地导出 / 恢复 / 恢复模式（与 MusicFreeDesktop 互通） */
 export default function SettingsBackupPage() {
@@ -19,6 +19,22 @@ export default function SettingsBackupPage() {
     const [counts, setCounts] = useState("");
     const [resumeSummary, setResumeSummary] = useState("");
     const fileRef = useRef<HTMLInputElement | null>(null);
+
+    const pickResumeMode = () =>
+        openSingleSelect({
+            title: "恢复模式",
+            subtitle: "恢复备份时如何处理本机已有数据",
+            options: RESUME_MODE_OPTIONS.map((m) => ({
+                value: m.value,
+                label: m.label,
+                desc: m.desc,
+            })),
+            value: resumeMode,
+            onSelect: (v) => {
+                setResumeModeState(v as ResumeMode);
+                setResumeMode(v as ResumeMode);
+            },
+        });
 
     const doExport = async () => {
         const res = await exportBackupToLocal();
@@ -78,24 +94,17 @@ export default function SettingsBackupPage() {
 
             <div className="settings-group">
                 <div className="settings-group-title">恢复模式</div>
-                <div className="settings-row">
-                    <div className="seg" style={{ flex: 1, justifyContent: "space-between" }}>
-                        {RESUME_MODE_OPTIONS.map((m) => (
-                            <span
-                                key={m.value}
-                                className={`seg-item ${resumeMode === m.value ? "active" : ""}`}
-                                onClick={() => {
-                                    setResumeModeState(m.value);
-                                    setResumeMode(m.value);
-                                }}
-                            >
-                                {m.label}
-                            </span>
-                        ))}
-                    </div>
-                </div>
-                <div className="settings-tip" style={{ padding: "2px 14px 12px" }}>
-                    {RESUME_MODE_OPTIONS.find((m) => m.value === resumeMode)?.desc}
+                <div className="settings-row" onClick={pickResumeMode}>
+                    <span className="settings-row-label">
+                        恢复时如何处理本机数据
+                        <div className="settings-row-desc">
+                            {RESUME_MODE_OPTIONS.find((m) => m.value === resumeMode)?.desc}
+                        </div>
+                    </span>
+                    <span className="settings-value">
+                        {RESUME_MODE_OPTIONS.find((m) => m.value === resumeMode)?.label}
+                    </span>
+                    <span className="settings-value">›</span>
                 </div>
                 {counts && (
                     <div className="settings-tip" style={{ padding: "0 14px 12px" }}>

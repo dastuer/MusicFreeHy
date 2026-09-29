@@ -38,7 +38,7 @@
             return { musicList: songs, isEnd: true };
         },
         async getRecommendSheetTags() {
-            return { pinned: [], data: [{ title: "全部", data: [{ title: "华语", id: "cn" }, { title: "欧美", id: "us" }] }] };
+            return { pinned: [], data: [{ title: "全部", data: [{ title: "华语", id: "cn" }, { title: "欧美", id: "us" }, { title: "日韩", id: "jp" }, { title: "民谣", id: "fy" }, { title: "电子", id: "dz" }, { title: "摇滚", id: "yg" }, { title: "古风", id: "gf" }, { title: "爵士", id: "js" }, { title: "说唱", id: "sc" }, { title: "轻音乐", id: "qyy" }, { title: "影视原声", id: "ys" }, { title: "经典老歌", id: "jd" }, { title: "氛围", id: "fw" }, { title: "二次元", id: "ecy" }, { title: "运动", id: "yd" }, { title: "睡前", id: "sq" }] }] };
         },
         async getRecommendSheetsByTag(tag, page) {
             if (page > 1) { return { isEnd: true, data: [] }; }
