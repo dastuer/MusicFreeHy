@@ -71,19 +71,62 @@ function qualitySwitchToast(res: IQualitySwitchResult, requested: IMusic.IQualit
 export default function NowPlaying() {
     const open = useAtomValue(nowPlayingOpenAtom);
     const setNowPlayingOpen = useSetAtom(nowPlayingOpenAtom);
+    // visible 期间包含退出动画：open 变 false 后先播 np-out（下滑渐隐），
+    // 动画结束回调里才真正卸载，否则退场动画没有播放时机。
+    const [visible, setVisible] = useState(open);
+    const [leaving, setLeaving] = useState(false);
+    const leaveTimerRef = useRef<number | null>(null);
 
     // 系统返回（Android 返回键 / iOS 侧滑）先收起本页，而不是退出应用。
     // 注册放在常驻的外层组件里：内层是 open 时才挂载的，开发模式 StrictMode
     // 会对挂载 effect 跑两遍，历史压入/回退就会错位。
     useBackLayer(open, "nowplaying", () => setNowPlayingOpen(false));
 
-    if (!open) {
+    useEffect(() => {
+        if (open) {
+            setLeaving(false);
+            setVisible(true);
+        } else {
+            setLeaving(true);
+            // 兜底：页面不可见等场景下 animationend 可能不派发，超时后强制卸载
+            if (leaveTimerRef.current !== null) {
+                clearTimeout(leaveTimerRef.current);
+            }
+            leaveTimerRef.current = window.setTimeout(() => {
+                leaveTimerRef.current = null;
+                setVisible(false);
+                setLeaving(false);
+            }, 450);
+        }
+        return () => {
+            if (leaveTimerRef.current !== null) {
+                clearTimeout(leaveTimerRef.current);
+                leaveTimerRef.current = null;
+            }
+        };
+    }, [open]);
+
+    if (!visible) {
         return null;
     }
-    return <NowPlayingInner />;
+    return (
+        <NowPlayingInner
+            leaving={leaving}
+            onLeaveEnd={() => {
+                setVisible(false);
+                setLeaving(false);
+            }}
+        />
+    );
 }
 
-function NowPlayingInner() {
+function NowPlayingInner({
+    leaving,
+    onLeaveEnd,
+}: {
+    leaving: boolean;
+    onLeaveEnd: () => void;
+}) {
     const setNowPlayingOpen = useSetAtom(nowPlayingOpenAtom);
     const setQueueOpen = useSetAtom(queueOpenAtom);
     const currentMusic = useCurrentMusic();
@@ -130,20 +173,187 @@ function NowPlayingInner() {
     }, [lyric, position, showLyrics]);
 
     const lyricBoxRef = useRef<HTMLDivElement | null>(null);
-    useEffect(() => {
-        if (activeLyricIndex < 0 || !lyricBoxRef.current) {
+
+    // 用户手动滑动歌词期间暂停自动跟随，停止滑动一段时间后恢复，避免和用户抢焦点。
+    // 停止滑动后，会把目标行平滑滚到激活位置（与自动跟随一致），并在该行内嵌展示 时间 + 播放按钮。
+    const [isSeekingLyric, setIsSeekingLyric] = useState(false);
+    const [seekTargetIndex, setSeekTargetIndex] = useState(-1);
+    const [seekScrollTick, setSeekScrollTick] = useState(0);
+    const isSeekingRef = useRef(false);
+    const touchActiveRef = useRef(false);
+    const settleTimerRef = useRef<number | null>(null);
+    const resumeTimerRef = useRef<number | null>(null);
+
+    useEffect(
+        () => () => {
+            if (resumeTimerRef.current !== null) {
+                clearTimeout(resumeTimerRef.current);
+            }
+            if (settleTimerRef.current !== null) {
+                clearTimeout(settleTimerRef.current);
+            }
+        },
+        [],
+    );
+
+    /** 单行歌词高度 */
+    const lyricLineHeight = (box: HTMLDivElement) => {
+        const first = box.querySelector<HTMLElement>("[data-lrc-idx]");
+        return first?.offsetHeight ?? 41;
+    };
+
+    /** 计算当前停在激活位置（中线偏下两行，与自动跟随一致）的那一行 */
+    const calcFocusLineIndex = () => {
+        const box = lyricBoxRef.current;
+        if (!box || !lyric.length) {
+            return -1;
+        }
+        const focusY = box.scrollTop + box.clientHeight / 2 + lyricLineHeight(box) * 2;
+        let idx = 0;
+        box.querySelectorAll<HTMLElement>("[data-lrc-idx]").forEach((el) => {
+            if (el.offsetTop <= focusY) {
+                idx = Number(el.dataset.lrcIdx);
+            }
+        });
+        return idx;
+    };
+
+    const clearSeekTimers = () => {
+        if (resumeTimerRef.current !== null) {
+            clearTimeout(resumeTimerRef.current);
+            resumeTimerRef.current = null;
+        }
+        if (settleTimerRef.current !== null) {
+            clearTimeout(settleTimerRef.current);
+            settleTimerRef.current = null;
+        }
+    };
+
+    const endSeek = () => {
+        clearSeekTimers();
+        isSeekingRef.current = false;
+        setIsSeekingLyric(false);
+        setSeekTargetIndex(-1);
+    };
+
+    const beginSeek = () => {
+        clearSeekTimers();
+        isSeekingRef.current = true;
+        setIsSeekingLyric(true);
+        setSeekTargetIndex(calcFocusLineIndex());
+    };
+
+    /** 3s 内没有新的滑动就恢复自动跟随 */
+    const scheduleResume = () => {
+        if (resumeTimerRef.current !== null) {
+            clearTimeout(resumeTimerRef.current);
+        }
+        resumeTimerRef.current = window.setTimeout(() => {
+            resumeTimerRef.current = null;
+            endSeek();
+        }, 3000);
+    };
+
+    /** 滑动彻底停止（惯性滚动结束）后：把目标行滚到激活位置，再等待恢复自动跟随 */
+    const startSettleCountdown = () => {
+        if (settleTimerRef.current !== null) {
+            clearTimeout(settleTimerRef.current);
+        }
+        settleTimerRef.current = window.setTimeout(() => {
+            settleTimerRef.current = null;
+            if (!isSeekingRef.current || !lyricBoxRef.current) {
+                return;
+            }
+            const idx = calcFocusLineIndex();
+            if (idx >= 0) {
+                setSeekTargetIndex(idx);
+                setSeekScrollTick((t) => t + 1);
+            }
+            scheduleResume();
+        }, 200);
+    };
+
+    const onLyricTouchStart = () => {
+        beginSeek();
+        touchActiveRef.current = true;
+    };
+
+    const onLyricTouchEnd = () => {
+        touchActiveRef.current = false;
+        startSettleCountdown();
+    };
+
+    const onLyricWheel = () => {
+        beginSeek();
+        touchActiveRef.current = false;
+        startSettleCountdown();
+    };
+
+    const onLyricScroll = () => {
+        if (!isSeekingRef.current) {
             return;
         }
-        const el = lyricBoxRef.current.querySelector(
-            `[data-lrc-idx="${activeLyricIndex}"]`,
-        ) as HTMLElement | null;
+        setSeekTargetIndex(calcFocusLineIndex());
+        if (touchActiveRef.current) {
+            // 手指还按着，不判定停止
+            if (settleTimerRef.current !== null) {
+                clearTimeout(settleTimerRef.current);
+                settleTimerRef.current = null;
+            }
+        } else {
+            startSettleCountdown();
+        }
+    };
+
+    const playSeekTarget = () => {
+        const target = lyric[seekTargetIndex];
+        if (target) {
+            TrackPlayerSingleton.seekTo(target.time);
+        }
+        endSeek();
+    };
+
+    // 停止滑动后把目标行平滑滚到激活位置（与自动跟随一致；依赖 tick 触发，拖动过程中不打断用户）
+    useEffect(() => {
+        if (!seekScrollTick || !isSeekingLyric || seekTargetIndex < 0) {
+            return;
+        }
+        const box = lyricBoxRef.current;
+        if (!box) {
+            return;
+        }
+        const el = box.querySelector<HTMLElement>(`[data-lrc-idx="${seekTargetIndex}"]`);
         if (el) {
-            lyricBoxRef.current.scrollTo({
-                top: el.offsetTop - lyricBoxRef.current.clientHeight / 2 + el.clientHeight / 2,
+            box.scrollTo({
+                top:
+                    el.offsetTop -
+                    box.clientHeight / 2 +
+                    el.clientHeight / 2 -
+                    lyricLineHeight(box) * 2,
                 behavior: "smooth",
             });
         }
-    }, [activeLyricIndex]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [seekScrollTick]);
+
+    // 自动跟随：激活行落在中线下方两行；用户滑动期间跳过
+    useEffect(() => {
+        const box = lyricBoxRef.current;
+        if (isSeekingLyric || activeLyricIndex < 0 || !box) {
+            return;
+        }
+        const el = box.querySelector<HTMLElement>(`[data-lrc-idx="${activeLyricIndex}"]`);
+        if (el) {
+            box.scrollTo({
+                top:
+                    el.offsetTop -
+                    box.clientHeight / 2 +
+                    el.clientHeight / 2 -
+                    lyricLineHeight(box) * 2,
+                behavior: "smooth",
+            });
+        }
+    }, [activeLyricIndex, isSeekingLyric]);
 
     if (!currentMusic) {
         return null;
@@ -254,7 +464,15 @@ function NowPlayingInner() {
         repeatMode === "queue" ? IconShuffle : repeatMode === "single" ? IconRepeatSingle : IconRepeatOff;
 
     return (
-        <div className="np-root">
+        <div
+            className={`np-root${leaving ? " np-out" : ""}`}
+            onAnimationEnd={(e) => {
+                // animationend 会从子元素冒泡（如旋转中的 Spinner），只认根节点自己的 np-out
+                if (leaving && e.target === e.currentTarget && e.animationName === "np-out") {
+                    onLeaveEnd();
+                }
+            }}
+        >
             <div
                 className="np-bg"
                 style={{ backgroundImage: cssUrl(currentMusic.artwork) }}
@@ -272,20 +490,58 @@ function NowPlayingInner() {
                 </div>
 
                 {showLyrics ? (
-                    <div className="np-lyrics" ref={lyricBoxRef} onClick={() => setShowLyrics(false)}>
-                        {lyric.length ? (
-                            lyric.map((line, idx) => (
-                                <div
-                                    key={idx}
-                                    data-lrc-idx={idx}
-                                    className={`np-lyric-line ${idx === activeLyricIndex ? "active" : ""}`}
-                                >
-                                    {line.lrc}
-                                </div>
-                            ))
-                        ) : (
-                            <div className="np-lyric-empty">暂无歌词</div>
-                        )}
+                    <div
+                        className="np-lyrics"
+                        ref={lyricBoxRef}
+                        onTouchStart={onLyricTouchStart}
+                        onTouchEnd={onLyricTouchEnd}
+                        onWheel={onLyricWheel}
+                        onScroll={onLyricScroll}
+                        onClick={() => setShowLyrics(false)}
+                    >
+                        {lyric.length
+                            ? lyric.map((line, idx) => {
+                                  if (isSeekingLyric && idx === seekTargetIndex) {
+                                      return (
+                                          <div
+                                              key={idx}
+                                              data-lrc-idx={idx}
+                                              className="np-lyric-line np-lyric-seekline"
+                                              onClick={(e) => e.stopPropagation()}
+                                          >
+                                              <span className="np-lyric-seek-time">
+                                                  {formatSeconds(line.time)}
+                                              </span>
+                                              <div className="np-lyric-seek-text">
+                                                  {line.lrc}
+                                              </div>
+                                              <button
+                                                  className="np-lyric-seek-play"
+                                                  onClick={playSeekTarget}
+                                              >
+                                                  <IconPlay size={20} />
+                                              </button>
+                                          </div>
+                                      );
+                                  }
+                                  return (
+                                      <div
+                                          key={idx}
+                                          data-lrc-idx={idx}
+                                          className={`np-lyric-line ${
+                                              idx ===
+                                              (isSeekingLyric ? seekTargetIndex : activeLyricIndex)
+                                                  ? "active"
+                                                  : ""
+                                          }`}
+                                      >
+                                          {line.lrc}
+                                      </div>
+                                  );
+                              })
+                            : (
+                                  <div className="np-lyric-empty">暂无歌词</div>
+                              )}
                     </div>
                 ) : (
                     <div
@@ -354,7 +610,13 @@ function NowPlayingInner() {
                         className="np-ctrl np-play"
                         onClick={() => TrackPlayerSingleton.togglePlay()}
                     >
-                        {playing ? <IconPause size={30} /> : <IconPlay size={30} />}
+                        {musicState === "loading" ? (
+                            <Spinner size={30} strokeWidth={2.6} />
+                        ) : playing ? (
+                            <IconPause size={30} />
+                        ) : (
+                            <IconPlay size={30} />
+                        )}
                     </button>
                     <button className="np-ctrl" onClick={() => TrackPlayerSingleton.skipToNext()}>
                         <IconNext size={30} />

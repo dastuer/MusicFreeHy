@@ -4,6 +4,7 @@ import {
     usePlayList,
     useCurrentMusic,
     useRepeatMode,
+    useMusicState,
 } from "@/core/trackPlayer";
 import { queueOpenAtom } from "@/core/uiAtoms";
 import { useBackLayer } from "@/core/systemBack";
@@ -15,6 +16,7 @@ import {
     IconTrash,
     IconClose,
 } from "@/components/base/Icons";
+import Spinner from "@/components/base/Spinner";
 
 const MODE_LABEL = { off: "顺序播放", queue: "列表循环", single: "单曲循环" } as const;
 
@@ -24,6 +26,7 @@ export default function PlayQueuePanel() {
     const playList = usePlayList();
     const currentMusic = useCurrentMusic();
     const repeatMode = useRepeatMode();
+    const musicState = useMusicState();
 
     // 系统返回先收起抽屉
     useBackLayer(open, "play-queue", () => setOpen(false));
@@ -70,7 +73,13 @@ export default function PlayQueuePanel() {
                                 onClick={() => TrackPlayerSingleton.play(item)}
                             >
                                 <div className="music-row-index">
-                                    {isCurrent ? <IconPlaying size={14} /> : <span className="row-num">{idx + 1}</span>}
+                                    {isCurrent && musicState === "loading" ? (
+                                        <Spinner size={14} strokeWidth={2.2} />
+                                    ) : isCurrent ? (
+                                        <IconPlaying size={14} />
+                                    ) : (
+                                        <span className="row-num">{idx + 1}</span>
+                                    )}
                                 </div>
                                 <div className="queue-row-info">
                                     <div className="queue-row-title">{item.title}</div>

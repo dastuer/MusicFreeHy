@@ -5,10 +5,12 @@ import { pickSourcePlugins, useGlobalSource } from "@/core/mediaSource";
 import { getPlugins } from "@/core/ipc";
 import { TrackPlayerSingleton } from "@/core/trackPlayer";
 import MusicList from "@/components/base/MusicList";
+import AutoLoadMore from "@/components/base/AutoLoadMore";
 import MusicListSkeleton from "@/components/base/MusicListSkeleton";
 import Spinner from "@/components/base/Spinner";
 import Cover from "@/components/base/Cover";
-import { IconBack, IconPlay } from "@/components/base/Icons";
+import { IconBack } from "@/components/base/Icons";
+import PlayAllBar from "@/components/base/PlayAllBar";
 import { showToast } from "@/core/uiAtoms";
 import { formatPlayCount , cssUrl } from "@/core/utils";
 import { IconHeadphone } from "@/components/base/Icons";
@@ -178,9 +180,9 @@ export default function ArtistDetailPage() {
             </div>
 
             {worksType === "music" && (
-                <button
-                    className="detail-playall"
-                    onClick={() => {
+                <PlayAllBar
+                    count={musicList.length}
+                    onPlayAll={() => {
                         if (musicList.length) {
                             TrackPlayerSingleton.playWithReplacePlayList(
                                 musicList[0],
@@ -191,11 +193,7 @@ export default function ArtistDetailPage() {
                             showToast("列表是空的");
                         }
                     }}
-                >
-                    <IconPlay size={18} />
-                    播放全部
-                    <span className="pa-sub">({musicList.length})</span>
-                </button>
+                />
             )}
 
             {loading ? (
@@ -247,16 +245,15 @@ export default function ArtistDetailPage() {
                             {!albums.length && <div className="empty-tip">没有找到专辑</div>}
                         </div>
                     )}
-                    {!isEnd && (musicList.length > 0 || albums.length > 0) && (
-                        <button
-                            className="settings-btn"
-                            style={{ margin: "12px auto", display: "block" }}
-                            disabled={loadingMore}
-                            onClick={loadMore}
-                        >
-                            {loadingMore ? "加载中…" : "加载更多"}
-                        </button>
-                    )}
+                    <AutoLoadMore
+                        onLoadMore={loadMore}
+                        loadingMore={loadingMore}
+                        hasMore={!isEnd && (musicList.length > 0 || albums.length > 0)}
+                        itemsLength={worksType === "music" ? musicList.length : albums.length}
+                        showEndTip={
+                            (worksType === "music" ? musicList.length : albums.length) > 6
+                        }
+                    />
                 </>
             )}
         </div>

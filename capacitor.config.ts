@@ -2,7 +2,7 @@ import type { CapacitorConfig } from "@capacitor/cli";
 
 const config: CapacitorConfig = {
     appId: "com.huah.musicfree.hy",
-    appName: "MusicFree",
+    appName: "MusicFreeHy",
     webDir: "dist",
     // Android WebView 用 https scheme，媒体直链与 Cookie 行为和 iOS 一致
     server: {

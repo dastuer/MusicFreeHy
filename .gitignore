@@ -22,3 +22,8 @@ assets/*.png.bak
 # 签名密钥（含密码，勿入库）
 android/keystore.properties
 android/app/musicfree-hy.keystore
+
+# AI / 调试工具产物
+.playwright-cli/
+.trae/
+.workbuddy/

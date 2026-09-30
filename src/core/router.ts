@@ -17,11 +17,14 @@ export type RoutePath =
     | "topListDetail"
     | "myMusic"
     | "history"
+    | "downloads"
+    | "localMusic"
     | "pluginManage"
     | "settings"
     | "settingsBackup"
     | "settingsWebdav"
-    | "settingsProxy";
+    | "settingsProxy"
+    | "folderSelect";
 
 export type TabId = "discover" | "mine";
 
@@ -56,6 +59,7 @@ const store = getDefaultStore();
 
 /** 导航到新页面（压栈，截断前进历史） */
 export function navigate(path: RoutePath, params: Record<string, any> = {}) {
+    pendingPush = true;
     const tab = store.get(activeTabAtom);
     const stacks = store.get(tabStacksAtom);
     const cur = stacks[tab];
@@ -69,6 +73,7 @@ export function navigate(path: RoutePath, params: Record<string, any> = {}) {
 
 /** 替换当前页面 */
 export function replaceCurrent(path: RoutePath, params: Record<string, any> = {}) {
+    pendingPush = false;
     const tab = store.get(activeTabAtom);
     const stacks = store.get(tabStacksAtom);
     const cur = stacks[tab];
@@ -79,6 +84,7 @@ export function replaceCurrent(path: RoutePath, params: Record<string, any> = {}
 
 /** 返回上一页；已在栈底时返回 false */
 export function goBack(): boolean {
+    pendingPush = false;
     const tab = store.get(activeTabAtom);
     const stacks = store.get(tabStacksAtom);
     const cur = stacks[tab];
@@ -90,7 +96,22 @@ export function goBack(): boolean {
 }
 
 export function switchTab(tab: TabId) {
+    pendingPush = false;
     store.set(activeTabAtom, tab);
+}
+
+/**
+ * 一次性标记：刚发生 navigate 压栈且未被消费；goBack / switchTab / replaceCurrent
+ * 都会立即作废它。供搜索页等区分「从导航入口新进」（需要自动聚焦抬键盘）与
+ * 「返回 / 切 Tab 回到本页」（不打扰用户）。
+ */
+let pendingPush = false;
+
+/** 读取并清除压栈标记，在目标页首次挂载时调用一次 */
+export function consumePendingPush(): boolean {
+    const pushed = pendingPush;
+    pendingPush = false;
+    return pushed;
 }
 
 export function useCurrentRoute(): IRoute {

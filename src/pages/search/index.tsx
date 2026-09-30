@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { useCurrentRoute, goBack, navigate } from "@/core/router";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCurrentRoute, goBack, navigate, consumePendingPush } from "@/core/router";
 import { getPlugins, pluginCall, type SerializedPlugin } from "@/core/ipc";
 import {
     pickSourcePlugins,
@@ -15,6 +15,7 @@ import {
     clearSearchHistory,
 } from "@/core/searchHistory";
 import MusicList from "@/components/base/MusicList";
+import AutoLoadMore from "@/components/base/AutoLoadMore";
 import MusicListSkeleton from "@/components/base/MusicListSkeleton";
 import Spinner from "@/components/base/Spinner";
 import Cover from "@/components/base/Cover";
@@ -61,6 +62,46 @@ export default function SearchPage() {
 
     useEffect(() => {
         getPlugins().then(setPlugins);
+    }, []);
+
+    // 音源 chips 横向滚动容器：选中项自动滚动到可见区中间
+    const chipsRef = useRef<HTMLDivElement | null>(null);
+    const chipEls = useRef(new Map<string, HTMLElement>());
+    const centerChip = useCallback((hash: string, smooth = true) => {
+        const container = chipsRef.current;
+        const el = chipEls.current.get(hash);
+        if (!container || !el) {
+            return;
+        }
+        const containerRect = container.getBoundingClientRect();
+        const elRect = el.getBoundingClientRect();
+        const target =
+            container.scrollLeft +
+            (elRect.left + elRect.width / 2 - (containerRect.left + containerRect.width / 2));
+        container.scrollTo({
+            left: Math.max(0, Math.min(target, container.scrollWidth - container.clientWidth)),
+            behavior: smooth ? "smooth" : "auto",
+        });
+    }, []);
+    // 首次定位（进页 / 插件加载完）不播动画，之后音源变化平滑滚动
+    const centeredOnce = useRef(false);
+    useEffect(() => {
+        if (!chipEls.current.get(sourceHash)) {
+            return;
+        }
+        centerChip(sourceHash, centeredOnce.current);
+        centeredOnce.current = true;
+    }, [sourceHash, plugins, centerChip]);
+
+    const inputRef = useRef<HTMLInputElement | null>(null);
+    // 从导航入口新进本页时自动聚焦抬键盘；返回 / 切 Tab 回来、或带关键词进入时不打扰。
+    // 聚焦必须留在点击事件的同步提交阶段（useLayoutEffect，仍是用户手势任务），
+    // iOS WKWebView / Android WebView 才会随之弹起软键盘
+    useLayoutEffect(() => {
+        if (!routeKeyword && consumePendingPush()) {
+            inputRef.current?.focus();
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     const doSearch = useCallback(
@@ -146,15 +187,7 @@ export default function SearchPage() {
         type === "music" ? musicList.length : type === "sheet" ? sheets.length : type === "album" ? albums.length : artists.length;
 
     return (
-        <div
-            className="page"
-            onScroll={(e) => {
-                const el = e.currentTarget;
-                if (el.scrollHeight - el.scrollTop - el.clientHeight < 400) {
-                    loadMore();
-                }
-            }}
-        >
+        <div className="page">
             <div className="search-bar">
                 <button className="icon-btn" onClick={() => goBack()}>
                     <IconBack size={22} />
@@ -162,6 +195,7 @@ export default function SearchPage() {
                 <div className="search-input-wrap">
                     <IconSearch size={16} />
                     <input
+                        ref={inputRef}
                         value={input}
                         placeholder="搜索歌曲、歌单、专辑、歌手"
                         onChange={(e) => setInput(e.target.value)}
@@ -188,10 +222,17 @@ export default function SearchPage() {
             </div>
 
             {/* 音源选择 chips：与全局音源联动 */}
-            <div className="search-chips">
+            <div className="search-chips" ref={chipsRef}>
                 <span
+                    ref={(el) => {
+                        if (el) chipEls.current.set(AUTO_SOURCE, el);
+                        else chipEls.current.delete(AUTO_SOURCE);
+                    }}
                     className={`chip ${sourceHash === AUTO_SOURCE ? "active" : ""}`}
-                    onClick={() => setGlobalSource(AUTO_SOURCE)}
+                    onClick={() => {
+                        setGlobalSource(AUTO_SOURCE);
+                        centerChip(AUTO_SOURCE);
+                    }}
                 >
                     {getDefaultPluginHash() ? "默认音源" : "自动"}
                 </span>
@@ -200,8 +241,15 @@ export default function SearchPage() {
                     .map((p) => (
                         <span
                             key={p.hash}
+                            ref={(el) => {
+                                if (el) chipEls.current.set(p.hash, el);
+                                else chipEls.current.delete(p.hash);
+                            }}
                             className={`chip ${sourceHash === p.hash ? "active" : ""}`}
-                            onClick={() => setGlobalSource(p.hash)}
+                            onClick={() => {
+                                setGlobalSource(p.hash);
+                                centerChip(p.hash);
+                            }}
                         >
                             {p.name}
                         </span>
@@ -262,7 +310,7 @@ export default function SearchPage() {
                     {error && <div className="error-tip">{error}</div>}
                     {loading ? (
                         type === "music" ? (
-                            <MusicListSkeleton showIndex={false} />
+                            <MusicListSkeleton showIndex />
                         ) : (
                             <div className="loading-tip loading-spin" style={{ paddingTop: 40 }}>
                                 <Spinner size={20} />
@@ -272,7 +320,7 @@ export default function SearchPage() {
                     ) : (
                         <>
                             {type === "music" && (
-                                <MusicList musicList={musicList} listId={`search:${keyword}`} showIndex={false} />
+                                <MusicList musicList={musicList} listId={`search:${keyword}`} showIndex />
                             )}
                             {type === "sheet" &&
                                 sheets.map((it) => (
@@ -328,10 +376,13 @@ export default function SearchPage() {
                             {!resultCount && !error && !loading && (
                                 <div className="empty-tip">没有找到相关内容</div>
                             )}
-                            {loadingMore && <div className="loading-tip">加载更多…</div>}
-                            {isEnd && resultCount > 6 && !loadingMore && (
-                                <div className="loading-tip">没有更多了</div>
-                            )}
+                            <AutoLoadMore
+                                onLoadMore={loadMore}
+                                loadingMore={loadingMore}
+                                hasMore={!isEnd && resultCount > 0}
+                                itemsLength={resultCount}
+                                showEndTip={resultCount > 6}
+                            />
                         </>
                     )}
                 </>

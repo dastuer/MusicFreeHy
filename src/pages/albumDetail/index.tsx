@@ -6,9 +6,11 @@ import { pickSourcePlugins, useGlobalSource } from "@/core/mediaSource";
 import { getPlugins } from "@/core/ipc";
 import { TrackPlayerSingleton } from "@/core/trackPlayer";
 import MusicList from "@/components/base/MusicList";
+import AutoLoadMore from "@/components/base/AutoLoadMore";
 import MusicListSkeleton from "@/components/base/MusicListSkeleton";
 import Cover from "@/components/base/Cover";
-import { IconBack, IconPlay } from "@/components/base/Icons";
+import { IconBack } from "@/components/base/Icons";
+import PlayAllBar from "@/components/base/PlayAllBar";
 import { showToast } from "@/core/uiAtoms";
 
 /** 专辑详情页：getAlbumInfo 分页加载 */
@@ -142,9 +144,9 @@ export default function AlbumDetailPage() {
                 </div>
             </div>
 
-            <button
-                className="detail-playall"
-                onClick={() => {
+            <PlayAllBar
+                count={musicList.length}
+                onPlayAll={() => {
                     if (musicList.length) {
                         TrackPlayerSingleton.playWithReplacePlayList(
                             musicList[0],
@@ -155,11 +157,7 @@ export default function AlbumDetailPage() {
                         showToast("列表是空的");
                     }
                 }}
-            >
-                <IconPlay size={18} />
-                播放全部
-                <span className="pa-sub">({musicList.length})</span>
-            </button>
+            />
 
             {loading ? (
                 <MusicListSkeleton showIndex={false} />
@@ -172,16 +170,13 @@ export default function AlbumDetailPage() {
                         listId={`album:${albumItem.platform}-${albumItem.id}`}
                         showIndex={false}
                     />
-                    {!isEnd && musicList.length > 0 && (
-                        <button
-                            className="settings-btn"
-                            style={{ margin: "12px auto", display: "block" }}
-                            disabled={loadingMore}
-                            onClick={loadMore}
-                        >
-                            {loadingMore ? "加载中…" : "加载更多"}
-                        </button>
-                    )}
+                    <AutoLoadMore
+                        onLoadMore={loadMore}
+                        loadingMore={loadingMore}
+                        hasMore={!isEnd && musicList.length > 0}
+                        itemsLength={musicList.length}
+                        showEndTip={musicList.length > 6}
+                    />
                 </>
             )}
         </div>

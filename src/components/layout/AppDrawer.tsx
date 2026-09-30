@@ -4,6 +4,7 @@ import { closeDrawer, drawerOpenAtom, openSourceSelect } from "@/core/uiAtoms";
 import { navigate } from "@/core/router";
 import { useBackLayer } from "@/core/systemBack";
 import { IconDisc, IconPuzzle, IconSettings } from "@/components/base/Icons";
+import logoUrl from "../../../assets/logo.png";
 
 /**
  * 全局侧边栏抽屉：发现页 / 我的页左上角汉堡入口。
@@ -39,8 +40,7 @@ export default function AppDrawer() {
         >
             <div className="drawer" onClick={(e) => e.stopPropagation()}>
                 <div className="drawer-title">
-                    <span className="dot" />
-                    MusicFree
+                    <img className="drawer-logo" src={logoUrl} alt="MusicFreeHy" />
                 </div>
                 <div
                     className="drawer-item"
@@ -78,11 +78,6 @@ export default function AppDrawer() {
                         <IconSettings size={20} />
                     </span>
                     设置
-                </div>
-                <div className="drawer-footer">
-                    MusicFree 手机版 · 与 MusicFreeDesktop 数据互通
-                    <br />
-                    支持安装 MusicFree 音源插件
                 </div>
             </div>
         </div>

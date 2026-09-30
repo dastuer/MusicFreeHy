@@ -6,9 +6,13 @@ import { pickSourcePlugins, useGlobalSource } from "@/core/mediaSource";
 import { getPlugins } from "@/core/ipc";
 import { TrackPlayerSingleton } from "@/core/trackPlayer";
 import MusicList from "@/components/base/MusicList";
+import AutoLoadMore from "@/components/base/AutoLoadMore";
 import MusicListSkeleton from "@/components/base/MusicListSkeleton";
 import Cover from "@/components/base/Cover";
-import { IconBack, IconPlay } from "@/components/base/Icons";
+import PlayAllBar from "@/components/base/PlayAllBar";
+import SelectActionsBar from "@/components/base/SelectActionsBar";
+import { useMusicMultiSelect } from "@/hooks/useMusicMultiSelect";
+import { IconBack } from "@/components/base/Icons";
 import { showToast } from "@/core/uiAtoms";
 
 /** 排行榜详情页：getTopListDetail 分页加载 */
@@ -90,9 +94,30 @@ export default function TopListDetailPage() {
         setLoadingMore(false);
     };
 
+    // 多选（下载 / 收藏）
+    const multi = useMusicMultiSelect(musicList);
+
+    // 切换榜单时退出多选态
+    useEffect(() => {
+        multi.exitSelect();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [topListItem]);
+
     if (!topListItem) {
         return <div className="empty-tip">榜单不存在</div>;
     }
+
+    const playAll = () => {
+        if (musicList.length) {
+            TrackPlayerSingleton.playWithReplacePlayList(
+                musicList[0],
+                musicList,
+                `toplist:${topListItem.platform}-${topListItem.id}`,
+            );
+        } else {
+            showToast("列表是空的");
+        }
+    };
 
     return (
         <div
@@ -138,24 +163,16 @@ export default function TopListDetailPage() {
                 </div>
             </div>
 
-            <button
-                className="detail-playall"
-                onClick={() => {
-                    if (musicList.length) {
-                        TrackPlayerSingleton.playWithReplacePlayList(
-                            musicList[0],
-                            musicList,
-                            `toplist:${topListItem.platform}-${topListItem.id}`,
-                        );
-                    } else {
-                        showToast("列表是空的");
-                    }
-                }}
-            >
-                <IconPlay size={18} />
-                播放全部
-                <span className="pa-sub">({musicList.length})</span>
-            </button>
+            <PlayAllBar
+                count={musicList.length}
+                onPlayAll={playAll}
+                selectMode={multi.selectMode}
+                selectedCount={multi.selected.length}
+                onEnterSelect={musicList.length ? multi.enterSelect : undefined}
+                onExitSelect={multi.exitSelect}
+                onSelectAll={multi.selectAll}
+                onDeselectAll={multi.deselectAll}
+            />
 
             {loading ? (
                 <MusicListSkeleton />
@@ -167,17 +184,25 @@ export default function TopListDetailPage() {
                         musicList={musicList}
                         listId={`toplist:${topListItem.platform}-${topListItem.id}`}
                         showIndex
+                        selectMode={multi.selectMode}
+                        selectedKeys={multi.selectedKeys}
+                        onToggleSelect={multi.toggleSelect}
                     />
-                    {!isEnd && musicList.length > 0 && (
-                        <button
-                            className="settings-btn"
-                            style={{ margin: "12px auto", display: "block" }}
-                            disabled={loadingMore}
-                            onClick={loadMore}
-                        >
-                            {loadingMore ? "加载中…" : "加载更多"}
-                        </button>
+                    {multi.selectMode && (
+                        <SelectActionsBar
+                            count={multi.selected.length}
+                            downloading={multi.downloading}
+                            onDownload={multi.startDownload}
+                            onCollect={multi.startCollect}
+                        />
                     )}
+                    <AutoLoadMore
+                        onLoadMore={loadMore}
+                        loadingMore={loadingMore}
+                        hasMore={!isEnd && musicList.length > 0}
+                        itemsLength={musicList.length}
+                        showEndTip={musicList.length > 6}
+                    />
                 </>
             )}
         </div>

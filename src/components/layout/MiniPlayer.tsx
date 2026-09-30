@@ -1,5 +1,6 @@
 import { useAtomValue, useSetAtom } from "jotai";
 import Cover from "@/components/base/Cover";
+import Spinner from "@/components/base/Spinner";
 import { IconPause, IconPlay, IconQueue } from "@/components/base/Icons";
 import {
     TrackPlayerSingleton,
@@ -19,6 +20,7 @@ export default function MiniPlayer() {
         return null;
     }
     const playing = musicState === "playing";
+    const coverSpinning = playing || musicState === "loading";
     const spinning = musicState !== "stopped";
 
     return (
@@ -31,7 +33,7 @@ export default function MiniPlayer() {
                     src={currentMusic.artwork}
                     size={44}
                     radius={22}
-                    className={playing ? "mini-spin" : ""}
+                    className={coverSpinning ? "mini-spin" : ""}
                 />
                 <div className="mini-info">
                     <div className="mini-title">{currentMusic.title}</div>
@@ -45,7 +47,13 @@ export default function MiniPlayer() {
                 className="mini-btn mini-play-btn"
                 onClick={() => TrackPlayerSingleton.togglePlay()}
             >
-                {playing ? <IconPause size={19} /> : <IconPlay size={19} />}
+                {musicState === "loading" ? (
+                    <Spinner size={19} />
+                ) : playing ? (
+                    <IconPause size={19} />
+                ) : (
+                    <IconPlay size={19} />
+                )}
             </button>
             <button className="mini-btn" onClick={() => setQueueOpen(true)}>
                 <IconQueue size={20} />

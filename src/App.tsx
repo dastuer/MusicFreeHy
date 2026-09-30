@@ -1,8 +1,11 @@
 import { useEffect } from "react";
+import { useAtomValue } from "jotai";
 import { useCurrentRoute, useIsTabRoot } from "@/core/router";
+import { sourceSelectOpenAtom } from "@/core/uiAtoms";
 import { TrackPlayerSingleton, TrackPlayerEvents } from "@/core/trackPlayer";
 import type { IPlayFailurePayload } from "@/core/trackPlayer";
 import { pluginHost } from "@/core/ipc";
+import { setupMediaNotification } from "@/core/mediaNotification";
 import { useThemeSetup } from "@/core/theme";
 import { ensureLikesSheet } from "@/core/musicSheet";
 import { showToast } from "@/core/uiAtoms";
@@ -26,11 +29,14 @@ import TopListDetailPage from "@/pages/topListDetail";
 import AlbumDetailPage from "@/pages/albumDetail";
 import ArtistDetailPage from "@/pages/artistDetail";
 import HistoryPage from "@/pages/history";
+import DownloadsPage from "@/pages/downloads";
+import LocalMusicPage from "@/pages/localMusic";
 import PluginManagePage from "@/pages/pluginManage";
 import SettingsPage from "@/pages/settings";
 import SettingsBackupPage from "@/pages/settings/backup";
 import SettingsWebdavPage from "@/pages/settings/webdav";
 import SettingsProxyPage from "@/pages/settings/proxy";
+import FolderSelectPage from "@/pages/folderSelect";
 
 function renderPage(path: string, params: Record<string, any>) {
     switch (path) {
@@ -64,6 +70,10 @@ function renderPage(path: string, params: Record<string, any>) {
             );
         case "history":
             return <HistoryPage />;
+        case "downloads":
+            return <DownloadsPage />;
+        case "localMusic":
+            return <LocalMusicPage />;
         case "pluginManage":
             return <PluginManagePage />;
         case "settings":
@@ -74,6 +84,13 @@ function renderPage(path: string, params: Record<string, any>) {
             return <SettingsWebdavPage />;
         case "settingsProxy":
             return <SettingsProxyPage />;
+        case "folderSelect":
+            return (
+                <FolderSelectPage
+                    key={`folderSelect:${params.mode ?? "single"}`}
+                    mode={params.mode === "multi" ? "multi" : "single"}
+                />
+            );
         default:
             return <HomePage />;
     }
@@ -83,11 +100,21 @@ export default function App() {
     useThemeSetup();
     const route = useCurrentRoute();
     const isTabRoot = useIsTabRoot();
+    const sourceSelectOpen = useAtomValue(sourceSelectOpenAtom);
+    // 设置类页面（含音源设置面板）不展示底部播放条，聚焦配置操作
+    const hideMiniPlayer =
+        sourceSelectOpen ||
+        route.path === "settings" ||
+        route.path === "settingsBackup" ||
+        route.path === "settingsWebdav" ||
+        route.path === "settingsProxy";
     useEffect(() => {
         // 初始化：插件宿主、播放器、喜欢的音乐歌单
         ensureLikesSheet();
         pluginHost.setup().catch((e: any) => console.warn("[app] 插件宿主初始化失败", e));
         TrackPlayerSingleton.setup();
+        // 系统媒体通知（Android 下拉栏媒体卡片；仅原生环境生效）
+        setupMediaNotification();
         // 播放失败不再静默：缺插件 / 链接失效 / 跨域拦截都直接告诉用户
         const onPlayFailed = ({ musicItem, reason, willSkip, downgradedTo }: IPlayFailurePayload) => {
             if (downgradedTo) {
@@ -110,10 +137,21 @@ export default function App() {
     return (
         <div className="app-root">
             <div className="phone-frame">
-                <div className="page-swap" key={route.path}>
-                    {renderPage(route.path, route.params)}
+                <div className="page-swap">
+                    {/* 发现页常驻缓存：跳转任何页面都保留推荐/歌单/排行榜的数据与滚动位置 */}
+                    <div
+                        className="page-keepalive"
+                        style={route.path === "home" ? undefined : { display: "none" }}
+                    >
+                        <HomePage />
+                    </div>
+                    {route.path !== "home" && (
+                        <div className="page-swap-layer" key={route.path}>
+                            {renderPage(route.path, route.params)}
+                        </div>
+                    )}
                 </div>
-                <MiniPlayer />
+                {!hideMiniPlayer && <MiniPlayer />}
                 {/* Tab 栏自带 safe-bottom 内边距；播放条单独贴底时给安卓手势条 / iOS
                     Home 指示条留出空间 */}
                 {isTabRoot ? <TabBar /> : <div className="safe-bottom-spacer" />}

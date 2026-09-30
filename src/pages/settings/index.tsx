@@ -2,6 +2,10 @@ import { useState } from "react";
 import { goBack, navigate } from "@/core/router";
 import { useThemeSetting, setTheme } from "@/core/theme";
 import { getQuality, setQuality } from "@/core/appConfig";
+import {
+    getDownloadSaveTarget,
+    downloadSaveTargetLabel,
+} from "@/core/musicDownload";
 import { APP_VERSION } from "@/core/backup";
 import { getWebdavConfig, getWebdavLastAt } from "@/core/dav";
 import { setDefaultQuality } from "@/core/trackPlayer";
@@ -26,8 +30,7 @@ const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
 /**
  * 设置页（一级）：只放简单开关，复杂配置（备份 / WebDAV / 代理）下沉二级页。
  * 页面在返回时会重挂载，localStorage 类取值无需订阅即可保持最新。
- */
-export default function SettingsPage() {
+ */export default function SettingsPage() {
     const theme = useThemeSetting();
     const [quality, setQualityState] = useState(getQuality());
     const [rememberProgress, setRememberProgress] = useState(
@@ -108,6 +111,27 @@ export default function SettingsPage() {
                     <div className={`plugin-switch ${rememberProgress ? "on" : ""}`} />
                 </div>
             </div>
+
+            {isNative() && (
+                <div className="settings-group">
+                    <div className="settings-group-title">下载</div>
+                    <div
+                        className="settings-row"
+                        onClick={() => navigate("folderSelect", { mode: "single" })}
+                    >
+                        <span className="settings-row-label">
+                            保存位置
+                            <div className="settings-row-desc">
+                                浏览文件系统选择，或新建文件夹后再选
+                            </div>
+                        </span>
+                        <span className="settings-value ellipsis">
+                            {downloadSaveTargetLabel(getDownloadSaveTarget())}
+                        </span>
+                        <span className="settings-value">›</span>
+                    </div>
+                </div>
+            )}
 
             <div className="settings-group">
                 <div className="settings-group-title">数据与备份</div>

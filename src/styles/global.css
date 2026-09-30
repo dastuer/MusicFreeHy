@@ -96,7 +96,52 @@ img {
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
-    padding-bottom: calc(16px + var(--safe-bottom));
+    /* 底部只留少量呼吸空隙：播放条/Tab 栏在文档流内，手势条空间由它们自行预留 */
+    padding-bottom: 12px;
+}
+
+/* 页面缓存：发现页常驻，非发现页以浮层形式盖在其上 */
+.page-keepalive {
+    height: 100%;
+}
+
+.page-swap-layer {
+    position: absolute;
+    inset: 0;
+}
+
+/* ---------- 下拉刷新 ---------- */
+
+.ptr {
+    height: 100%;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+}
+
+.ptr-inner {
+    will-change: transform;
+}
+
+/* 指示器平时藏在我们平移出来的空间里：高度 52px + 等高负 margin */
+.ptr-indicator {
+    height: 52px;
+    margin-top: -52px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    color: var(--text-tertiary);
+    font-size: 12px;
+}
+
+.ptr-arrow {
+    display: inline-flex;
+    transition: transform 0.2s ease;
+}
+
+.ptr-arrow.flip {
+    transform: rotate(180deg);
 }
 
 /* ---------- 底部 Tab 栏 ---------- */
@@ -298,6 +343,12 @@ img {
     font-size: 12.5px;
 }
 
+/* 列表底部自动加载更多（可点击手动触发） */
+.auto-load-more {
+    cursor: pointer;
+    user-select: none;
+}
+
 .error-tip {
     padding: 32px 24px;
     text-align: center;
@@ -325,8 +376,14 @@ img {
 }
 
 .sub-header-title {
-    flex: 1;
-    text-align: center;
+    /* 绝对居中：不依赖左右按钮等宽（详情页常只有左侧返回键） */
+    position: absolute;
+    top: var(--safe-top);
+    bottom: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: calc(100% - 96px);
+    line-height: 52px;
     font-size: 16px;
     font-weight: 600;
     white-space: nowrap;
@@ -341,9 +398,43 @@ img {
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    /* 标题绝对定位不占 flex 空间，需自行推到最右侧 */
+    margin-left: auto;
 }
 
 /* ---------- 发现页 ---------- */
+
+/* 三个子页横向排布常驻：页面本身不再滚动，改为每个子页（.ptr）各自滚动并缓存位置；
+   切 tab / 手势滑动时由 .home-panes-track 整体平移 */
+.home-page {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding-bottom: 0;
+}
+
+.home-panes {
+    flex: 1;
+    min-height: 0;
+    position: relative;
+    overflow: hidden;
+}
+
+.home-panes-track {
+    display: flex;
+    height: 100%;
+    /* 补间动画只负责点击 tab / 松手后的收尾；拖动过程中由 useTabSwipe 置 none 跟手 */
+    transition: transform 0.28s cubic-bezier(0.22, 0.61, 0.36, 1);
+    will-change: transform;
+}
+
+.home-pane {
+    flex: 0 0 100%;
+    width: 100%;
+    min-width: 0;
+    height: 100%;
+    padding-bottom: calc(16px + var(--safe-bottom));
+}
 
 .home-topbar {
     position: sticky;
@@ -367,6 +458,7 @@ img {
     justify-content: center;
     gap: 22px;
     align-items: baseline;
+    position: relative;
 }
 
 .home-tab {
@@ -383,16 +475,18 @@ img {
     color: var(--text-color);
 }
 
-.home-tab.active::after {
-    content: "";
+/* 红条指示器：单个元素随当前 tab 平移；滑动切页时由 useTabSwipe 逐帧驱动跟手 */
+.home-tab-indicator {
     position: absolute;
-    left: 50%;
-    transform: translateX(-50%);
+    left: 0;
     bottom: -2px;
     width: 18px;
     height: 3px;
     border-radius: 2px;
     background: var(--primary-color);
+    transition: transform 0.28s cubic-bezier(0.22, 0.61, 0.36, 1);
+    will-change: transform;
+    pointer-events: none;
 }
 
 /* 快捷入口 */
@@ -763,6 +857,8 @@ img {
 .sheet-tags {
     display: flex;
     flex-wrap: wrap;
+    /* 收起动画期间容器高度大于内容，禁止默认的 stretch 把标签行/胶囊撑高 */
+    align-content: flex-start;
     gap: 8px 10px;
     padding: 4px 16px;
 }
@@ -923,30 +1019,143 @@ img {
     vertical-align: 1px;
 }
 
+/* 播放全部栏（网易云紧凑样式）：红圈播放钮 + 标题(数量) + 右侧多选 */
 .detail-playall {
     position: relative;
     z-index: 1;
     display: flex;
     align-items: center;
-    gap: 10px;
-    margin: 14px 16px 0;
-    padding: 11px 18px;
-    border-radius: 24px;
-    background: var(--primary-color);
-    color: #fff;
-    font-size: 14.5px;
+    gap: 8px;
+    margin: 12px 16px 4px;
+    padding: 6px 0;
+    background: transparent;
+    color: var(--text-color);
+    font-size: 15px;
     font-weight: 600;
-    box-shadow: 0 6px 18px rgba(234, 61, 61, 0.35);
+    box-shadow: none;
 }
 
-.detail-playall:active {
-    filter: brightness(0.92);
+.detail-playall .pa-icon {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: var(--primary-color);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.detail-playall .pa-icon svg {
+    margin-left: 1px;
 }
 
 .detail-playall .pa-sub {
     font-weight: 400;
+    font-size: 12.5px;
+    color: var(--text-tertiary);
+}
+
+.detail-playall .pa-select {
+    margin-left: auto;
+    width: 38px;
+    height: 38px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-color);
+}
+
+.detail-playall:active .pa-icon {
+    filter: brightness(0.9);
+}
+
+/* 多选态头部：全选 + 已选提示 + 完成 */
+.detail-playall.select-mode {
+    gap: 10px;
+    padding: 8px 0;
+}
+
+.pa-select-all {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14.5px;
+    font-weight: 600;
+    color: var(--text-color);
+    padding: 4px 0;
+}
+
+.pa-selected-tip {
     font-size: 12px;
-    opacity: 0.85;
+    font-weight: 400;
+    color: var(--text-tertiary);
+}
+
+.pa-done {
+    margin-left: auto;
+    padding: 6px 8px;
+    font-size: 14.5px;
+    font-weight: 600;
+    color: var(--primary-color);
+}
+
+/* 行首勾选圈（多选） */
+.row-check {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 1.5px solid var(--text-placeholder, rgba(255, 255, 255, 0.3));
+    color: transparent;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.row-check.checked {
+    background: var(--primary-color);
+    border-color: var(--primary-color);
+    color: #fff;
+}
+
+.music-row.selected {
+    opacity: 0.55;
+}
+
+/* 多选底部操作栏：下载 / 收藏 / 删除 */
+.select-actions-bar {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+    display: flex;
+    align-items: stretch;
+    margin: 8px -6px 0;
+    padding: 6px 10px calc(10px + var(--safe-bottom));
+    background: var(--page-bg);
+    border-top: 1px solid var(--divider);
+}
+
+.select-action {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    padding: 6px 0;
+    font-size: 11.5px;
+    color: var(--text-color);
+}
+
+.select-action:disabled {
+    color: var(--text-tertiary);
+    opacity: 0.5;
+}
+
+.select-action:active:not(:disabled) {
+    opacity: 0.7;
 }
 
 .detail-list-head {
@@ -1040,17 +1249,34 @@ img {
     flex-direction: column;
     background: var(--page-bg);
     color: #fff;
-    animation: np-in 0.24s ease-out;
+    animation: np-in 0.32s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+.np-root.np-out {
+    animation: np-out 0.28s cubic-bezier(0.55, 0, 0.72, 0.36) forwards;
+}
+
+/* 出现：从屏幕底部向上滑入并渐显 */
 @keyframes np-in {
     from {
         opacity: 0;
-        transform: translateY(28px);
+        transform: translateY(100%);
     }
     to {
         opacity: 1;
         transform: none;
+    }
+}
+
+/* 退出：向下滑出并渐隐（forwards 保持透明态，等 onAnimationEnd 再卸载） */
+@keyframes np-out {
+    from {
+        opacity: 1;
+        transform: none;
+    }
+    to {
+        opacity: 0;
+        transform: translateY(100%);
     }
 }
 
@@ -1266,11 +1492,25 @@ img {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 10vh 32px 45vh;
+    padding: 0 32px;
     text-align: center;
     mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent);
     -webkit-mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent);
     scroll-behavior: smooth;
+}
+
+/* 上下预留空间：上半区让首行初始即处于激活位置（中线偏下两行），
+   下半区让末行最多也只到激活位置，不会越过 */
+.np-lyrics::before {
+    content: "";
+    display: block;
+    height: max(0px, calc(50% + 61px));
+}
+
+.np-lyrics::after {
+    content: "";
+    display: block;
+    height: max(0px, calc(50% - 101px));
 }
 
 .np-lyric-line {
@@ -1292,6 +1532,50 @@ img {
     text-align: center;
     color: rgba(255, 255, 255, 0.5);
     font-size: 14px;
+}
+
+/* 用户滑动停止后，目标行滚到激活位置并展示 时间 + 歌词 + 播放按钮。
+   卡片与歌词列同宽（不通栏到屏幕边缘），歌词文本居中、可换行；
+   时间/播放按钮 absolute 定位到卡片外侧留白区，与卡片边缘留出间距 */
+.np-lyric-line.np-lyric-seekline {
+    position: relative;
+    text-align: center;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.16);
+    color: #fff;
+}
+
+/* 与 .np-lyric-line.active 同字号同宽度：能放下的歌词长度和普通区域一致 */
+.np-lyric-seek-text {
+    font-size: 16.5px;
+    font-weight: 700;
+    line-height: 1.55;
+    white-space: normal;
+}
+
+.np-lyric-seek-time {
+    position: absolute;
+    left: -31px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 24px;
+    text-align: center;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    color: rgba(255, 255, 255, 0.75);
+}
+
+.np-lyric-seek-play {
+    position: absolute;
+    right: -31px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 26px;
+    color: #fff;
 }
 
 /* 进度条上方功能行：音质 / 喜欢 / 下载 / 更多，均匀间隔 */
@@ -1755,7 +2039,7 @@ img {
 }
 
 .drawer-title {
-    padding: 6px 12px 16px;
+    padding: 4px 14px 22px;
     font-size: 19px;
     font-weight: 800;
     display: flex;
@@ -1763,11 +2047,12 @@ img {
     gap: 8px;
 }
 
-.drawer-title .dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: var(--primary-color);
+.drawer-title .drawer-logo {
+    width: 72px;
+    height: 72px;
+    border-radius: 18px;
+    object-fit: cover;
+    flex-shrink: 0;
 }
 
 .drawer-item {
@@ -1787,14 +2072,6 @@ img {
 .drawer-item .d-icon {
     color: var(--text-secondary);
     display: flex;
-}
-
-.drawer-footer {
-    margin-top: auto;
-    padding: 10px 12px;
-    font-size: 11px;
-    color: var(--text-tertiary);
-    line-height: 1.7;
 }
 
 /* ---------- 插件管理页 ---------- */
@@ -1991,6 +2268,15 @@ img {
     font-size: 13px;
 }
 
+/* 长取值（如下载文件夹完整路径）超出省略 */
+.settings-value.ellipsis {
+    max-width: 42vw;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex-shrink: 1;
+}
+
 .seg {
     display: flex;
     background: var(--page-bg);
@@ -2045,6 +2331,168 @@ img {
     line-height: 1.7;
 }
 
+/* ---------- 文件夹选择页（下载保存位置 / 扫描目录） ---------- */
+
+.fsp-page {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding-bottom: 0;
+}
+
+.fsp-header {
+    border-bottom: 1px solid var(--divider);
+    gap: 4px;
+}
+
+/* 当前路径（头部返回箭头右侧），超长横向滚动 */
+.fsp-path {
+    flex: 1;
+    min-width: 0;
+    font-size: 13px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow-x: auto;
+    padding: 4px 12px 4px 0;
+    scrollbar-width: none;
+}
+
+.fsp-path::-webkit-scrollbar {
+    display: none;
+}
+
+/* 「所有文件访问」授权引导条 */
+.fsp-banner {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 10px 16px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--primary-color);
+    background: var(--hover-bg);
+    border-bottom: 1px solid var(--divider);
+}
+
+.fsp-scroll {
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    padding: 6px 8px 14px;
+}
+
+.fsp-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    text-align: left;
+    padding: 11px 8px;
+    border-radius: 10px;
+}
+
+.fsp-row:active {
+    background: var(--hover-bg);
+}
+
+.fsp-row.filtered {
+    opacity: 0.55;
+}
+
+.fsp-row-icon {
+    display: flex;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.fsp-row-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.fsp-row-name {
+    font-size: 15px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.fsp-row-sub {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-top: 2px;
+}
+
+.fsp-filtered {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    flex-shrink: 0;
+}
+
+/* 勾选框（多选）与当前目录标记（单选） */
+.fsp-check {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    border: 1.5px solid var(--divider);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: transparent;
+    flex-shrink: 0;
+}
+
+.fsp-check.on {
+    background: var(--primary-color);
+    border-color: var(--primary-color);
+    color: #fff;
+}
+
+.fsp-state {
+    padding: 28px 12px;
+    font-size: 12.5px;
+    color: var(--text-tertiary);
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+}
+
+.fsp-state-error {
+    color: var(--text-secondary);
+}
+
+/* 底部操作条：文字按钮（新建文件夹 / 选择此文件夹 / 立即扫描） */
+.fsp-footer {
+    border-top: 1px solid var(--divider);
+    background: var(--page-bg);
+    padding: 8px 16px calc(10px + var(--safe-bottom));
+    display: flex;
+    justify-content: space-evenly;
+    align-items: center;
+}
+
+.fsp-action {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    padding: 4px 20px;
+    color: var(--text-secondary);
+    font-size: 12.5px;
+    border-radius: 10px;
+}
+
+.fsp-action:active {
+    background: var(--hover-bg);
+}
+
+.fsp-action:disabled {
+    opacity: 0.55;
+}
+
 /* ---------- Toast ---------- */
 
 .toast-host {
@@ -2086,31 +2534,10 @@ img {
 
 /* ---------- 音源选择面板（我的页统一入口） ---------- */
 
-.source-select-sub {
-    padding: 0 16px 6px;
-    font-size: 11.5px;
-    color: var(--text-tertiary);
-}
-
 .source-select-check {
     display: flex;
     color: var(--primary-color);
     flex-shrink: 0;
-}
-
-.source-star-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 8px;
-    margin-right: 2px;
-    border-radius: 50%;
-    color: var(--text-placeholder);
-    flex-shrink: 0;
-}
-
-.source-star-btn.on {
-    color: #f7b500;
 }
 
 .source-select-empty {
@@ -2123,6 +2550,7 @@ img {
 /* ---------- 封面占位 ---------- */
 
 .cover {
+    position: relative;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -2140,6 +2568,47 @@ img {
 
 .cover-fallback {
     border: 1px solid var(--divider);
+}
+
+/* ---------- 下载进度：封面扇形遮罩 ---------- */
+
+/* 从 12 点方向顺时针扫开的扇形：已下载部分透出封面，剩余部分盖暗色 */
+.cover-progress {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: conic-gradient(
+        transparent 0 calc(var(--p) * 1%),
+        rgba(0, 0, 0, 0.62) calc(var(--p) * 1%) 100%
+    );
+}
+
+/* 拿不到 content-length：旋转扫描（不确定态） */
+.cover-progress.indeterminate {
+    background: conic-gradient(rgba(0, 0, 0, 0.62) 0 90deg, transparent 90deg 360deg);
+    animation: cover-progress-spin 1.1s linear infinite;
+}
+
+@keyframes cover-progress-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.cover-progress-text {
+    font-style: normal;
+    font-size: 9px;
+    line-height: 1;
+    font-weight: 600;
+    color: #fff;
+    text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
+}
+
+/* 「我的下载」页顶部的下载中行：标题轻微压暗以示区别 */
+.downloading-row .music-row-title {
+    color: var(--text-secondary);
 }
 
 /* Slider 组件（复用） */
@@ -2184,4 +2653,334 @@ img {
     padding: 0 16px 8px;
     font-size: 11.5px;
     color: var(--text-tertiary);
+}
+
+/* ---------- 本地音乐 ---------- */
+
+/* 扫描按钮扫描中旋转 */
+.lm-scanning svg {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* 扫描面板 */
+.lm-scan-sheet {
+    max-height: 72vh;
+    overflow-y: auto;
+}
+
+.lm-dir-list {
+    padding: 6px 2px 2px;
+}
+
+.lm-dir-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 8px;
+    border-radius: 10px;
+}
+
+.lm-dir-row:active {
+    background: var(--hover-bg);
+}
+
+.lm-dir-icon {
+    color: var(--text-secondary);
+    display: flex;
+    flex-shrink: 0;
+}
+
+.lm-dir-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.lm-dir-label {
+    font-size: 13.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.lm-dir-path {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 1px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.lm-dir-remove {
+    width: 32px;
+    height: 32px;
+    color: var(--text-tertiary);
+    flex-shrink: 0;
+}
+
+.lm-dir-empty {
+    padding: 14px 8px;
+    font-size: 12.5px;
+    color: var(--text-tertiary);
+    text-align: center;
+}
+
+.lm-dir-ops {
+    display: flex;
+    gap: 8px;
+    padding: 4px 2px 8px;
+}
+
+.lm-add-dir {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 38px;
+    border-radius: 10px;
+    background: var(--bg-card);
+    font-size: 13px;
+}
+
+.lm-add-dir:active {
+    background: var(--active-bg);
+}
+
+.lm-reset-dirs {
+    padding: 0 14px;
+    height: 38px;
+    border-radius: 10px;
+    background: var(--bg-card);
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.lm-reset-dirs:active {
+    background: var(--active-bg);
+}
+
+/* 跳过短音频开关行 */
+.lm-skip-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 8px;
+    border-radius: 10px;
+    margin-bottom: 6px;
+}
+
+.lm-skip-row:active {
+    background: var(--hover-bg);
+}
+
+.lm-skip-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.lm-skip-label {
+    font-size: 13.5px;
+}
+
+.lm-skip-desc {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 1px;
+}
+
+.lm-skip-row .plugin-switch {
+    margin-top: 0;
+}
+
+.lm-scan-btn {
+    display: block;
+    width: 100%;
+    height: 44px;
+    border-radius: 12px;
+    background: var(--primary-color);
+    color: #fff;
+    font-size: 14.5px;
+    font-weight: 600;
+}
+
+.lm-scan-btn:disabled {
+    opacity: 0.6;
+}
+
+/* 匹配进度条（参考网易云「获取图词」） */
+.lm-match-bar {
+    position: sticky;
+    top: calc(52px + var(--safe-top));
+    z-index: 29;
+    padding: 8px 16px 12px;
+    background: var(--page-bg);
+    border-bottom: 1px solid var(--divider);
+}
+
+.lm-match-line {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.lm-match-text {
+    font-size: 13.5px;
+    color: var(--text-color);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.lm-match-text b {
+    color: var(--text-tertiary);
+    font-weight: 400;
+}
+
+.lm-match-btns {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.lm-match-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    height: 30px;
+    padding: 0 13px;
+    border-radius: 15px;
+    border: 1px solid var(--divider);
+    font-size: 12.5px;
+    color: var(--text-secondary);
+}
+
+.lm-match-btn:active {
+    background: var(--hover-bg);
+}
+
+.lm-match-current {
+    font-size: 11.5px;
+    color: var(--text-tertiary);
+    margin-top: 3px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.lm-match-progress {
+    height: 3px;
+    border-radius: 2px;
+    background: var(--divider);
+    margin-top: 8px;
+    overflow: hidden;
+}
+
+.lm-match-progress span {
+    display: block;
+    height: 100%;
+    border-radius: 2px;
+    background: var(--primary-color);
+    transition: width 0.3s ease;
+}
+
+/* 匹配面板音源行 */
+.lm-match-source {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 8px;
+    border-radius: 10px;
+    margin-top: 4px;
+}
+
+.lm-match-source:active {
+    background: var(--hover-bg);
+}
+
+/* 详情弹窗 */
+.lm-detail {
+    max-height: 76vh;
+    overflow-y: auto;
+}
+
+.lm-detail-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--divider);
+}
+
+.lm-detail-head .cover {
+    flex-shrink: 0;
+    background: var(--bg-card);
+}
+
+.lm-detail-head-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.lm-detail-title {
+    font-size: 15.5px;
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.lm-detail-sub {
+    font-size: 12.5px;
+    color: var(--text-tertiary);
+    margin-top: 2px;
+}
+
+.lm-detail-section {
+    padding-top: 12px;
+}
+
+.lm-detail-section-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    margin-bottom: 4px;
+}
+
+.lm-detail-row {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 5px 0;
+    font-size: 13px;
+}
+
+.lm-detail-row > span {
+    flex-shrink: 0;
+    width: 56px;
+    color: var(--text-tertiary);
+}
+
+.lm-detail-row > b {
+    flex: 1;
+    min-width: 0;
+    font-weight: 400;
+    word-break: break-all;
+    white-space: pre-wrap;
+}
+
+.lm-detail-path > b {
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    line-height: 1.5;
 }

@@ -4,6 +4,7 @@ import { buildPlayableMediaUrl } from "./net";
 import { getPluginByMedia, getPlugins, pluginCall } from "./ipc";
 import { setMusicHistory } from "./musicHistory";
 import { getQuality, setQuality, getConfig } from "./appConfig";
+import { localFileUrl } from "./native";
 
 export type MusicState = "playing" | "paused" | "stopped" | "loading";
 export type MusicRepeatMode = "off" | "queue" | "single";
@@ -321,7 +322,7 @@ class TrackPlayer extends EventEmitter {
         audio.addEventListener("play", this.onAudioPlay);
         audio.addEventListener("playing", this.onAudioPlaying);
         audio.addEventListener("error", this.onAudioError);
-        audio.addEventListener("waiting", this.onAudioStall);
+        audio.addEventListener("waiting", this.onAudioWaiting);
         audio.addEventListener("stalled", this.onAudioStall);
     }
 
@@ -333,7 +334,7 @@ class TrackPlayer extends EventEmitter {
         audio.removeEventListener("play", this.onAudioPlay);
         audio.removeEventListener("playing", this.onAudioPlaying);
         audio.removeEventListener("error", this.onAudioError);
-        audio.removeEventListener("waiting", this.onAudioStall);
+        audio.removeEventListener("waiting", this.onAudioWaiting);
         audio.removeEventListener("stalled", this.onAudioStall);
     }
 
@@ -475,6 +476,24 @@ class TrackPlayer extends EventEmitter {
 
     /** 播放停滞自救：12 秒还没恢复就微调进度，强制浏览器重新取流 */
     private onAudioStall = () => {
+        this.beginStallWatch();
+    };
+
+    /** 缓冲断流（waiting）：界面切成「加载中」转圈，恢复出声时 playing 事件再切回来 */
+    private onAudioWaiting = () => {
+        const audio = this.audio;
+        if (
+            audio &&
+            !audio.paused &&
+            this._currentMusic &&
+            store.get(musicStateAtom) === "playing"
+        ) {
+            setAtom(musicStateAtom, "loading");
+        }
+        this.beginStallWatch();
+    };
+
+    private beginStallWatch() {
         if (this.stallTimer) {
             return;
         }
@@ -494,7 +513,7 @@ class TrackPlayer extends EventEmitter {
                 // ignore
             }
         }, 12000);
-    };
+    }
 
     private onAudioPause = () => {
         this.clearStallWatch();
@@ -504,18 +523,36 @@ class TrackPlayer extends EventEmitter {
         if (this._currentMusic) {
             setAtom(musicStateAtom, "paused");
         }
+        this.syncMediaSessionState();
     };
 
     private onAudioPlay = () => {
+        // 「play」只代表已请求播放：换歌解析在途时不抢状态（由 beginLoading/cancelLoading 管）；
+        // 数据没跟上（readyState < 3）也保持加载转圈，等真正出声的「playing」事件再切播放态，
+        // 否则播放键会在 转圈↔暂停 之间来回抖。
+        if (this.isLoading) {
+            return;
+        }
+        const audio = this.audio;
+        if (audio && audio.src && audio.readyState < 3) {
+            setAtom(musicStateAtom, "loading");
+            return;
+        }
         setAtom(musicStateAtom, "playing");
+        this.syncMediaSessionState();
     };
 
     private onAudioPlaying = () => {
+        if (this.isLoading) {
+            // 换歌解析在途：旧音源排队的迟到事件不抢状态
+            return;
+        }
         this.clearStallWatch();
         this.isLoading = false;
         this.autoSkipCount = 0;
         this.qualityRetryCount = 0;
         setAtom(musicStateAtom, "playing");
+        this.syncMediaSessionState();
     };
 
     private onAudioError = async () => {
@@ -696,6 +733,7 @@ class TrackPlayer extends EventEmitter {
         if (this._playList.length === 0) {
             this.emit(TrackPlayerEvents.PlayEnd);
             setAtom(musicStateAtom, "stopped");
+            this.clearMediaSession();
             return;
         }
         const index = this.getMusicIndexInPlayList(this._currentMusic);
@@ -706,6 +744,7 @@ class TrackPlayer extends EventEmitter {
         ) {
             this.emit(TrackPlayerEvents.PlayEnd);
             setAtom(musicStateAtom, "stopped");
+            this.clearMediaSession();
             return;
         }
         await this.skipToNext();
@@ -891,6 +930,7 @@ class TrackPlayer extends EventEmitter {
         setAtom(progressAtom, { position: 0, duration: 0 });
         setAtom(playingQualityAtom, null);
         this.detachAudio();
+        this.clearMediaSession();
         this.clearPlayList();
         this._history = [];
         try {
@@ -906,6 +946,7 @@ class TrackPlayer extends EventEmitter {
      * 解析可播放音源。音质按 resolveQualityLadder 从请求档逐级下降尝试。
      * 找不到可用音源时返回带人话原因的失败（插件缺失 / 被禁用 / 挂载失败是恢复备份后最常见的几种）。
      * 除播放外，下载模块也用它取直链（source.url 原始地址 + 自定义请求头）。
+     * 本地音乐（带 localPath）不走插件，直接转 WebView 可访问的文件地址。
      */
     async resolveMediaUrl(
         musicItem: IMusic.IMusicItem,
@@ -920,6 +961,14 @@ class TrackPlayer extends EventEmitter {
           }
         | { ok: false; reason: string }
     > {
+        if (musicItem.localPath) {
+            return {
+                ok: true,
+                src: localFileUrl(musicItem.localPath),
+                source: { url: musicItem.localPath },
+                quality: null,
+            };
+        }
         const plugins = await getPlugins();
         const samePlatform = plugins.filter((p) => p.platform === musicItem.platform);
         if (!samePlatform.length) {
@@ -1010,6 +1059,56 @@ class TrackPlayer extends EventEmitter {
             navigator.mediaSession.setActionHandler("pause", () => this.pause());
             navigator.mediaSession.setActionHandler("previoustrack", () => this.skipToPrevious());
             navigator.mediaSession.setActionHandler("nexttrack", () => this.skipToNext());
+            navigator.mediaSession.setActionHandler("seekto", (details: any) => {
+                const target = details?.seekTime;
+                if (typeof target === "number" && Number.isFinite(target)) {
+                    this.seekTo(target);
+                }
+            });
+        }
+    }
+
+    /**
+     * 把「听到哪儿」同步进 Web MediaSession（iOS 锁屏 / 控制中心、桌面浏览器的
+     * 媒体键浮层靠它显示进度）。Android 原生走 mediaNotification 通道，用不到它。
+     */
+    private syncMediaSessionState() {
+        if (!("mediaSession" in navigator)) {
+            return;
+        }
+        const audio = this.audio;
+        if (!audio?.src) {
+            return;
+        }
+        try {
+            const duration =
+                Number.isFinite(audio.duration) && audio.duration > 0
+                    ? audio.duration
+                    : this._currentMusic?.duration ?? 0;
+            if (!duration) {
+                return;
+            }
+            navigator.mediaSession.setPositionState({
+                duration,
+                position: Math.min(Math.max(audio.currentTime || 0, 0), duration),
+                playbackRate: audio.playbackRate || 1,
+            });
+            navigator.mediaSession.playbackState = audio.paused ? "paused" : "playing";
+        } catch {
+            // ignore
+        }
+    }
+
+    /** 彻底停了（队列播完 / 清空）：把系统媒体会话一并收掉 */
+    private clearMediaSession() {
+        if (!("mediaSession" in navigator)) {
+            return;
+        }
+        try {
+            navigator.mediaSession.metadata = null;
+            navigator.mediaSession.playbackState = "none";
+        } catch {
+            // ignore
         }
     }
 
@@ -1112,6 +1211,10 @@ class TrackPlayer extends EventEmitter {
         }
         audio.play().catch((e) => {
             console.warn("[trackPlayer] resume failed", e?.name ?? e);
+            // 起播失败（典型是自动播放被拦截）：别让界面卡在「加载中」转圈
+            if (!this.isLoading && store.get(musicStateAtom) === "loading") {
+                setAtom(musicStateAtom, "paused");
+            }
         });
     }
 
@@ -1260,6 +1363,7 @@ class TrackPlayer extends EventEmitter {
         if (this.audio && Number.isFinite(this.audio.duration)) {
             this.audio.currentTime = position;
             setAtom(progressAtom, { position, duration: this.audio.duration || 0 });
+            this.syncMediaSessionState();
             return;
         }
         if (this._currentMusic) {
@@ -1566,9 +1670,29 @@ export function useCurrentLyric() {
 
 export const currentLyricAtom = atom<ILyric.IParsedLrc>([]);
 
+/**
+ * 本地歌曲歌词解析器（由 localMusic 模块注册，避免循环依赖）：
+ * 播放列表/历史里的本地条目可能早于匹配结果，播时向曲库现查一次
+ */
+let localLyricResolver: ((musicItem: IMusic.IMusicItem) => Promise<string>) | null = null;
+export function setLocalLyricResolver(fn: (musicItem: IMusic.IMusicItem) => Promise<string>) {
+    localLyricResolver = fn;
+}
+
 /** 加载当前歌曲歌词（插件接口名与桌面端一致：getLyric） */
 export async function loadCurrentLyric(musicItem: IMusic.IMusicItem) {
     let lyricSource: ILyric.ILyricSource | null = musicItem.lyric ?? null;
+    if (!lyricSource && musicItem.localPath) {
+        // 本地歌曲：播放列表/历史里存的条目可能没有随匹配结果更新，向本地曲库现查歌词
+        try {
+            const raw = await localLyricResolver?.(musicItem);
+            if (raw) {
+                lyricSource = { rawLrc: raw };
+            }
+        } catch {
+            // ignore
+        }
+    }
     if (!lyricSource && !musicItem.localPath) {
         const plugin = await getPluginByMedia(musicItem);
         if (plugin?.supportedMethods.includes("getLyric")) {

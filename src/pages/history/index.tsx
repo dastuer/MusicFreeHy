@@ -35,7 +35,6 @@ export default function HistoryPage() {
                 <MusicList
                     musicList={history.map(({ playAt, ...item }: any) => item)}
                     listId={`history:${version}`}
-                    showIndex={false}
                 />
             ) : (
                 <div className="empty-tip">还没有播放记录</div>

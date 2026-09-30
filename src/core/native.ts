@@ -128,3 +128,26 @@ export async function callNativeMethod(
     const Cap = (window as any).Capacitor;
     return Cap.nativePromise(pluginName, methodName, options);
 }
+
+/**
+ * 设备本地文件路径 → WebView 能加载的地址（Capacitor 的 _capacitor_file_ 通道）。
+ * 与 @capacitor/core 的 convertFileSrc 同规则（androidScheme 为 https，见 capacitor.config.ts）。
+ * 非原生环境返回空串；封面图 / <audio> 播放本地文件都走它。
+ */
+export function localFileUrl(absPath: string): string {
+    if (!absPath || !isNative()) {
+        return "";
+    }
+    try {
+        const platform = (window as any).Capacitor?.getPlatform?.();
+        if (platform === "android") {
+            return `https://localhost/_capacitor_file_${absPath}`;
+        }
+        if (platform === "ios") {
+            return `capacitor://localhost/_capacitor_file_${absPath}`;
+        }
+    } catch {
+        // ignore
+    }
+    return `file://${absPath}`;
+}

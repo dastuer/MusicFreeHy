@@ -7,17 +7,21 @@ import { getPlugins } from "@/core/ipc";
 import { TrackPlayerSingleton } from "@/core/trackPlayer";
 import {
     getUserSheets,
-    removeMusicFromSheet,
+    removeMusicFromSheetMany,
     type IUserSheet,
     LIKES_SHEET_ID,
 } from "@/core/musicSheet";
-import { openAddToSheet, showToast, openPrompt, openMusicActions } from "@/core/uiAtoms";
+import { showToast, openPrompt, openMusicActions } from "@/core/uiAtoms";
 import { deleteSheet, renameSheet, sheetsVersionAtom, likesVersionAtom } from "@/core/musicSheet";
 import { useAtomValue } from "jotai";
 import MusicList from "@/components/base/MusicList";
+import AutoLoadMore from "@/components/base/AutoLoadMore";
 import MusicListSkeleton from "@/components/base/MusicListSkeleton";
 import Cover from "@/components/base/Cover";
-import { IconBack, IconMore, IconPlay } from "@/components/base/Icons";
+import PlayAllBar from "@/components/base/PlayAllBar";
+import SelectActionsBar from "@/components/base/SelectActionsBar";
+import { useMusicMultiSelect } from "@/hooks/useMusicMultiSelect";
+import { IconBack, IconMore } from "@/components/base/Icons";
 
 /**
  * 歌单详情页（网易云歌单页风格，三种来源）：
@@ -135,6 +139,15 @@ export default function SheetDetailPage() {
         return (info as any)?.creator ?? "";
     }, [userSheet, info]);
 
+    // 多选（下载 / 收藏 / 本地歌单删除）
+    const multi = useMusicMultiSelect(musicList);
+
+    // 切换歌单时退出多选态
+    useEffect(() => {
+        multi.exitSelect();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [userSheetId, sheetItem]);
+
     if (!userSheetId && !sheetItem) {
         return <div className="empty-tip">歌单不存在</div>;
     }
@@ -153,6 +166,26 @@ export default function SheetDetailPage() {
         } else {
             showToast("列表是空的");
         }
+    };
+
+    /** 批量从歌单移除（多选删除） */
+    const batchRemoveFromSheet = (items: IMusic.IMusicItem[]) => {
+        if (!userSheetId) {
+            return;
+        }
+        removeMusicFromSheetMany(userSheetId, items);
+        const keys = new Set(items.map((it) => `${it.platform}-${it.id}`));
+        setUserSheet((prev) =>
+            prev
+                ? {
+                      ...prev,
+                      musicList: prev.musicList.filter(
+                          (it) => !keys.has(`${it.platform}-${it.id}`),
+                      ),
+                  }
+                : prev,
+        );
+        setMusicList((prev) => prev.filter((it) => !keys.has(`${it.platform}-${it.id}`)));
     };
 
     return (
@@ -244,11 +277,16 @@ export default function SheetDetailPage() {
                 </div>
             </div>
 
-            <button className="detail-playall" onClick={playAll}>
-                <IconPlay size={18} />
-                播放全部
-                <span className="pa-sub">({musicList.length})</span>
-            </button>
+            <PlayAllBar
+                count={musicList.length}
+                onPlayAll={playAll}
+                selectMode={multi.selectMode}
+                selectedCount={multi.selected.length}
+                onEnterSelect={musicList.length ? multi.enterSelect : undefined}
+                onExitSelect={multi.exitSelect}
+                onSelectAll={multi.selectAll}
+                onDeselectAll={multi.deselectAll}
+            />
 
             {loading ? (
                 <MusicListSkeleton />
@@ -260,47 +298,33 @@ export default function SheetDetailPage() {
                         musicList={musicList}
                         listId={listId}
                         showIndex
+                        selectMode={multi.selectMode}
+                        selectedKeys={multi.selectedKeys}
+                        onToggleSelect={multi.toggleSelect}
                         onRemoveItem={
-                            userSheetId
-                                ? (item) => {
-                                      removeMusicFromSheet(userSheetId, item);
-                                      setUserSheet((prev) =>
-                                          prev
-                                              ? {
-                                                    ...prev,
-                                                    musicList: prev.musicList.filter(
-                                                        (it) =>
-                                                            !(
-                                                                it.id === item.id &&
-                                                                it.platform === item.platform
-                                                            ),
-                                                    ),
-                                                }
-                                              : prev,
-                                      );
-                                      setMusicList((prev) =>
-                                          prev.filter(
-                                              (it) =>
-                                                  !(
-                                                      it.id === item.id &&
-                                                      it.platform === item.platform
-                                                  ),
-                                          ),
-                                      );
-                                  }
+                            userSheetId && !multi.selectMode
+                                ? (item) => batchRemoveFromSheet([item])
                                 : undefined
                         }
                     />
-                    {!userSheetId && !isEnd && musicList.length > 0 && (
-                        <button
-                            className="settings-btn"
-                            style={{ margin: "12px auto", display: "block" }}
-                            disabled={loadingMore}
-                            onClick={loadMore}
-                        >
-                            {loadingMore ? "加载中…" : "加载更多"}
-                        </button>
+                    {multi.selectMode && (
+                        <SelectActionsBar
+                            count={multi.selected.length}
+                            downloading={multi.downloading}
+                            onDownload={multi.startDownload}
+                            onCollect={multi.startCollect}
+                            onDelete={
+                                userSheetId ? () => multi.startDelete(batchRemoveFromSheet) : undefined
+                            }
+                        />
                     )}
+                    <AutoLoadMore
+                        onLoadMore={loadMore}
+                        loadingMore={loadingMore}
+                        hasMore={!userSheetId && !isEnd && musicList.length > 0}
+                        itemsLength={musicList.length}
+                        showEndTip={musicList.length > 6}
+                    />
                     {userSheetId === LIKES_SHEET_ID && !musicList.length && (
                         <div className="empty-tip">还没有喜欢的音乐
                             <br />长按或点歌曲右侧的红心把它收进来

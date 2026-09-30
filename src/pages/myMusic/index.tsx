@@ -8,6 +8,11 @@ import {
     LIKES_SHEET_ID,
 } from "@/core/musicSheet";
 import { getMusicHistory } from "@/core/musicHistory";
+import { getDownloadedMusicList, downloadsVersionAtom } from "@/core/musicDownload";
+import {
+    getLocalMusicCount,
+    localMusicVersionAtom,
+} from "@/core/localMusic";
 import { navigate } from "@/core/router";
 import { openPrompt, openMusicActions, openDrawer, showToast } from "@/core/uiAtoms";
 import Cover from "@/components/base/Cover";
@@ -16,6 +21,8 @@ import {
     IconMore,
     IconMenu,
     IconHistory,
+    IconDownload,
+    IconFolderMusic,
     IconHeart,
     IconListMusic,
     IconChevronRight,
@@ -24,14 +31,20 @@ import {
 } from "@/components/base/Icons";
 import { TrackPlayerSingleton } from "@/core/trackPlayer";
 
-/** 我的页：我的歌单（含我喜欢的音乐）/ 播放历史 / 设置；音源、插件等低频入口收进左上角侧边栏 */
+/** 我的页：我的歌单（含我喜欢的音乐）/ 本地音乐 / 播放历史 / 设置；音源、插件等低频入口收进左上角侧边栏 */
 export default function MyMusicPage() {
     const sheetsVersion = useAtomValue(sheetsVersionAtom);
+    const downloadsVersion = useAtomValue(downloadsVersionAtom);
+    const localVersion = useAtomValue(localMusicVersionAtom);
     void sheetsVersion;
+    void downloadsVersion;
+    void localVersion;
     const sheets = getUserSheets();
     const likesSheet = sheets.find((it) => it.id === LIKES_SHEET_ID);
     const userSheets = sheets.filter((it) => it.id !== LIKES_SHEET_ID);
     const historyCount = getMusicHistory().length;
+    const downloadsCount = getDownloadedMusicList().length;
+    const localCount = getLocalMusicCount();
 
     const onCreateSheet = () => {
         openPrompt({
@@ -63,6 +76,26 @@ export default function MyMusicPage() {
             </div>
 
             <div className="mine-list">
+                <div className="mine-row" onClick={() => navigate("downloads")}>
+                    <span className="m-icon">
+                        <IconDownload size={21} />
+                    </span>
+                    <span className="mine-row-label">我的下载</span>
+                    <span className="mine-row-extra">{downloadsCount || ""}</span>
+                    <span className="chevron">
+                        <IconChevronRight size={18} />
+                    </span>
+                </div>
+                <div className="mine-row" onClick={() => navigate("localMusic")}>
+                    <span className="m-icon">
+                        <IconFolderMusic size={21} />
+                    </span>
+                    <span className="mine-row-label">本地音乐</span>
+                    <span className="mine-row-extra">{localCount || ""}</span>
+                    <span className="chevron">
+                        <IconChevronRight size={18} />
+                    </span>
+                </div>
                 <div className="mine-row" onClick={() => navigate("history")}>
                     <span className="m-icon">
                         <IconHistory size={21} />

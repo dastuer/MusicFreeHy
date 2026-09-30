@@ -159,6 +159,12 @@ export const IconClose = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
     </svg>
 );
 
+export const IconStop = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
+    <svg {...base(size)} strokeWidth={strokeWidth}>
+        <rect x="7" y="7" width="10" height="10" rx="1.5" />
+    </svg>
+);
+
 export const IconChevronLeft = ({ size = 22, strokeWidth = 2 }: IIconProps) => (
     <svg {...base(size)} strokeWidth={strokeWidth}>
         <path d="M14.5 5.5L8 12l6.5 6.5" />
@@ -306,16 +312,6 @@ export const IconDisc = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
     </svg>
 );
 
-export const IconStar = ({
-    size = 22,
-    strokeWidth = 1.8,
-    filled = false,
-}: IIconProps & { filled?: boolean }) => (
-    <svg {...base(size)} strokeWidth={strokeWidth} fill={filled ? "currentColor" : "none"}>
-        <path d="M12 3.8l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4-3.9-3.8 5.4-.8z" />
-    </svg>
-);
-
 export const IconMic = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
     <svg {...base(size)} strokeWidth={strokeWidth}>
         <circle cx="15" cy="9" r="4.5" />
@@ -331,10 +327,53 @@ export const IconListMusic = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
     </svg>
 );
 
+/** 文件夹 + 音符（本地音乐入口） */
+export const IconFolderMusic = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
+    <svg {...base(size)} strokeWidth={strokeWidth}>
+        <path d="M3.5 7a2 2 0 0 1 2-2h4.2l2 2.5h7.3a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2Z" />
+        <circle cx="10.2" cy="15.6" r="1.6" />
+        <path d="M11.8 15.6v-4.4l4-1v4.2" />
+        <circle cx="14.2" cy="14.6" r="1.6" />
+    </svg>
+);
+
+/** 普通文件夹（文件夹浏览列表） */
+export const IconFolder = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
+    <svg {...base(size)} strokeWidth={strokeWidth}>
+        <path d="M3.5 7a2 2 0 0 1 2-2h4.2l2 2.5h7.3a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2Z" />
+    </svg>
+);
+
+/** 文件夹 + 加号（添加扫描目录） */
+export const IconFolderPlus = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
+    <svg {...base(size)} strokeWidth={strokeWidth}>
+        <path d="M3.5 7a2 2 0 0 1 2-2h4.2l2 2.5h7.3a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2Z" />
+        <path d="M12 11v5M9.5 13.5h5" />
+    </svg>
+);
+
+/** 文件夹 + 放大镜（扫描本地音乐） */
+export const IconFolderSearch = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
+    <svg {...base(size)} strokeWidth={strokeWidth}>
+        <path d="M12.6 18.5H5.5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h4.2l2 2.5h5.3a2 2 0 0 1 2 2v2.3" />
+        <circle cx="15.8" cy="15.8" r="3.6" />
+        <path d="M18.4 18.4L21 21" />
+    </svg>
+);
+
 export const IconPlayCircle = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
     <svg {...base(size)} strokeWidth={strokeWidth}>
         <circle cx="12" cy="12" r="8.5" />
         <path d="M10 8.5l6 3.5-6 3.5v-7z" fill="currentColor" stroke="none" />
+    </svg>
+);
+
+/** 多选入口（列表 + 勾，网易云风格） */
+export const IconMultiSelect = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
+    <svg {...base(size)} strokeWidth={strokeWidth}>
+        <path d="M4 6h16M4 12h16" />
+        <path d="M4 18h7" />
+        <path d="M13.5 18l2.4 2.4 4.6-5" />
     </svg>
 );
 

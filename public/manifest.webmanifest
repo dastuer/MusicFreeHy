@@ -1,7 +1,7 @@
 {
-    "name": "MusicFree",
-    "short_name": "MusicFree",
-    "description": "MusicFree 手机版 - 运行在手机上的音乐播放器",
+    "name": "MusicFreeHy",
+    "short_name": "MusicFreeHy",
+    "description": "MusicFreeHy - 运行在手机上的音乐播放器",
     "start_url": "./",
     "scope": "./",
     "display": "standalone",

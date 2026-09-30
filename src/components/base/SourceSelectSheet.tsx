@@ -1,21 +1,20 @@
 import { useAtomValue } from "jotai";
-import { sourceSelectOpenAtom, closeSourceSelect, showToast } from "@/core/uiAtoms";
+import { sourceSelectOpenAtom, closeSourceSelect } from "@/core/uiAtoms";
 import { navigate } from "@/core/router";
 import {
     useGlobalSource,
     useUsablePlugins,
     useDefaultPluginHash,
-    setDefaultPluginHash,
     setGlobalSource,
     AUTO_SOURCE,
 } from "@/core/mediaSource";
 import { useBackLayer } from "@/core/systemBack";
-import { IconCheck, IconStar, IconPuzzle } from "./Icons";
+import { IconCheck, IconPuzzle } from "./Icons";
 
 /**
  * 音源设置底部面板：「我的 → 音源设置」与首页侧边栏统一入口。
- *  - 点行切换全局音源，所有页面立即生效；
- *  - 点星标设/取消默认音源（冷启动时优先使用，失败自动降级）。
+ * 点行切换全局音源，所有页面立即生效；
+ * 默认音源（冷启动时优先使用，失败自动降级）在「插件管理」里设置。
  */
 export default function SourceSelectSheet() {
     const open = useAtomValue(sourceSelectOpenAtom);
@@ -42,9 +41,6 @@ export default function SourceSelectSheet() {
         <div className="sheet-mask" onClick={() => closeSourceSelect()}>
             <div className="add-sheet-panel" onClick={(e) => e.stopPropagation()}>
                 <div className="add-sheet-header">音源设置</div>
-                <div className="source-select-sub">
-                    全局生效：发现 / 搜索 / 榜单 / 歌单等页面共用
-                </div>
                 <div className="add-sheet-list">
                     <div
                         className="add-sheet-row"
@@ -74,21 +70,6 @@ export default function SourceSelectSheet() {
                                     )}
                                 </div>
                             </div>
-                            <button
-                                className={`source-star-btn ${defaultHash === p.hash ? "on" : ""}`}
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    const next = defaultHash === p.hash ? null : p.hash;
-                                    setDefaultPluginHash(next);
-                                    showToast(
-                                        next
-                                            ? `已将「${p.name}」设为默认音源，全局音源已切回默认`
-                                            : "已取消默认音源",
-                                    );
-                                }}
-                            >
-                                <IconStar size={17} filled={defaultHash === p.hash} />
-                            </button>
                             {current === p.hash && (
                                 <span className="source-select-check">
                                     <IconCheck size={17} />
