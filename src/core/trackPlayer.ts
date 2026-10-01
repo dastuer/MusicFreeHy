@@ -795,6 +795,32 @@ class TrackPlayer extends EventEmitter {
         );
     }
 
+    /**
+     * 播放期间曲目的展示元数据被外部更新（本地音乐匹配到歌词 / 封面）时同步进来：
+     * 替换当前曲目与队列里的同曲目条目并落盘，不影响音频播放。
+     * currentMusic 换新对象还会驱动播放页重载歌词。
+     */
+    updateMusicItemMeta(item: IMusic.IMusicItem) {
+        const sameKey = (a?: IMusic.IMusicItem | null) =>
+            !!a && a.id === item.id && a.platform === item.platform;
+        let touched = false;
+        if (sameKey(this._currentMusic)) {
+            this._currentMusic = { ...this._currentMusic!, ...item };
+            setAtom(currentMusicAtom, this._currentMusic);
+            touched = true;
+        }
+        if (this.getMusicIndexInPlayList(item) >= 0) {
+            this._playList = this._playList.map((it) =>
+                it.id === item.id && it.platform === item.platform ? { ...it, ...item } : it,
+            );
+            setAtom(playListAtom, this._playList);
+            touched = true;
+        }
+        if (touched) {
+            this.persistPlayList();
+        }
+    }
+
     isInPlayList(musicItem?: IMusic.IMusicItem | null) {
         return this.getMusicIndexInPlayList(musicItem) >= 0;
     }

@@ -9,7 +9,7 @@ import {
     writeIosFile,
 } from "./musicDownload";
 import { getSortedSearchablePlugins, pluginCall, type SerializedPlugin } from "./ipc";
-import { setLocalLyricResolver } from "./trackPlayer";
+import { setLocalLyricResolver, TrackPlayerSingleton } from "./trackPlayer";
 import { showToast } from "./uiAtoms";
 
 /**
@@ -29,7 +29,8 @@ import { showToast } from "./uiAtoms";
  *
  * 「匹配歌词与封面」：逐首用音源插件搜索候选并打分取最优，歌词 / 封面
  * 下载到应用目录（Android filesDir、iOS DATA 下的 match_meta/），记录里存路径；
- * 支持暂停 / 继续 / 停止，进度经 matchTaskAtom 驱动页面顶部进度条。
+ * 支持暂停 / 继续 / 停止，进度经 matchTaskAtom 驱动页面顶部进度条；
+ * 任务队列持久化到 localStorage，应用退出（进程被杀）后下次启动自动续跑。
  */
 
 export const localMusicVersionAtom = atom(0);
@@ -155,6 +156,18 @@ export function toMusicItem(record: ILocalMusicRecord): IMusic.IMusicItem {
         // 匹配到的歌词随条目带给播放器（loadCurrentLyric 优先读 musicItem.lyric）
         ...(record.lyricPath ? { lyric: { lrc: localFileUrl(record.lyricPath) } } : {}),
     };
+}
+
+/** 按 localPath / id 反查曲库记录（播放器 / 历史里的条目 → 曲库记录） */
+export function findLocalRecord(musicItem: {
+    localPath?: string;
+    id?: string;
+}): ILocalMusicRecord | undefined {
+    const key = String(musicItem.localPath ?? musicItem.id ?? "");
+    if (!key) {
+        return undefined;
+    }
+    return readLibrary().find((it) => it.localPath === key || it.id === key);
 }
 
 /* ---------- 扫描目录配置 ---------- */
@@ -666,35 +679,127 @@ interface IMatchRunner {
     stopped: boolean;
 }
 
-let matchRunner: IMatchRunner | null = null;
+/** 一次匹配任务的运行时上下文（队列与配置同时是持久化的数据来源） */
+interface IMatchSession {
+    runner: IMatchRunner;
+    plugin: SerializedPlugin;
+    options: IMatchOptions;
+    /** 待处理曲目 id 队列，队首是正在处理的一首 */
+    remaining: string[];
+    lastSave: number;
+}
+
+let matchSession: IMatchSession | null = null;
 
 export function isMatchRunning(): boolean {
-    return matchRunner !== null;
+    return matchSession !== null;
+}
+
+/* ----- 匹配任务持久化：应用退出（进程被杀）后，下次启动从这里续跑 ----- */
+
+const MATCH_TASK_KEY = "localMusic.matchTask";
+
+interface IPersistedMatchTask {
+    options: IMatchOptions;
+    pluginHash?: string;
+    /** 还没处理完的曲目 id */
+    remaining: string[];
+    total: number;
+    done: number;
+    matched: number;
+    failed: number;
+    status: "running" | "paused";
+    savedAt: number;
+}
+
+function readSavedMatchTask(): IPersistedMatchTask | null {
+    try {
+        const obj = JSON.parse(localStorage.getItem(MATCH_TASK_KEY) ?? "null");
+        if (
+            obj &&
+            Array.isArray(obj.remaining) &&
+            obj.remaining.every((id: any) => typeof id === "string") &&
+            typeof obj.total === "number" &&
+            typeof obj.options?.matchLyric === "boolean" &&
+            typeof obj.options?.matchCover === "boolean"
+        ) {
+            return obj as IPersistedMatchTask;
+        }
+    } catch {
+        // ignore
+    }
+    return null;
+}
+
+function writeSavedMatchTask(task: IPersistedMatchTask) {
+    try {
+        localStorage.setItem(MATCH_TASK_KEY, JSON.stringify(task));
+    } catch {
+        // ignore
+    }
+}
+
+function clearSavedMatchTask() {
+    try {
+        localStorage.removeItem(MATCH_TASK_KEY);
+    } catch {
+        // ignore
+    }
+}
+
+/** 把当前进度写进持久化（默认 1s 节流；任务启动 / 暂停 / 继续时强制写） */
+function persistMatchProgress(session: IMatchSession, force = false) {
+    const now = Date.now();
+    if (!force && now - session.lastSave < 1000) {
+        return;
+    }
+    const state = getDefaultStore().get(matchTaskAtom);
+    if (!state) {
+        return;
+    }
+    session.lastSave = now;
+    writeSavedMatchTask({
+        options: session.options,
+        pluginHash: session.plugin.hash,
+        remaining: session.remaining,
+        total: state.total,
+        done: state.done,
+        matched: state.matched,
+        failed: state.failed,
+        status: session.runner.paused ? "paused" : "running",
+        savedAt: now,
+    });
 }
 
 export function pauseLocalMatch() {
-    if (matchRunner) {
-        matchRunner.paused = true;
+    const session = matchSession;
+    if (session) {
+        session.runner.paused = true;
         getDefaultStore().set(matchTaskAtom, (prev) =>
             prev ? { ...prev, status: "paused", current: "" } : prev,
         );
+        persistMatchProgress(session, true);
     }
 }
 
 export function resumeLocalMatch() {
-    if (matchRunner) {
-        matchRunner.paused = false;
+    const session = matchSession;
+    if (session) {
+        session.runner.paused = false;
         getDefaultStore().set(matchTaskAtom, (prev) =>
             prev ? { ...prev, status: "running" } : prev,
         );
+        persistMatchProgress(session, true);
     }
 }
 
-/** 停止任务：当前这首处理完后退出，结果由任务收尾时 toast 播报 */
+/** 停止任务：当前这首处理完后退出，结果由任务收尾时 toast 播报；持久化进度一并清除 */
 export function stopLocalMatch() {
-    if (matchRunner) {
-        matchRunner.stopped = true;
-        matchRunner.paused = false;
+    const session = matchSession;
+    if (session) {
+        session.runner.stopped = true;
+        session.runner.paused = false;
+        clearSavedMatchTask();
     }
 }
 
@@ -714,7 +819,7 @@ export async function startLocalMatch(
     records: ILocalMusicRecord[],
     options: IMatchOptions,
 ): Promise<void> {
-    if (matchRunner) {
+    if (matchSession) {
         throw new Error("已有匹配任务在进行中");
     }
     if (currentPlatform() === "web") {
@@ -741,28 +846,123 @@ export async function startLocalMatch(
         showToast("所选歌曲都已有歌词或封面，无需匹配");
         return;
     }
+    // 等待音源初始化期间可能已恢复了上次的任务
+    if (matchSession) {
+        throw new Error("已有匹配任务在进行中");
+    }
 
-    const runner: IMatchRunner = { paused: false, stopped: false };
-    matchRunner = runner;
-    const store = getDefaultStore();
-    store.set(matchTaskAtom, {
+    const session: IMatchSession = {
+        runner: { paused: false, stopped: false },
+        plugin,
+        options,
+        remaining: targets.map((it) => it.id),
+        lastSave: 0,
+    };
+    matchSession = session;
+    getDefaultStore().set(matchTaskAtom, {
         status: "running",
-        total: targets.length,
+        total: session.remaining.length,
         done: 0,
         matched: 0,
         failed: 0,
         current: "",
     });
+    persistMatchProgress(session, true);
+    await runMatchLoop(session);
+}
+
+/**
+ * 启动时恢复上次未完成的匹配任务：应用退出（进程被杀）后 WebView 里的
+ * 匹配循环随之消失，进度已持久化，这里读出来续跑。暂停状态下恢复为
+ * 暂停，等用户在「本地音乐」页继续。
+ */
+export async function resumeSavedMatchTask(): Promise<void> {
+    if (resumeInFlight || matchSession) {
+        return;
+    }
+    const saved = readSavedMatchTask();
+    if (!saved) {
+        return;
+    }
+    resumeInFlight = true;
+    try {
+        const libById = new Map(readLibrary().map((it) => [it.id, it]));
+        const remaining = saved.remaining.filter((id) => libById.has(id));
+        if (!remaining.length) {
+            // 剩余曲目已全部不在曲库里（重扫移除等），任务没有意义了
+            clearSavedMatchTask();
+            return;
+        }
+        const searchable = await getSortedSearchablePlugins();
+        if (!searchable.length) {
+            clearSavedMatchTask();
+            showToast("没有可用音源插件，上次未完成的匹配任务已取消");
+            return;
+        }
+        if (matchSession) {
+            return;
+        }
+        const plugin = saved.pluginHash
+            ? searchable.find((p) => p.hash === saved.pluginHash) ?? searchable[0]
+            : searchable[0];
+        const session: IMatchSession = {
+            runner: { paused: saved.status === "paused", stopped: false },
+            plugin,
+            options: saved.options,
+            remaining,
+            lastSave: 0,
+        };
+        matchSession = session;
+        getDefaultStore().set(matchTaskAtom, {
+            status: session.runner.paused ? "paused" : "running",
+            total: saved.done + remaining.length,
+            done: saved.done,
+            matched: saved.matched,
+            failed: saved.failed,
+            current: "",
+        });
+        // 暂停恢复也照常起循环：循环开头会在暂停态自旋等待
+        void runMatchLoop(session).catch((e: any) =>
+            console.warn("[localMusic] 恢复的匹配任务异常中断", e?.message ?? e),
+        );
+        showToast(
+            session.runner.paused
+                ? `已恢复上次暂停的匹配任务，还剩 ${remaining.length} 首，可在本地音乐页继续`
+                : `继续上次的匹配任务，还剩 ${remaining.length} 首`,
+            3600,
+        );
+    } finally {
+        resumeInFlight = false;
+    }
+}
+
+/** StrictMode 下 effect 会跑两遍，防止并发恢复出两个任务 */
+let resumeInFlight = false;
+
+async function runMatchLoop(session: IMatchSession): Promise<void> {
+    const { runner, plugin, options, remaining } = session;
+    const store = getDefaultStore();
+    const byId = new Map(readLibrary().map((it) => [it.id, it]));
     try {
         // 匹配结果逐条落盘，但版本号节流自增（每 1.2s 最多一次），
         // 避免长列表页每首歌都整体重置渲染窗口
         let lastBump = 0;
-        for (const rec of targets) {
+        while (remaining.length) {
             while (runner.paused && !runner.stopped) {
                 await sleep(160);
             }
             if (runner.stopped) {
                 break;
+            }
+            const rec = byId.get(remaining[0]);
+            if (!rec) {
+                // 曲库重扫后该文件已不在，直接跳过
+                remaining.shift();
+                store.set(matchTaskAtom, (prev) =>
+                    prev ? { ...prev, done: prev.done + 1 } : prev,
+                );
+                persistMatchProgress(session);
+                continue;
             }
             store.set(matchTaskAtom, (prev) =>
                 prev ? { ...prev, current: `${rec.artist} - ${rec.title}` } : prev,
@@ -789,17 +989,26 @@ export async function startLocalMatch(
                     prev ? { ...prev, done: prev.done + 1, failed: prev.failed + 1 } : prev,
                 );
             }
+            // 处理完（含失败）才出队：中途被杀时这首下次会重跑
+            remaining.shift();
+            persistMatchProgress(session);
         }
     } finally {
         const state = store.get(matchTaskAtom);
-        const wasStopped = runner.stopped;
-        matchRunner = null;
+        const isCurrent = matchSession === session;
+        if (isCurrent) {
+            matchSession = null;
+        }
         store.set(matchTaskAtom, null);
+        // 跑完 / 用户停止才清持久化；异常中断时保留，下次启动续跑
+        if (isCurrent && !runner.stopped && !remaining.length) {
+            clearSavedMatchTask();
+        }
         // 收尾补一次刷新（节流期间落盘的最后几条也要上屏）
         bumpLocalMusicVersion();
         if (state) {
             showToast(
-                wasStopped
+                runner.stopped
                     ? `已停止：处理了 ${state.done}/${state.total} 首，成功匹配 ${state.matched} 首`
                     : `匹配完成：成功 ${state.matched} 首${
                           state.failed ? `，${state.failed} 首未能匹配` : ""
@@ -1096,7 +1305,7 @@ async function matchOneRecord(
     rec: ILocalMusicRecord,
     plugin: SerializedPlugin,
     options: IMatchOptions,
-): Promise<{ matched: boolean }> {
+): Promise<{ matched: boolean; gotLyric: boolean; gotCover: boolean }> {
     const hasArtist = rec.artist && rec.artist !== "未知歌手";
     const kw = hasArtist ? `${rec.title} ${rec.artist}` : rec.title;
     let candidates = await searchCandidates(plugin, kw);
@@ -1104,11 +1313,11 @@ async function matchOneRecord(
         candidates = await searchCandidates(plugin, rec.title);
     }
     if (!candidates.length) {
-        return { matched: false };
+        return { matched: false, gotLyric: false, gotCover: false };
     }
     const best = pickBestCandidate(rec, candidates);
     if (!best) {
-        return { matched: false };
+        return { matched: false, gotLyric: false, gotCover: false };
     }
 
     const updates: Partial<ILocalMusicRecord> = {};
@@ -1131,12 +1340,58 @@ async function matchOneRecord(
         }
     }
     if (!updates.lyricPath && !updates.matchedArtwork) {
-        return { matched: false };
+        return { matched: false, gotLyric: false, gotCover: false };
     }
     updates.matchedSource = plugin.name;
     updates.matchedAt = Math.floor(Date.now() / 1000);
     applyRecordUpdate(rec.id, updates);
-    return { matched: true };
+    return {
+        matched: true,
+        gotLyric: !!updates.lyricPath,
+        gotCover: !!updates.matchedArtwork,
+    };
+}
+
+/**
+ * 播放详情页「获取封面歌词」：只匹配当前播放的这一首，缺什么补什么
+ * （已有歌词就不再拉歌词；扫描提取的内嵌封面还在就不换封面）。
+ * 成功后把新封面 / 歌词同步进播放器的当前曲目与队列条目（不打断播放），
+ * 并 bump 曲库版本号驱动本地音乐列表刷新。
+ */
+export async function matchSingleLocalMusic(
+    musicItem: IMusic.IMusicItem,
+): Promise<{ matched: boolean; gotLyric: boolean; gotCover: boolean }> {
+    if (currentPlatform() === "web") {
+        throw new Error("当前环境不支持匹配，请在手机 App 中使用");
+    }
+    const rec = findLocalRecord(musicItem);
+    if (!rec) {
+        throw new Error("本地曲库里没有这首歌的记录");
+    }
+    const options: IMatchOptions = {
+        matchLyric: !rec.lyricPath,
+        matchCover: !(rec.matchedArtwork || rec.artwork),
+        skipMatched: false,
+    };
+    if (!options.matchLyric && !options.matchCover) {
+        return { matched: false, gotLyric: false, gotCover: false };
+    }
+    const searchable = await getSortedSearchablePlugins();
+    if (!searchable.length) {
+        throw new Error("没有可用的音源插件，请先安装并启用");
+    }
+    // 单首匹配没有选源面板：跟随用户设置的默认音源，没设置就用排序后的第一个
+    const defaultHash = localStorage.getItem("defaultPluginHash") || "";
+    const plugin = searchable.find((p) => p.hash === defaultHash) ?? searchable[0];
+    const r = await matchOneRecord(rec, plugin, options);
+    if (r.matched) {
+        const fresh = readLibrary().find((it) => it.id === rec.id);
+        if (fresh) {
+            TrackPlayerSingleton.updateMusicItemMeta(toMusicItem(fresh));
+        }
+        bumpLocalMusicVersion();
+    }
+    return r;
 }
 
 /* ----- 旧条目的歌词现查（历史 / 歌单里存的本地条目可能没有随匹配更新） ----- */
@@ -1145,8 +1400,7 @@ async function readLyricFor(musicItem: IMusic.IMusicItem): Promise<string> {
     if (!isNative()) {
         return "";
     }
-    const key = String(musicItem.localPath ?? musicItem.id ?? "");
-    const rec = readLibrary().find((it) => it.localPath === key || it.id === key);
+    const rec = findLocalRecord(musicItem);
     if (!rec?.lyricPath) {
         return "";
     }

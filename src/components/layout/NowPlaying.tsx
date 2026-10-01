@@ -23,6 +23,7 @@ import {
     showToast,
 } from "@/core/uiAtoms";
 import { isLikedMusic, toggleLike, likesVersionAtom } from "@/core/musicSheet";
+import { localMusicVersionAtom, findLocalRecord, matchSingleLocalMusic } from "@/core/localMusic";
 import { navigate } from "@/core/router";
 import { useBackLayer } from "@/core/systemBack";
 import { formatSeconds, cssUrl } from "@/core/utils";
@@ -138,6 +139,10 @@ function NowPlayingInner({
     const lyric = useCurrentLyric();
     const likesVersion = useAtomValue(likesVersionAtom);
     const isDownloading = useAtomValue(downloadingAtom);
+    // 本地音乐曲库版本号：单曲匹配成功后 bump，驱动这里的按钮状态与封面歌词刷新
+    const lmVersion = useAtomValue(localMusicVersionAtom);
+    void lmVersion;
+    const [matchingMeta, setMatchingMeta] = useState(false);
 
     const [showLyrics, setShowLyrics] = useState(false);
     const [rate, setRate] = useState(1);
@@ -359,6 +364,36 @@ function NowPlayingInner({
         return null;
     }
 
+    /* 本地音乐「获取封面歌词」（参考网易云）：歌词或封面没就绪时给一键匹配入口，
+       匹配成功后播放器条目被更新，这里经曲库版本号与 currentMusic 自动刷新 */
+    const localRecord =
+        currentMusic.platform === "local" ? findLocalRecord(currentMusic) : undefined;
+    const canFetchMeta =
+        !!localRecord &&
+        (!localRecord.lyricPath || !(localRecord.matchedArtwork || localRecord.artwork));
+
+    const fetchMetaForCurrent = async () => {
+        if (matchingMeta) {
+            return;
+        }
+        setMatchingMeta(true);
+        try {
+            const r = await matchSingleLocalMusic(currentMusic);
+            if (!r.matched) {
+                showToast("没有匹配到合适的歌词或封面");
+            } else {
+                const got = [r.gotLyric ? "歌词" : "", r.gotCover ? "封面" : ""]
+                    .filter(Boolean)
+                    .join("与");
+                showToast(`已获取${got}`);
+            }
+        } catch (e: any) {
+            showToast(e?.message ?? String(e), 3600);
+        } finally {
+            setMatchingMeta(false);
+        }
+    };
+
     const close = () => {
         setNowPlayingOpen(false);
         setShowLyrics(false);
@@ -559,6 +594,25 @@ function NowPlayingInner({
                                 </div>
                             )}
                         </div>
+                    </div>
+                )}
+
+                {canFetchMeta && (
+                    <div className="np-fetch-row">
+                        <button
+                            className="np-fetch-btn"
+                            disabled={matchingMeta}
+                            onClick={fetchMetaForCurrent}
+                        >
+                            {matchingMeta ? (
+                                <>
+                                    <Spinner size={12} strokeWidth={2.2} />
+                                    正在获取…
+                                </>
+                            ) : (
+                                "获取封面歌词"
+                            )}
+                        </button>
                     </div>
                 )}
 

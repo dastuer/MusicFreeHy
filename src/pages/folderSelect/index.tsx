@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { goBack } from "@/core/router";
 import { addNativeListener, callNativeMethod } from "@/core/native";
+import { useBackLayer } from "@/core/systemBack";
 import { openPrompt, showToast } from "@/core/uiAtoms";
 import {
     downloadSaveTargetLabel,
@@ -43,9 +44,12 @@ import {
  *  - iOS：Filesystem 插件 readdir（沙盒内无权限问题），音频计数逐目录懒加载。
  *
  * 列表行左侧为文件夹名 + 音频数「N首」，右侧始终是勾选框：多选模式勾选加入
- * 扫描集合，单选模式勾选即选定该文件夹为下载目录（先探针验证可写）；
- * 「Android」等系统目录与隐藏目录显示「已过滤」，不可进入也不可勾选。
- * 底部为文字操作：新建文件夹（创建并进入）+ 单选「选择此文件夹」/ 多选「立即扫描」。
+ * 扫描集合；单选模式勾选只做「待选标记」（单选互斥），底部「选择此文件夹」
+ * 确认后才写回设置（先探针验证可写），勾选不会立即生效。「Android」等系统
+ * 目录与隐藏目录显示「已过滤」，不可进入也不可勾选。
+ * 底部为文字操作：新建文件夹（创建后留在当前目录并滚动定位到新文件夹）+
+ * 单选「选择此文件夹」/ 多选「立即扫描」。系统返回 / 侧滑优先回到上一级
+ * 文件夹，到根目录后才退出本页；进入 / 返回目录时记忆并恢复各自的滚动位置。
  */
 
 type IOPlatform = "android" | "ios";
@@ -183,8 +187,17 @@ export default function FolderSelectPage({ mode }: { mode: "single" | "multi" })
     );
     /** 多选：已勾选（绝对路径 → 相对段） */
     const [checked, setChecked] = useState<Map<string, string[]>>(new Map());
+    /** 单选：待确认的勾选（"system"=系统下载目录，否则为具体文件夹）；null=未勾选（确认当前所在文件夹） */
+    const [pending, setPending] = useState<
+        { kind: "system" } | { kind: "dir"; abs: string; segs: string[] } | null
+    >(null);
 
     const loadSeq = useRef(0);
+    /** .fsp-scroll 容器 + 新建文件夹后要滚动定位到的目录名 */
+    const scrollRef = useRef<HTMLDivElement | null>(null);
+    const scrollToName = useRef<string | null>(null);
+    /** 各目录离开时的滚动位置（绝对路径 → scrollTop），返回 / 重进时恢复 */
+    const scrollPos = useRef<Map<string, number>>(new Map());
 
     /* 初始化：解析存储根 + 回显当前状态 + Android 授权速查 */
     useEffect(() => {
@@ -297,6 +310,51 @@ export default function FolderSelectPage({ mode }: { mode: "single" | "multi" })
         };
     }, [platform, dirs, segs]);
 
+    const hereAbs = joinAbs(rootPath, segs);
+
+    /** 记录当前目录的滚动位置，离开（进入子级 / 返回上级 / 刷新）前调用 */
+    const saveScroll = () => {
+        const el = scrollRef.current;
+        if (el) {
+            scrollPos.current.set(hereAbs, el.scrollTop);
+        }
+    };
+
+    /* 列表刷新完成后的滚动处理（优先级）：新建文件夹定位 > 恢复该目录记忆的位置 > 回到顶部 */
+    useEffect(() => {
+        if (dirs === null) {
+            return;
+        }
+        const raf = requestAnimationFrame(() => {
+            const el = scrollRef.current;
+            if (!el) {
+                return;
+            }
+            const newName = scrollToName.current;
+            if (newName) {
+                scrollToName.current = null;
+                el.querySelector(`[data-dir-name=${CSS.escape(newName)}]`)?.scrollIntoView({
+                    block: "center",
+                    behavior: "smooth",
+                });
+                return;
+            }
+            el.scrollTop = scrollPos.current.get(hereAbs) ?? 0;
+        });
+        return () => cancelAnimationFrame(raf);
+    }, [dirs, hereAbs]);
+
+    /* 返回（头部按钮 / Android 返回键 / iOS 侧滑）优先回到上一级文件夹，到根目录才退出本页 */
+    const goUp = () => {
+        if (segs.length) {
+            saveScroll();
+            setSegs(segs.slice(0, -1));
+        } else {
+            goBack();
+        }
+    };
+    useBackLayer(segs.length > 0, "folder-select-up", goUp);
+
     if (!platform) {
         return (
             <div className="page">
@@ -311,15 +369,16 @@ export default function FolderSelectPage({ mode }: { mode: "single" | "multi" })
         );
     }
 
-    const goUp = () => {
-        if (segs.length) {
-            setSegs(segs.slice(0, -1));
-        } else {
-            goBack();
-        }
+    const reload = () => {
+        saveScroll();
+        setSegs([...segs]);
     };
 
-    const reload = () => setSegs([...segs]);
+    /** 进入子文件夹：先记住当前目录的滚动位置，便于返回时恢复 */
+    const enterDir = (name: string) => {
+        saveScroll();
+        setSegs([...segs, name]);
+    };
 
     const toggleCheck = (name: string) => {
         const abs = joinAbs(rootPath, [...segs, name]);
@@ -334,13 +393,12 @@ export default function FolderSelectPage({ mode }: { mode: "single" | "multi" })
         });
     };
 
+    /** 单选：点「系统下载目录」只标记待选（再点取消），底部按钮确认 */
     const pickSystem = () => {
-        setDownloadSaveTarget("system");
-        showToast("下载保存位置：系统下载目录");
-        goBack();
+        setPending((prev) => (prev?.kind === "system" ? null : { kind: "system" }));
     };
 
-    /** 新建文件夹并进入（已存在时视为成功直接进入） */
+    /** 新建文件夹：创建后留在当前目录并滚动定位（已存在时视为成功） */
     const newFolder = () => {
         openPrompt({
             title: segs.length ? `在「${segs[segs.length - 1]}」中新建文件夹` : "新建文件夹",
@@ -365,13 +423,16 @@ export default function FolderSelectPage({ mode }: { mode: "single" | "multi" })
                           });
                 req
                     .then(() => {
-                        setSegs(nextSegs);
+                        // 留在当前目录刷新列表，滚动定位到新文件夹（不自动进入）
+                        scrollToName.current = clean;
+                        setSegs([...segs]);
                         showToast(`已创建「${clean}」`);
                     })
                     .catch((e: any) => {
                         const msg = String(e?.message ?? e);
                         if (/exist/i.test(msg)) {
-                            setSegs(nextSegs);
+                            scrollToName.current = clean;
+                            setSegs([...segs]);
                             return;
                         }
                         console.warn("[folderSelect] mkdir 失败", e);
@@ -482,19 +543,49 @@ export default function FolderSelectPage({ mode }: { mode: "single" | "multi" })
         }
     };
 
-    const confirmPick = () => pickSegs(segs);
+    /** 单选确认：有勾选就确认勾选项，否则确认当前所在文件夹 */
+    const confirmPick = () => {
+        if (pending?.kind === "system") {
+            setDownloadSaveTarget("system");
+            showToast("下载保存位置：系统下载目录");
+            goBack();
+            return;
+        }
+        void pickSegs(pending?.kind === "dir" ? pending.segs : segs);
+    };
 
-    /** 单选：勾选框直接选定该文件夹 */
+    /** 单选：勾选框只切换待选标记（单选互斥），不立即确认 */
     const pickCheck = (name: string) => {
-        void pickSegs([...segs, name]);
+        const abs = joinAbs(rootPath, [...segs, name]);
+        setPending((prev) =>
+            prev?.kind === "dir" && prev.abs === abs
+                ? null
+                : { kind: "dir", abs, segs: [...segs, name] },
+        );
     };
 
     const openAllFiles = () => {
         callNativeMethod("Storage", "openAllFilesAccess").catch(() => {});
     };
 
-    const hereAbs = joinAbs(rootPath, segs);
-    const currentHere = mode === "single" && !currentIsSystem && hereAbs === currentAbs;
+    /** 单选勾选展示：有待选标记时显示待选项，否则回显当前配置 */
+    const checkedAbs = mode === "single" ? (pending?.kind === "dir" ? pending.abs : currentAbs) : "";
+    const systemChecked =
+        mode === "single" && (pending ? pending.kind === "system" : currentIsSystem);
+    /** 底部确认按钮文案：跟随确认目标（勾选项优先，其次当前所在文件夹） */
+    const confirmLabel = (() => {
+        if (busy) {
+            return "检查中…";
+        }
+        if (pending?.kind === "system") {
+            return currentIsSystem ? "当前使用系统下载目录" : "使用系统下载目录";
+        }
+        if (pending?.kind === "dir" && pending.abs !== hereAbs) {
+            return `选择「${pending.segs[pending.segs.length - 1] ?? pending.abs}」`;
+        }
+        const targetAbs = pending?.kind === "dir" ? pending.abs : hereAbs;
+        return !currentIsSystem && targetAbs === currentAbs ? "当前使用此文件夹" : "选择此文件夹";
+    })();
 
     return (
         <div className="page fsp-page">
@@ -511,7 +602,7 @@ export default function FolderSelectPage({ mode }: { mode: "single" | "multi" })
                 </button>
             )}
 
-            <div className="fsp-scroll">
+            <div className="fsp-scroll" ref={scrollRef}>
                 {mode === "single" && (
                     <div className="fsp-row" onClick={pickSystem}>
                         <span className="fsp-row-icon">
@@ -521,7 +612,7 @@ export default function FolderSelectPage({ mode }: { mode: "single" | "multi" })
                             <div className="fsp-row-name">系统下载目录</div>
                             <div className="fsp-row-sub">走系统下载通道，位置由系统决定</div>
                         </div>
-                        {currentIsSystem && (
+                        {systemChecked && (
                             <span className="fsp-check on">
                                 <IconCheck size={14} />
                             </span>
@@ -546,8 +637,9 @@ export default function FolderSelectPage({ mode }: { mode: "single" | "multi" })
                     return (
                         <div
                             key={d.name}
+                            data-dir-name={d.name}
                             className={`fsp-row ${filtered ? "filtered" : ""}`}
-                            onClick={filtered ? undefined : () => setSegs([...segs, d.name])}
+                            onClick={filtered ? undefined : () => enterDir(d.name)}
                         >
                             <span className="fsp-row-icon">
                                 <IconFolder size={20} />
@@ -572,13 +664,13 @@ export default function FolderSelectPage({ mode }: { mode: "single" | "multi" })
                                 </span>
                             ) : (
                                 <span
-                                    className={`fsp-check ${rowAbs === currentAbs ? "on" : ""}`}
+                                    className={`fsp-check ${rowAbs === checkedAbs ? "on" : ""}`}
                                     onClick={(e) => {
                                         e.stopPropagation();
                                         pickCheck(d.name);
                                     }}
                                 >
-                                    {rowAbs === currentAbs && <IconCheck size={14} />}
+                                    {rowAbs === checkedAbs && <IconCheck size={14} />}
                                 </span>
                             )}
                         </div>
@@ -601,13 +693,7 @@ export default function FolderSelectPage({ mode }: { mode: "single" | "multi" })
                         disabled={busy}
                     >
                         <IconCheck size={22} />
-                        <span>
-                            {busy
-                                ? "检查中…"
-                                : currentHere
-                                  ? "当前使用此文件夹"
-                                  : "选择此文件夹"}
-                        </span>
+                        <span>{confirmLabel}</span>
                     </button>
                 ) : (
                     <button

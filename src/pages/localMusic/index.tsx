@@ -69,6 +69,8 @@ function baseName(path: string): string {
 
 /** 「本地音乐」页：本地曲库管理（播放全部 / 喜欢 / 收藏 / 删除 / 多选 / 扫描 / 详情） */
 export default function LocalMusicPage() {
+    // 订阅曲库版本号驱动整页重渲染（匹配期间每 1.2s 自增一次）；
+    // version 不能拼进 MusicList 的 listId，否则渐进渲染窗口会被不断重置回前 150 行
     const version = useAtomValue(localMusicVersionAtom);
     void version;
     const platform = localMusicPlatform();
@@ -381,7 +383,7 @@ export default function LocalMusicPage() {
                     />
                     <MusicList
                         musicList={musicList}
-                        listId={`localMusic:${version}`}
+                        listId="localMusic"
                         showIndex
                         selectMode={selectMode}
                         selectedKeys={selectedKeys}

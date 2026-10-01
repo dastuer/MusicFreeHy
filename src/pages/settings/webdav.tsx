@@ -31,7 +31,7 @@ export default function SettingsWebdavPage() {
     return (
         <SettingsSubPage title="WebDAV 云备份">
             <div className="settings-group">
-                <div className="settings-group-title">账号配置（与桌面端同账号互传）</div>
+                <div className="settings-group-title">账号配置</div>
                 <div className="settings-row">
                     <span className="settings-row-label">服务器地址</span>
                     <input
@@ -62,12 +62,7 @@ export default function SettingsWebdavPage() {
                     />
                 </div>
                 <div className="settings-row">
-                    <span className="settings-row-label">
-                        文件路径
-                        <div className="settings-row-desc">
-                            指向桌面端的备份文件即可互相同步
-                        </div>
-                    </span>
+                    <span className="settings-row-label">文件路径</span>
                     <input
                         className="settings-input"
                         style={{ width: 150 }}
@@ -87,9 +82,7 @@ export default function SettingsWebdavPage() {
                         showToast(res.ok ? "WebDAV 连接成功" : res.message);
                     }}
                 >
-                    <span className="settings-row-label">
-                        测试连接<div className="settings-row-desc">校验服务器地址与账号密码</div>
-                    </span>
+                    <span className="settings-row-label">测试连接</span>
                     <span className="settings-value">测试</span>
                 </div>
                 <div
@@ -104,9 +97,7 @@ export default function SettingsWebdavPage() {
                         }
                     }}
                 >
-                    <span className="settings-row-label">
-                        备份到云端<div className="settings-row-desc">把本机歌单、插件等上传到 WebDAV</div>
-                    </span>
+                    <span className="settings-row-label">备份到云端</span>
                     <span className="settings-value">上传</span>
                 </div>
                 <div

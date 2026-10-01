@@ -12,7 +12,10 @@ import {
     IUserSheet,
 } from "./musicSheet";
 import { setTheme } from "./theme";
-import { notifyDefaultPluginHashChanged } from "./mediaSource";
+import {
+    notifyDefaultPluginHashChanged,
+    notifyGlobalSourceChanged,
+} from "./mediaSource";
 import { TrackPlayerSingleton } from "./trackPlayer";
 import { uploadBackupToWebdav, downloadBackupFromWebdav } from "./dav";
 import { netFetchText } from "./net";
@@ -128,12 +131,13 @@ const PREF_KEYS = [
     "playList",
     "currentMusic",
     "defaultPluginHash",
+    "globalSourceHash",
     "searchHistory",
     "playProgress",
     "rememberProgress",
 ];
 
-// 音源设置只备份 defaultPluginHash；会话内手动切换的全局音源不持久化
+// 音源设置备份 defaultPluginHash 与手动选择的全局音源 globalSourceHash
 const PREF_PREFIXES: string[] = [];
 
 function collectPreferences(): Record<string, string> {
@@ -180,6 +184,10 @@ function applyPreferences(prefs: Record<string, string> | null | undefined): str
     if (written.includes("defaultPluginHash")) {
         // 绕过 mediaSource 直接写入，通知订阅组件（音源面板/插件管理页）刷新
         notifyDefaultPluginHashChanged();
+    }
+    if (written.includes("globalSourceHash")) {
+        // 恢复了手动音源，同步内存中的全局音源并通知订阅组件
+        notifyGlobalSourceChanged();
     }
     return written;
 }

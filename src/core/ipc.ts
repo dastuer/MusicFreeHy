@@ -16,6 +16,26 @@ export async function pluginCall<T = any>(
 
 let cachedPlugins: SerializedPlugin[] = [];
 
+/** 插件集合变化订阅：常驻组件（音源设置面板等）据此在安装/卸载/启停后重新拉取 */
+const pluginsChangedListeners = new Set<() => void>();
+let pluginsVersion = 0;
+
+/** 插件集合版本号：随 invalidatePluginCache 自增，供 useSyncExternalStore 使用 */
+export function getPluginsVersion(): number {
+    return pluginsVersion;
+}
+
+export function subscribePluginsChanged(cb: () => void): () => void {
+    pluginsChangedListeners.add(cb);
+    return () => {
+        pluginsChangedListeners.delete(cb);
+    };
+}
+
+function notifyPluginsChanged() {
+    pluginsChangedListeners.forEach((l) => l());
+}
+
 export async function getPlugins(refresh = false): Promise<SerializedPlugin[]> {
     await pluginHost.setup().catch((e) => {
         // 初始化失败不让页面卡死：降级为空列表，具体调用插件方法时再报错
@@ -41,6 +61,9 @@ export async function getPlugins(refresh = false): Promise<SerializedPlugin[]> {
 
 export function invalidatePluginCache() {
     cachedPlugins = [];
+    // 插件集合可能已变：广播给订阅方（音源设置面板等常驻组件）重新拉取
+    pluginsVersion += 1;
+    notifyPluginsChanged();
 }
 
 export async function getPluginByMedia(

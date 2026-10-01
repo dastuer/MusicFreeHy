@@ -1620,6 +1620,35 @@ img {
     }
 }
 
+/* 「获取封面歌词」：本地音乐缺歌词 / 封面时，进度条上方给出的半透明胶囊入口（参考网易云） */
+
+.np-fetch-row {
+    display: flex;
+    justify-content: center;
+    padding: 8px 14px 0;
+}
+
+.np-fetch-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 18px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.14);
+    color: rgba(255, 255, 255, 0.88);
+    font-size: 12.5px;
+    line-height: 1;
+    transition: background 0.15s ease;
+}
+
+.np-fetch-btn:active {
+    background: rgba(255, 255, 255, 0.24);
+}
+
+.np-fetch-btn:disabled {
+    opacity: 0.65;
+}
+
 /* 进度条 */
 
 .np-progress {

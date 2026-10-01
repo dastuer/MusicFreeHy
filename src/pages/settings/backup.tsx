@@ -23,7 +23,6 @@ export default function SettingsBackupPage() {
     const pickResumeMode = () =>
         openSingleSelect({
             title: "恢复模式",
-            subtitle: "恢复备份时如何处理本机已有数据",
             options: RESUME_MODE_OPTIONS.map((m) => ({
                 value: m.value,
                 label: m.label,
@@ -60,12 +59,9 @@ export default function SettingsBackupPage() {
     return (
         <SettingsSubPage title="备份与恢复">
             <div className="settings-group">
-                <div className="settings-group-title">本地备份（与 MusicFreeDesktop 互通）</div>
+                <div className="settings-group-title">本地备份</div>
                 <div className="settings-row" onClick={doExport}>
-                    <span className="settings-row-label">
-                        导出备份
-                        <div className="settings-row-desc">导出为 .json 文件，可在桌面端恢复</div>
-                    </span>
+                    <span className="settings-row-label">导出备份</span>
                     <span className="settings-value">导出</span>
                 </div>
                 <div className="settings-row" onClick={() => fileRef.current?.click()}>
@@ -96,7 +92,7 @@ export default function SettingsBackupPage() {
                 <div className="settings-group-title">恢复模式</div>
                 <div className="settings-row" onClick={pickResumeMode}>
                     <span className="settings-row-label">
-                        恢复时如何处理本机数据
+                        恢复模式
                         <div className="settings-row-desc">
                             {RESUME_MODE_OPTIONS.find((m) => m.value === resumeMode)?.desc}
                         </div>

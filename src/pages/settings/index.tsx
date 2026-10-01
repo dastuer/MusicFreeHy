@@ -17,7 +17,7 @@ import { IconBack } from "@/components/base/Icons";
 const THEME_OPTIONS = [
     { value: "light", label: "浅色" },
     { value: "dark", label: "深色" },
-    { value: "auto", label: "跟随系统", desc: "跟随时段自动切换浅色 / 深色" },
+    { value: "auto", label: "跟随系统" },
 ];
 
 const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
@@ -56,7 +56,6 @@ const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
     const pickQuality = () =>
         openSingleSelect({
             title: "默认音质",
-            subtitle: "音源不支持时自动降级重试",
             options: QUALITY_OPTIONS.map((q) => ({ value: q.key, label: q.label })),
             value: quality,
             onSelect: (v) => {
@@ -104,10 +103,7 @@ const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
                         showToast(next ? "已记忆播放进度" : "已关闭进度记忆");
                     }}
                 >
-                    <span className="settings-row-label">
-                        记忆播放进度
-                        <div className="settings-row-desc">再次进入歌曲时从上次位置继续播放</div>
-                    </span>
+                    <span className="settings-row-label">记忆播放进度</span>
                     <div className={`plugin-switch ${rememberProgress ? "on" : ""}`} />
                 </div>
             </div>
@@ -119,12 +115,7 @@ const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
                         className="settings-row"
                         onClick={() => navigate("folderSelect", { mode: "single" })}
                     >
-                        <span className="settings-row-label">
-                            保存位置
-                            <div className="settings-row-desc">
-                                浏览文件系统选择，或新建文件夹后再选
-                            </div>
-                        </span>
+                        <span className="settings-row-label">保存位置</span>
                         <span className="settings-value ellipsis">
                             {downloadSaveTargetLabel(getDownloadSaveTarget())}
                         </span>
@@ -136,17 +127,11 @@ const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
             <div className="settings-group">
                 <div className="settings-group-title">数据与备份</div>
                 <div className="settings-row" onClick={() => navigate("settingsBackup")}>
-                    <span className="settings-row-label">
-                        备份与恢复
-                        <div className="settings-row-desc">导出 / 恢复本地备份，与桌面端互通</div>
-                    </span>
+                    <span className="settings-row-label">备份与恢复</span>
                     <span className="settings-value">›</span>
                 </div>
                 <div className="settings-row" onClick={() => navigate("settingsWebdav")}>
-                    <span className="settings-row-label">
-                        WebDAV 云备份
-                        <div className="settings-row-desc">与桌面端同账号互传</div>
-                    </span>
+                    <span className="settings-row-label">WebDAV 云备份</span>
                     <span className="settings-value">
                         {webdavConfigured
                             ? webdavLastUp
@@ -162,10 +147,7 @@ const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
                 <div className="settings-group">
                     <div className="settings-group-title">网络</div>
                     <div className="settings-row" onClick={() => navigate("settingsProxy")}>
-                        <span className="settings-row-label">
-                            伴生代理
-                            <div className="settings-row-desc">解决跨域与 WebDAV 备份，App 无需</div>
-                        </span>
+                        <span className="settings-row-label">伴生代理</span>
                         <span className="settings-value">{proxy ? "已设置" : "默认"}</span>
                         <span className="settings-value">›</span>
                     </div>

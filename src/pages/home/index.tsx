@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { useAtomValue, useSetAtom } from "jotai";
 import { homeTabAtom, openDrawer, showToast } from "@/core/uiAtoms";
 import { getPlugins, type SerializedPlugin } from "@/core/ipc";
-import { pickSourcePlugins, useGlobalSource } from "@/core/mediaSource";
+import { pickSourcePlugins, useGlobalSource, usePluginsVersion } from "@/core/mediaSource";
 import { tryPluginMethod } from "@/core/pluginUtils";
 import Cover from "@/components/base/Cover";
 import Spinner from "@/components/base/Spinner";
@@ -248,9 +248,11 @@ function RecommendSheetsRow({
     // 代号守卫：并发/重复触发时只让最新一次的结果生效
     const genRef = useRef(0);
 
+    // 首页是常驻缓存页：插件安装/卸载/启停后重新拉取，新音源无需重启即可用
+    const pluginsVersion = usePluginsVersion();
     useEffect(() => {
         getPlugins().then(setPlugins);
-    }, []);
+    }, [pluginsVersion]);
 
     const load = useCallback(async () => {
         const gen = ++genRef.current;
@@ -365,9 +367,11 @@ function SheetsTab({ visible }: { visible: boolean }) {
     const pendingTagsAnimRef = useRef<number | null>(null);
     const tagsAnimCleanupRef = useRef<(() => void) | null>(null);
 
+    // 首页是常驻缓存页：插件安装/卸载/启停后重新拉取，新音源无需重启即可用
+    const pluginsVersion = usePluginsVersion();
     useEffect(() => {
         getPlugins().then(setPlugins);
-    }, []);
+    }, [pluginsVersion]);
 
     /**
      * 加载标签列表。quiet=true 时由下拉刷新触发：保留旧列表与错误态之外的一切，
@@ -730,9 +734,11 @@ function TopListTab({ visible }: { visible: boolean }) {
     const hasContentRef = useRef(false);
     hasContentRef.current = groups.length > 0;
 
+    // 首页是常驻缓存页：插件安装/卸载/启停后重新拉取，新音源无需重启即可用
+    const pluginsVersion = usePluginsVersion();
     useEffect(() => {
         getPlugins().then(setPlugins);
-    }, []);
+    }, [pluginsVersion]);
 
     const load = useCallback(async () => {
         const gen = ++genRef.current;

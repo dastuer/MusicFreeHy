@@ -8,6 +8,7 @@ import { pluginHost } from "@/core/ipc";
 import { setupMediaNotification } from "@/core/mediaNotification";
 import { useThemeSetup } from "@/core/theme";
 import { ensureLikesSheet } from "@/core/musicSheet";
+import { resumeSavedMatchTask } from "@/core/localMusic";
 import { showToast } from "@/core/uiAtoms";
 import TabBar from "@/components/layout/TabBar";
 import AppDrawer from "@/components/layout/AppDrawer";
@@ -101,13 +102,14 @@ export default function App() {
     const route = useCurrentRoute();
     const isTabRoot = useIsTabRoot();
     const sourceSelectOpen = useAtomValue(sourceSelectOpenAtom);
-    // 设置类页面（含音源设置面板）不展示底部播放条，聚焦配置操作
+    // 设置类页面（含音源设置面板）与文件夹选择页不展示底部播放条，聚焦配置操作
     const hideMiniPlayer =
         sourceSelectOpen ||
         route.path === "settings" ||
         route.path === "settingsBackup" ||
         route.path === "settingsWebdav" ||
-        route.path === "settingsProxy";
+        route.path === "settingsProxy" ||
+        route.path === "folderSelect";
     useEffect(() => {
         // 初始化：插件宿主、播放器、喜欢的音乐歌单
         ensureLikesSheet();
@@ -115,6 +117,10 @@ export default function App() {
         TrackPlayerSingleton.setup();
         // 系统媒体通知（Android 下拉栏媒体卡片；仅原生环境生效）
         setupMediaNotification();
+        // 上次没跑完的本地音乐匹配任务（应用退出即中断）：启动时自动续跑
+        void resumeSavedMatchTask().catch((e: any) =>
+            console.warn("[app] 恢复本地匹配任务失败", e),
+        );
         // 播放失败不再静默：缺插件 / 链接失效 / 跨域拦截都直接告诉用户
         const onPlayFailed = ({ musicItem, reason, willSkip, downgradedTo }: IPlayFailurePayload) => {
             if (downgradedTo) {
