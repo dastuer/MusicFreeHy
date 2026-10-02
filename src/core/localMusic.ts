@@ -1,12 +1,16 @@
 import { atom, getDefaultStore } from "jotai";
-import { callNativeMethod, isNative, localFileUrl } from "./native";
+import {
+    callNativeMethod,
+    isNative,
+    localFileUrl,
+    writeAndroidFile,
+    writeIosFile,
+} from "./native";
 import {
     getDownloadSaveTarget,
     getDownloadSubfolder,
     getDownloadExternalDir,
     prettyAbsDir,
-    writeAndroidFile,
-    writeIosFile,
 } from "./musicDownload";
 import { getSortedSearchablePlugins, pluginCall, type SerializedPlugin } from "./ipc";
 import { setLocalLyricResolver, TrackPlayerSingleton } from "./trackPlayer";
@@ -103,25 +107,67 @@ export interface ILocalMusicRecord {
     fsPath?: string;
 }
 
+/**
+ * 曲库内存缓存：读写都走这里，localStorage 只是持久化镜像。
+ * 数百首歌时全量 JSON.parse / stringify 一次要几十 ms，而页面渲染、
+ * 匹配循环都会高频读曲库，重复解析是本地音乐卡顿的主因。
+ * 注意：返回的是共享引用，调用方只读勿直接改动（改动走 writeLibrary / applyRecordUpdate）。
+ */
+let libraryCache: ILocalMusicRecord[] | null = null;
+/** 防抖落盘的定时器（批量匹配逐条更新时攒着写，避免每首都全量 stringify） */
+let libraryFlushTimer: number | null = null;
+
 function readLibrary(): ILocalMusicRecord[] {
+    if (libraryCache) {
+        return libraryCache;
+    }
     try {
         const raw = localStorage.getItem(LIB_KEY);
         const arr = raw ? JSON.parse(raw) : [];
-        if (!Array.isArray(arr)) {
-            return [];
-        }
-        return arr.filter((it: any) => it && typeof it.localPath === "string");
+        libraryCache = Array.isArray(arr)
+            ? arr.filter((it: any) => it && typeof it.localPath === "string")
+            : [];
     } catch {
-        return [];
+        libraryCache = [];
     }
+    return libraryCache;
 }
 
-function writeLibrary(list: ILocalMusicRecord[], bump = true) {
+/** 把缓存写回 localStorage（唯一落盘出口） */
+function persistLibrary() {
+    if (!libraryCache) {
+        return;
+    }
     try {
-        localStorage.setItem(LIB_KEY, JSON.stringify(list));
+        localStorage.setItem(LIB_KEY, JSON.stringify(libraryCache));
     } catch {
         // ignore
     }
+}
+
+/** 防抖落盘：匹配循环每首更新一条，没必要每条都全量序列化 */
+function schedulePersistLibrary(delay = 800) {
+    if (libraryFlushTimer !== null) {
+        return;
+    }
+    libraryFlushTimer = window.setTimeout(() => {
+        libraryFlushTimer = null;
+        persistLibrary();
+    }, delay);
+}
+
+/** 立即落盘：清掉防抖计时器后写（进度持久化 / 任务收尾前调用，保证数据不丢） */
+function flushLibrary() {
+    if (libraryFlushTimer !== null) {
+        clearTimeout(libraryFlushTimer);
+        libraryFlushTimer = null;
+    }
+    persistLibrary();
+}
+
+function writeLibrary(list: ILocalMusicRecord[], bump = true) {
+    libraryCache = list;
+    flushLibrary();
     if (bump) {
         bumpLocalMusicVersion();
     }
@@ -758,6 +804,9 @@ function persistMatchProgress(session: IMatchSession, force = false) {
         return;
     }
     session.lastSave = now;
+    // 队列写盘前先把曲库攒下的匹配结果落盘：
+    // 保证「这首歌已处理完」进队列之前，它的歌词 / 封面结果已持久化
+    flushLibrary();
     writeSavedMatchTask({
         options: session.options,
         pluginHash: session.plugin.hash,
@@ -994,6 +1043,8 @@ async function runMatchLoop(session: IMatchSession): Promise<void> {
             persistMatchProgress(session);
         }
     } finally {
+        // 收尾先把攒下的匹配结果落盘（防抖窗口内的最后几条）
+        flushLibrary();
         const state = store.get(matchTaskAtom);
         const isCurrent = matchSession === session;
         if (isCurrent) {
@@ -1147,6 +1198,22 @@ function matchFileKey(rec: ILocalMusicRecord): string {
     return strHash(rec.localPath);
 }
 
+/** Android 上匹配文件的存放目录（filesDir/match_meta），进程内只需取一次：
+ *  批量匹配每首都用，不能每次都 bridge 调 getDefaultDirs */
+let androidMatchDirCache: string | null = null;
+
+async function androidMatchDir(): Promise<string> {
+    if (androidMatchDirCache === null) {
+        try {
+            const dirs = await callNativeMethod("LocalMusic", "getDefaultDirs");
+            androidMatchDirCache = dirs?.filesDir ? `${dirs.filesDir}/match_meta` : "";
+        } catch {
+            androidMatchDirCache = "";
+        }
+    }
+    return androidMatchDirCache;
+}
+
 async function removeAndroidFile(absPath?: string) {
     if (!absPath) {
         return;
@@ -1179,8 +1246,11 @@ async function saveLyricFile(rec: ILocalMusicRecord, rawLrc: string): Promise<st
     const platform = currentPlatform();
     try {
         if (platform === "android") {
-            const dirs = await callNativeMethod("LocalMusic", "getDefaultDirs");
-            const abs = `${dirs.filesDir}/match_meta/lyric_${matchFileKey(rec)}.lrc`;
+            const dir = await androidMatchDir();
+            if (!dir) {
+                return "";
+            }
+            const abs = `${dir}/lyric_${matchFileKey(rec)}.lrc`;
             await writeAndroidFile(abs, new Blob([rawLrc], { type: "text/plain" }));
             if (rec.lyricPath && rec.lyricPath !== abs) {
                 await removeAndroidFile(rec.lyricPath);
@@ -1218,8 +1288,11 @@ async function saveCoverFile(rec: ILocalMusicRecord, url: string): Promise<strin
             return "";
         }
         if (platform === "android") {
-            const dirs = await callNativeMethod("LocalMusic", "getDefaultDirs");
-            const abs = `${dirs.filesDir}/match_meta/cover_${matchFileKey(rec)}.img`;
+            const dir = await androidMatchDir();
+            if (!dir) {
+                return "";
+            }
+            const abs = `${dir}/cover_${matchFileKey(rec)}.img`;
             await writeAndroidFile(abs, blob);
             if (rec.matchedArtwork && rec.matchedArtwork !== abs) {
                 await removeAndroidFile(rec.matchedArtwork);
@@ -1297,8 +1370,9 @@ function applyRecordUpdate(id: string, updates: Partial<ILocalMusicRecord>) {
         return;
     }
     list[idx] = { ...list[idx], ...updates };
-    // 版本号由匹配循环节流自增，这里只落盘
-    writeLibrary(list, false);
+    // 版本号由匹配循环节流自增；这里只更新缓存并防抖落盘
+    // （进度持久化与循环收尾时会强制 flush，结果不会丢）
+    schedulePersistLibrary();
 }
 
 async function matchOneRecord(
@@ -1385,6 +1459,8 @@ export async function matchSingleLocalMusic(
     const plugin = searchable.find((p) => p.hash === defaultHash) ?? searchable[0];
     const r = await matchOneRecord(rec, plugin, options);
     if (r.matched) {
+        // 单首匹配立即落盘，不等防抖窗口（用户可能马上退出 App）
+        flushLibrary();
         const fresh = readLibrary().find((it) => it.id === rec.id);
         if (fresh) {
             TrackPlayerSingleton.updateMusicItemMeta(toMusicItem(fresh));

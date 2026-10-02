@@ -21,11 +21,11 @@ export default function SingleSelectSheet() {
     return (
         <div className="sheet-mask" onClick={() => closeSingleSelect()}>
             <div className="add-sheet-panel" onClick={(e) => e.stopPropagation()}>
-                <div className="add-sheet-header">{state.title}</div>
+                {state.title && <div className="add-sheet-header">{state.title}</div>}
                 {state.subtitle && (
                     <div className="source-select-sub">{state.subtitle}</div>
                 )}
-                <div className="add-sheet-list">
+                <div className={`add-sheet-list${state.title ? "" : " no-title"}`}>
                     {state.options.map((opt) => {
                         const active = opt.value === state.value;
                         return (

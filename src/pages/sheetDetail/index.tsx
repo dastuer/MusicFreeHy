@@ -20,8 +20,10 @@ import MusicListSkeleton from "@/components/base/MusicListSkeleton";
 import Cover from "@/components/base/Cover";
 import PlayAllBar from "@/components/base/PlayAllBar";
 import SelectActionsBar from "@/components/base/SelectActionsBar";
+import ListSearchBar from "@/components/base/ListSearchBar";
 import { useMusicMultiSelect } from "@/hooks/useMusicMultiSelect";
-import { IconBack, IconMore } from "@/components/base/Icons";
+import { useListSearch } from "@/hooks/useListSearch";
+import { IconBack, IconMore, IconSearch } from "@/components/base/Icons";
 
 /**
  * 歌单详情页（网易云歌单页风格，三种来源）：
@@ -139,12 +141,18 @@ export default function SheetDetailPage() {
         return (info as any)?.creator ?? "";
     }, [userSheet, info]);
 
-    // 多选（下载 / 收藏 / 本地歌单删除）
-    const multi = useMusicMultiSelect(musicList);
+    // 局部搜索：过滤仅作用于列表视图与播放全部，原歌单数据不动
+    const search = useListSearch(musicList);
+    const viewList = search.active ? search.filtered : musicList;
 
-    // 切换歌单时退出多选态
+    // 多选（下载 / 收藏 / 本地歌单删除）；
+    // 搜索时「全选」只选当前匹配结果，选中项仍按完整歌单校验
+    const multi = useMusicMultiSelect(musicList, viewList);
+
+    // 切换歌单时退出多选态与搜索态
     useEffect(() => {
         multi.exitSelect();
+        search.close();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [userSheetId, sheetItem]);
 
@@ -157,10 +165,10 @@ export default function SheetDetailPage() {
         : `sheet:${sheetItem?.platform}-${sheetItem?.id}`;
 
     const playAll = () => {
-        if (musicList.length) {
+        if (viewList.length) {
             TrackPlayerSingleton.playWithReplacePlayList(
-                TrackPlayerSingleton.pickPlayAllStart(musicList),
-                musicList,
+                TrackPlayerSingleton.pickPlayAllStart(viewList),
+                viewList,
                 listId,
             );
         } else {
@@ -204,16 +212,24 @@ export default function SheetDetailPage() {
             }}
         >
             <div
-                className={`sub-header detail-topbar${topSolid ? " solid" : ""}`}
+                className={`sub-header detail-topbar${topSolid || search.open ? " solid" : ""}`}
                 ref={topbarRef}
             >
                 <button className="icon-btn" onClick={() => goBack()}>
                     <IconBack size={22} />
                 </button>
                 <span className="sub-header-title">
-                    {topSolid ? (info?.title ?? "歌单") : "歌单"}
+                    {topSolid || search.open ? (info?.title ?? "歌单") : "歌单"}
                 </span>
-                {!!userSheetId && (
+                <div className="sub-header-actions">
+                    <button
+                        className="icon-btn"
+                        onClick={() => (search.open ? search.close() : search.setOpen(true))}
+                        title="搜索本歌单"
+                    >
+                        <IconSearch size={20} />
+                    </button>
+                    {!!userSheetId && (
                     <button
                         className="icon-btn"
                         onClick={() => {
@@ -260,7 +276,9 @@ export default function SheetDetailPage() {
                         <IconMore size={20} />
                     </button>
                 )}
+                </div>
             </div>
+            {search.open && <ListSearchBar search={search} />}
             <div className="detail-hero" ref={heroRef}>
                 <div
                     className="detail-hero-bg"
@@ -278,7 +296,7 @@ export default function SheetDetailPage() {
             </div>
 
             <PlayAllBar
-                count={musicList.length}
+                count={viewList.length}
                 onPlayAll={playAll}
                 selectMode={multi.selectMode}
                 selectedCount={multi.selected.length}
@@ -295,7 +313,7 @@ export default function SheetDetailPage() {
             ) : (
                 <>
                     <MusicList
-                        musicList={musicList}
+                        musicList={viewList}
                         listId={listId}
                         showIndex
                         selectMode={multi.selectMode}

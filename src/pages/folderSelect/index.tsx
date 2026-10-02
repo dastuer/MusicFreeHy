@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { goBack } from "@/core/router";
-import { addNativeListener, callNativeMethod } from "@/core/native";
+import { addNativeListener, callNativeMethod, nativePlatform } from "@/core/native";
 import { useBackLayer } from "@/core/systemBack";
 import { openPrompt, showToast } from "@/core/uiAtoms";
 import {
@@ -8,7 +8,6 @@ import {
     getDownloadExternalDir,
     getDownloadSaveTarget,
     getDownloadSubfolder,
-    nativePlatform,
     normalizeSubfolder,
     setDownloadExternalDir,
     setDownloadSaveTarget,

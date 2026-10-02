@@ -41,20 +41,32 @@ function slimItem(item: IMusic.IMusicItem): IMusic.IMusicItem {
     return item;
 }
 
+/**
+ * 歌单内存缓存：localStorage 只是持久化镜像。
+ * getUserSheets 被高频调用（列表页逐首 isLikedMusic、各处读写），
+ * 数百首歌时每次全量 JSON.parse 要几十 ms，是列表页卡顿的主因。
+ * 注意：返回的是共享引用，调用方 mutate 后必须走 saveSheets 才会落盘。
+ */
+let sheetsCache: IUserSheet[] | null = null;
+
 export function getUserSheets(): IUserSheet[] {
+    if (sheetsCache) {
+        return sheetsCache;
+    }
     try {
         const raw = localStorage.getItem(STORAGE_KEY);
         const parsed = raw ? JSON.parse(raw) : [];
-        if (!Array.isArray(parsed)) {
-            return [];
-        }
-        return parsed.filter((it: any) => it && typeof it === "object" && it.id && it.title);
+        sheetsCache = Array.isArray(parsed)
+            ? parsed.filter((it: any) => it && typeof it === "object" && it.id && it.title)
+            : [];
     } catch {
-        return [];
+        sheetsCache = [];
     }
+    return sheetsCache;
 }
 
 export function saveSheets(sheets: IUserSheet[]) {
+    sheetsCache = sheets;
     const slimmed = sheets.map((sheet) => ({
         ...sheet,
         musicList: (sheet.musicList ?? []).map(slimItem),

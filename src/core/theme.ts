@@ -27,6 +27,8 @@ export const lightTheme = {
     mask: "rgba(0,0,0,0.4)",
     elevatedBackground: "#f7f7f8",
     cardBackground: "#f2f2f4",
+    downloadMask: "rgba(0, 0, 0, 0.1)",
+    downloadMaskFail: "rgba(236, 65, 65, 0.14)",
 };
 
 export const darkTheme = {
@@ -44,6 +46,8 @@ export const darkTheme = {
     mask: "rgba(0,0,0,0.6)",
     elevatedBackground: "#1f1f1f",
     cardBackground: "#1c1c1e",
+    downloadMask: "rgba(255, 255, 255, 0.1)",
+    downloadMaskFail: "rgba(234, 61, 61, 0.18)",
 };
 
 const themeVars: Record<keyof typeof lightTheme, string> = {
@@ -61,6 +65,8 @@ const themeVars: Record<keyof typeof lightTheme, string> = {
     mask: "--mask",
     elevatedBackground: "--bg-elev",
     cardBackground: "--bg-card",
+    downloadMask: "--dl-mask",
+    downloadMaskFail: "--dl-mask-fail",
 };
 
 function applyTheme(type: ThemeType) {

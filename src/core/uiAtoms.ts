@@ -126,7 +126,8 @@ export interface ISingleSelectOption {
 }
 
 export interface ISingleSelectState {
-    title: string;
+    /** 标题；不传则不渲染头部，直接展示选项 */
+    title?: string;
     subtitle?: string;
     options: ISingleSelectOption[];
     /** 当前选中值，浮窗内打勾展示 */

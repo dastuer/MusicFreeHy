@@ -28,7 +28,14 @@ function describeRemoveResult(res: IRemoveDownloadResult): string {
  *  - 喜欢：批量加入「我喜欢的音乐」；
  *  - 删除：删除下载记录 + 尽力删除音频文件（系统下载目录的文件删不掉，播报里提示）。
  */
-export function useDownloadsMultiSelect(musicList: IMusic.IMusicItem[]) {
+/**
+ * @param musicList 完整列表：校验选中项仍在列表内
+ * @param scopeList 「全选」的范围，默认全列表；列表页局部搜索时传过滤结果
+ */
+export function useDownloadsMultiSelect(
+    musicList: IMusic.IMusicItem[],
+    scopeList: IMusic.IMusicItem[] = musicList,
+) {
     const [selectMode, setSelectMode] = useState(false);
     const [pickedItems, setPickedItems] = useState<IMusic.IMusicItem[]>([]);
 
@@ -67,8 +74,8 @@ export function useDownloadsMultiSelect(musicList: IMusic.IMusicItem[]) {
     }, []);
 
     const selectAll = useCallback(() => {
-        setPickedItems([...musicList]);
-    }, [musicList]);
+        setPickedItems([...scopeList]);
+    }, [scopeList]);
 
     const deselectAll = useCallback(() => {
         setPickedItems([]);

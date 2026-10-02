@@ -175,6 +175,8 @@ export async function netFetchText(url: string, timeoutMs = 30000): Promise<stri
  *  - 直链无特殊请求头：原样返回（媒体元素加载跨域资源不受 CORS 限制）；
  *  - 直链带请求头（Referer / UA / Cookie）：浏览器无法给 <audio> 塞头，
  *    配了伴生代理时走 `/media` 转发；没配就只能原样试（部分源不带头也能放）。
+ * 原生端页面是 https、直链常是 http，靠 capacitor.config.ts 的
+ * android.allowMixedContent 放行，这里不做 http→https 改写。
  */
 export function buildPlayableMediaUrl(payload: {
     url: string;

@@ -5,6 +5,7 @@ import { getPluginByMedia, getPlugins, pluginCall } from "./ipc";
 import { setMusicHistory } from "./musicHistory";
 import { getQuality, setQuality, getConfig } from "./appConfig";
 import { localFileUrl } from "./native";
+import { lookupCachedSrc, requestAudioCacheStore } from "./audioCache";
 
 export type MusicState = "playing" | "paused" | "stopped" | "loading";
 export type MusicRepeatMode = "off" | "queue" | "single";
@@ -43,8 +44,10 @@ export interface IQualitySwitchResult {
 /**
  * 单次 getMediaSource 的最长等待。
  * 换歌时旧歌已经被停掉，等待期是静音的，所以不能让一个卡死的音源拖满 pluginCall 的 30s。
+ * 下限要容得下移动端的多级解析链：策略下发 + eapi + outer-url 重定向跟随
+ * （VIP 歌会整包拉一次试听 mp3 再回退酷我 search/nmobi），弱网下 10s 会误杀正常解析。
  */
-const MEDIA_SOURCE_TIMEOUT = 10000;
+const MEDIA_SOURCE_TIMEOUT = 15000;
 
 /** 连续 N 首都播不出来就停下，不再自动往后跳（否则坏音源会把整个歌单空转一圈） */
 const MAX_AUTO_SKIP = 3;
@@ -1203,7 +1206,21 @@ class TrackPlayer extends EventEmitter {
             if (!audio) {
                 return;
             }
-            audio.src = resolved.src;
+            let playSrc = resolved.src;
+            if (!target.localPath) {
+                // 播放缓存：命中直接读本地（秒开、省流量、断网可重听）；
+                // 未命中先在线播，同时后台整首缓存，下次播放走本地
+                const cached = await lookupCachedSrc(target, resolved.quality);
+                if (this.pendingPlayId !== playId) {
+                    return;
+                }
+                if (cached) {
+                    playSrc = cached;
+                } else {
+                    requestAudioCacheStore(target, resolved.quality, resolved.source);
+                }
+            }
+            audio.src = playSrc;
             audio.playbackRate = this._rate;
             this.applyStartPosition(audio, resumePosition);
             this.pendingStartPosition = 0;
@@ -1454,7 +1471,20 @@ class TrackPlayer extends EventEmitter {
             probe.preload = "auto";
             probe.playbackRate = this._rate;
             this.probeAudio = probe;
-            probe.src = resolved.src;
+            let probeSrc = resolved.src;
+            if (!musicItem.localPath) {
+                // 目标音质命中缓存则从本地交接（切换近乎瞬时）；未命中顺路缓存该音质
+                const cached = await lookupCachedSrc(musicItem, resolved.quality);
+                if (isStale()) {
+                    return { status: "cancelled" };
+                }
+                if (cached) {
+                    probeSrc = cached;
+                } else {
+                    requestAudioCacheStore(musicItem, resolved.quality, resolved.source);
+                }
+            }
+            probe.src = probeSrc;
             await this.waitForProbeBuffered(probe, livePosition, isStale);
             if (isStale()) {
                 return { status: "cancelled" };

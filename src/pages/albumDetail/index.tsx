@@ -9,8 +9,10 @@ import MusicList from "@/components/base/MusicList";
 import AutoLoadMore from "@/components/base/AutoLoadMore";
 import MusicListSkeleton from "@/components/base/MusicListSkeleton";
 import Cover from "@/components/base/Cover";
-import { IconBack } from "@/components/base/Icons";
+import { IconBack, IconSearch } from "@/components/base/Icons";
 import PlayAllBar from "@/components/base/PlayAllBar";
+import ListSearchBar from "@/components/base/ListSearchBar";
+import { useListSearch } from "@/hooks/useListSearch";
 import { showToast } from "@/core/uiAtoms";
 
 /** 专辑详情页：getAlbumInfo 分页加载 */
@@ -95,6 +97,10 @@ export default function AlbumDetailPage() {
         setLoadingMore(false);
     };
 
+    // 局部搜索：搜索已加载部分，播放全部范围随之联动
+    const search = useListSearch(musicList);
+    const viewList = search.active ? search.filtered : musicList;
+
     if (!albumItem) {
         return <div className="empty-tip">专辑不存在</div>;
     }
@@ -115,16 +121,26 @@ export default function AlbumDetailPage() {
             }}
         >
             <div
-                className={`sub-header detail-topbar${topSolid ? " solid" : ""}`}
+                className={`sub-header detail-topbar${topSolid || search.open ? " solid" : ""}`}
                 ref={topbarRef}
             >
                 <button className="icon-btn" onClick={() => goBack()}>
                     <IconBack size={22} />
                 </button>
                 <span className="sub-header-title">
-                    {topSolid ? (albumInfo?.title ?? "专辑") : "专辑"}
+                    {topSolid || search.open ? (albumInfo?.title ?? "专辑") : "专辑"}
                 </span>
+                <div className="sub-header-actions">
+                    <button
+                        className="icon-btn"
+                        onClick={() => (search.open ? search.close() : search.setOpen(true))}
+                        title="搜索本专辑"
+                    >
+                        <IconSearch size={20} />
+                    </button>
+                </div>
             </div>
+            {search.open && <ListSearchBar search={search} />}
             <div className="detail-hero" ref={heroRef}>
                 <div
                     className="detail-hero-bg"
@@ -145,12 +161,12 @@ export default function AlbumDetailPage() {
             </div>
 
             <PlayAllBar
-                count={musicList.length}
+                count={viewList.length}
                 onPlayAll={() => {
-                    if (musicList.length) {
+                    if (viewList.length) {
                         TrackPlayerSingleton.playWithReplacePlayList(
-                            musicList[0],
-                            musicList,
+                            viewList[0],
+                            viewList,
                             `album:${albumItem.platform}-${albumItem.id}`,
                         );
                     } else {
@@ -166,7 +182,7 @@ export default function AlbumDetailPage() {
             ) : (
                 <>
                     <MusicList
-                        musicList={musicList}
+                        musicList={viewList}
                         listId={`album:${albumItem.platform}-${albumItem.id}`}
                         showIndex={false}
                     />

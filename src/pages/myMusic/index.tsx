@@ -121,9 +121,17 @@ export default function MyMusicPage() {
                     className="mine-sheet-row"
                     onClick={() => navigate("sheetDetail", { userSheetId: LIKES_SHEET_ID })}
                 >
-                    <div className="mine-likes-cover">
-                        <IconHeart size={22} filled />
-                    </div>
+                    {likesSheet?.musicList?.[0]?.artwork ? (
+                        <Cover
+                            src={likesSheet.musicList[0].artwork}
+                            size={50}
+                            radius={9}
+                        />
+                    ) : (
+                        <div className="mine-likes-cover">
+                            <IconHeart size={22} filled />
+                        </div>
+                    )}
                     <div className="mine-sheet-info">
                         <div className="mine-sheet-title">我喜欢的音乐</div>
                         <div className="mine-sheet-sub">

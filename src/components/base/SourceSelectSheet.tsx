@@ -21,14 +21,6 @@ export default function SourceSelectSheet() {
     const current = useGlobalSource();
     const plugins = useUsablePlugins();
     const defaultHash = useDefaultPluginHash();
-    const defaultPlugin = defaultHash
-        ? plugins.find((p) => p.hash === defaultHash)
-        : null;
-    const autoSub = defaultPlugin
-        ? `优先使用「${defaultPlugin.name}」，失败自动切换`
-        : defaultHash
-          ? "默认音源已不可用，将按插件顺序自动尝试"
-          : "未设置默认音源，将按插件顺序自动尝试";
 
     // 系统返回先收起面板
     useBackLayer(open, "source-select", closeSourceSelect);
@@ -40,15 +32,13 @@ export default function SourceSelectSheet() {
     return (
         <div className="sheet-mask" onClick={() => closeSourceSelect()}>
             <div className="add-sheet-panel" onClick={(e) => e.stopPropagation()}>
-                <div className="add-sheet-header">音源设置</div>
-                <div className="add-sheet-list">
+                <div className="add-sheet-list no-title">
                     <div
                         className="add-sheet-row"
                         onClick={() => setGlobalSource(AUTO_SOURCE)}
                     >
                         <div className="add-sheet-row-info">
-                            <div className="add-sheet-row-title">跟随默认音源</div>
-                            <div className="add-sheet-row-sub">{autoSub}</div>
+                            <div className="add-sheet-row-title">自动</div>
                         </div>
                         {current === AUTO_SOURCE && (
                             <span className="source-select-check">
@@ -66,7 +56,7 @@ export default function SourceSelectSheet() {
                                 <div className="add-sheet-row-title">
                                     {p.name}
                                     {defaultHash === p.hash && (
-                                        <span className="plugin-badge ok">默认</span>
+                                        <span className="plugin-badge">默认</span>
                                     )}
                                 </div>
                             </div>

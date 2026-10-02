@@ -109,6 +109,8 @@ public class LocalMusicPlugin extends Plugin {
         res.put("documents", Environment.getExternalStoragePublicDirectory(
             Environment.DIRECTORY_DOCUMENTS).getAbsolutePath());
         res.put("filesDir", c.getFilesDir().getAbsolutePath());
+        // 应用缓存目录：播放缓存（audioCache）写入处，系统存储紧张时可整体回收
+        res.put("cacheDir", c.getCacheDir().getAbsolutePath());
         call.resolve(res);
     }
 

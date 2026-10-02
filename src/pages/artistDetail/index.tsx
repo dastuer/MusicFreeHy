@@ -9,8 +9,10 @@ import AutoLoadMore from "@/components/base/AutoLoadMore";
 import MusicListSkeleton from "@/components/base/MusicListSkeleton";
 import Spinner from "@/components/base/Spinner";
 import Cover from "@/components/base/Cover";
-import { IconBack } from "@/components/base/Icons";
+import { IconBack, IconSearch } from "@/components/base/Icons";
 import PlayAllBar from "@/components/base/PlayAllBar";
+import ListSearchBar from "@/components/base/ListSearchBar";
+import { useListSearch } from "@/hooks/useListSearch";
 import { showToast } from "@/core/uiAtoms";
 import { formatPlayCount , cssUrl } from "@/core/utils";
 import { IconHeadphone } from "@/components/base/Icons";
@@ -111,6 +113,16 @@ export default function ArtistDetailPage() {
         setLoadingMore(false);
     };
 
+    // 局部搜索：仅单曲 tab 提供，搜索已加载部分
+    const search = useListSearch(musicList);
+    const viewList = search.active ? search.filtered : musicList;
+    const switchWorksType = (t: "music" | "album") => {
+        setWorksType(t);
+        if (t !== "music") {
+            search.close();
+        }
+    };
+
     if (!artistItem) {
         return <div className="empty-tip">歌手不存在</div>;
     }
@@ -131,16 +143,28 @@ export default function ArtistDetailPage() {
             }}
         >
             <div
-                className={`sub-header detail-topbar${topSolid ? " solid" : ""}`}
+                className={`sub-header detail-topbar${topSolid || search.open ? " solid" : ""}`}
                 ref={topbarRef}
             >
                 <button className="icon-btn" onClick={() => goBack()}>
                     <IconBack size={22} />
                 </button>
                 <span className="sub-header-title">
-                    {topSolid ? (artistItem?.name ?? "歌手") : "歌手"}
+                    {topSolid || search.open ? (artistItem?.name ?? "歌手") : "歌手"}
                 </span>
+                {worksType === "music" && (
+                    <div className="sub-header-actions">
+                        <button
+                            className="icon-btn"
+                            onClick={() => (search.open ? search.close() : search.setOpen(true))}
+                            title="搜索本列表"
+                        >
+                            <IconSearch size={20} />
+                        </button>
+                    </div>
+                )}
             </div>
+            {worksType === "music" && search.open && <ListSearchBar search={search} />}
             <div className="detail-hero" ref={heroRef}>
                 <div
                     className="detail-hero-bg"
@@ -167,13 +191,13 @@ export default function ArtistDetailPage() {
             <div className="search-tabs" style={{ padding: "14px 16px 6px" }}>
                 <span
                     className={`search-tab ${worksType === "music" ? "active" : ""}`}
-                    onClick={() => setWorksType("music")}
+                    onClick={() => switchWorksType("music")}
                 >
                     单曲
                 </span>
                 <span
                     className={`search-tab ${worksType === "album" ? "active" : ""}`}
-                    onClick={() => setWorksType("album")}
+                    onClick={() => switchWorksType("album")}
                 >
                     专辑
                 </span>
@@ -181,12 +205,12 @@ export default function ArtistDetailPage() {
 
             {worksType === "music" && (
                 <PlayAllBar
-                    count={musicList.length}
+                    count={viewList.length}
                     onPlayAll={() => {
-                        if (musicList.length) {
+                        if (viewList.length) {
                             TrackPlayerSingleton.playWithReplacePlayList(
-                                musicList[0],
-                                musicList,
+                                viewList[0],
+                                viewList,
                                 `artist:${artistItem.platform}-${artistItem.id}:music`,
                             );
                         } else {
@@ -211,7 +235,7 @@ export default function ArtistDetailPage() {
                 <>
                     {worksType === "music" && (
                         <MusicList
-                            musicList={musicList}
+                            musicList={viewList}
                             listId={`artist:${artistItem.platform}-${artistItem.id}:music`}
                             showIndex={false}
                         />

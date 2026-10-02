@@ -356,6 +356,14 @@ function SheetsTab({ visible }: { visible: boolean }) {
     const tagsGenRef = useRef(0);
     activeTagRef.current = activeTag;
     hasContentRef.current = sheets.length > 0;
+    // 音源切换时清空选中分类：旧 tag 对象属于旧音源，保留会导致
+    // 高亮停留在旧分类（新音源恰好有同名分类时）而不是第一个分类，
+    // 且分类加载 effect 会先拿旧 tag 发一次错误请求
+    const [prevSourceHash, setPrevSourceHash] = useState(sourceHash);
+    if (prevSourceHash !== sourceHash) {
+        setPrevSourceHash(sourceHash);
+        setActiveTag(null);
+    }
     // 分类标签折叠：默认最多两行，超出时末位显示「更多」
     const [expanded, setExpanded] = useState(false);
     const [visibleCount, setVisibleCount] = useState(Number.MAX_SAFE_INTEGER);

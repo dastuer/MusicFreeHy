@@ -273,7 +273,13 @@ function proxyAdapter(config: any): Promise<any> {
             }
 
             if (nativeHttp) {
-                // 原生应用：无伴生代理时走宿主原生 HTTP（跨域与自定义请求头都不受限）
+                // 原生应用：插件请求一律走宿主原生 HTTP（CapacitorHttp），与桌面端
+                // （Electron 主进程 Node 栈）同为「全原生栈」，行为才能对齐。
+                // 不能优先走 Worker 内 fetch（浏览器栈）：浏览器会静默丢弃插件显式
+                // 设置的 User-Agent / Referer / Cookie（fetch 受限头），对 CORS 放行的
+                // 音源主机（如酷我 nmobi.kuwo.cn）这类「缺头」请求会成功返回并被采用，
+                // 后端按未授信客户端处理 —— VIP 歌曲整条解析链失败后落到网易
+                // outer-url 兜底，返回的正是 30s 试听直链（只播 30 秒、下载同样失效）。
                 const res = await hostFetch({
                     url: fullUrl,
                     method,
@@ -298,6 +304,11 @@ function proxyAdapter(config: any): Promise<any> {
                 );
             }
 
+            return await doFetch();
+        };
+
+        /** 浏览器栈请求（Worker 内 fetch，凭据不带；受 CORS 限制；仅浏览器/代理环境用） */
+        async function doFetch(): Promise<any> {
             const res = await fetch(fullUrl, {
                 method,
                 headers,
@@ -327,7 +338,7 @@ function proxyAdapter(config: any): Promise<any> {
                 config,
                 response,
             );
-        };
+        }
 
         return request().finally(() => {
             clearTimeout(timer);

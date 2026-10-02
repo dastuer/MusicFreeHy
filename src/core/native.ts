@@ -34,8 +34,13 @@ export interface INativeHttpResult {
     text: string;
 }
 
-/** 主线程原生 HTTP 请求（仅在 hasNativeHttp() 时调用） */
-export async function nativeHttpRequest(options: {
+/** 视为重定向、需要改写请求继续跟随的状态码 */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+/** 重定向跟随上限（对齐 Node follow-redirects / 浏览器的默认量级） */
+const MAX_REDIRECT_HOPS = 10;
+
+/** CapacitorHttp 单次请求（不处理重定向） */
+async function rawNativeRequest(options: {
     url: string;
     method: string;
     headers?: Record<string, string>;
@@ -62,6 +67,49 @@ export async function nativeHttpRequest(options: {
         headers,
         text: typeof res.data === "string" ? res.data : JSON.stringify(res.data ?? ""),
     };
+}
+
+/**
+ * 主线程原生 HTTP 请求（仅在 hasNativeHttp() 时调用），带重定向跟随。
+ *
+ * 必须在 JS 侧自己跟随：Android 的 CapacitorHttp 底层 HttpURLConnection
+ * 不跟随 https→http 跨协议重定向（网易 outer-url 等直链正是这种 302），
+ * 插件拿到裸 302 会把「未跟随的跳转链接」当成解析结果——表现就是 VIP 歌曲
+ * 只能播 30 秒试听、下载失败。桌面端（Node follow-redirects）和原版 RN
+ * （OkHttp 跟随）都会透明跟完重定向，这里对齐同一语义。
+ * iOS 的 NSURLSession 本身会跟完，此循环不会触发额外请求。
+ */
+export async function nativeHttpRequest(options: {
+    url: string;
+    method: string;
+    headers?: Record<string, string>;
+    body?: string;
+    timeoutMs?: number;
+}): Promise<INativeHttpResult> {
+    let url = options.url;
+    let method = (options.method ?? "GET").toUpperCase();
+    let body = options.body;
+    for (let hop = 0; ; hop += 1) {
+        const res = await rawNativeRequest({ ...options, url, method, body });
+        const location = res.headers["location"];
+        let next: string | null = null;
+        if (location && hop < MAX_REDIRECT_HOPS) {
+            try {
+                next = new URL(location, url).toString();
+            } catch {
+                // Location 无法解析：按无重定向处理，把当前响应原样交给调用方
+            }
+        }
+        if (!next || !REDIRECT_STATUSES.has(res.status)) {
+            return res;
+        }
+        if (method !== "GET" && method !== "HEAD" && res.status !== 307 && res.status !== 308) {
+            // 301/302/303 对非幂等方法按浏览器语义降级为 GET 并丢弃请求体
+            method = "GET";
+            body = undefined;
+        }
+        url = next;
+    }
 }
 
 /**
@@ -150,4 +198,63 @@ export function localFileUrl(absPath: string): string {
         // ignore
     }
     return `file://${absPath}`;
+}
+
+/** 当前原生平台（web 返回 null）；写文件通道按它分流 */
+export function nativePlatform(): "android" | "ios" | null {
+    if (!isNative()) {
+        return null;
+    }
+    try {
+        const p = (window as any).Capacitor?.getPlatform?.();
+        return p === "android" || p === "ios" ? p : null;
+    } catch {
+        return null;
+    }
+}
+
+/* ---------- 文件写入（下载 / 本地音乐标签 / 播放缓存共用） ---------- */
+
+/** 分块大小取 3 的倍数（字节），保证 base64 分块拼接无补位问题 */
+export const WRITE_CHUNK = 3 * 1024 * 1024;
+
+export function blobToBase64(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const s = String(reader.result ?? "");
+            resolve(s.slice(s.indexOf(",") + 1));
+        };
+        reader.onerror = () => reject(new Error("读取文件数据失败"));
+        reader.readAsDataURL(blob);
+    });
+}
+
+/** Android：经 StoragePlugin 分块写入绝对路径（绕开 Filesystem 插件在 13+ 的公共目录门禁） */
+export async function writeAndroidFile(absPath: string, blob: Blob) {
+    for (let offset = 0; offset === 0 || offset < blob.size; offset += WRITE_CHUNK) {
+        const data = await blobToBase64(blob.slice(offset, offset + WRITE_CHUNK));
+        await callNativeMethod("Storage", "writeFile", {
+            path: absPath,
+            data,
+            append: offset > 0,
+        });
+    }
+}
+
+/** iOS：经 Filesystem 插件写入沙盒目录（首块 writeFile 建文件，后续 appendFile 追加） */
+export async function writeIosFile(directory: "DOCUMENTS" | "DATA" | "CACHE", path: string, blob: Blob) {
+    for (let offset = 0; offset === 0 || offset < blob.size; offset += WRITE_CHUNK) {
+        const data = await blobToBase64(blob.slice(offset, offset + WRITE_CHUNK));
+        if (offset === 0) {
+            await callNativeMethod("Filesystem", "writeFile", {
+                path,
+                directory,
+                data,
+                recursive: true,
+            });
+        } else {
+            await callNativeMethod("Filesystem", "appendFile", { path, directory, data });
+        }
+    }
 }

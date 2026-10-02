@@ -3,17 +3,133 @@ import { goBack } from "@/core/router";
 import { pluginHost, getPlugins, invalidatePluginCache, type SerializedPlugin } from "@/core/ipc";
 import { openPrompt, showToast } from "@/core/uiAtoms";
 import { setDefaultPluginHash, getGlobalSource, setGlobalSource, useDefaultPluginHash, AUTO_SOURCE } from "@/core/mediaSource";
-import { IconBack, IconLink, IconFileCode, IconRefresh, IconTrash, IconCheck } from "@/components/base/Icons";
+import { useBackLayer } from "@/core/systemBack";
+import { IconBack, IconLink, IconFileCode, IconRefresh, IconTrash, IconCheck, IconClose } from "@/components/base/Icons";
 
 /**
  * 插件管理页：从链接/本地文件安装音源插件，启用/禁用、排序、用户变量、设为默认音源。
  * 插件格式与 MusicFree（移动端）/ MusicFreeDesktop 完全一致。
  */
 
+/** 复制文本到剪贴板（详情面板里点击 hash / 链接触发） */
+function copyText(text: string) {
+    navigator.clipboard?.writeText(text).then(
+        () => showToast("已复制"),
+        () => showToast("复制失败"),
+    );
+}
+
+/** 音源详情底部面板：展示插件元信息、支持的能力、用户变量 */
+function PluginDetailSheet({ plugin, onClose }: { plugin: SerializedPlugin | null; onClose: () => void }) {
+    useBackLayer(!!plugin, "plugin-detail", onClose);
+
+    if (!plugin) {
+        return null;
+    }
+
+    const vars = Array.isArray(plugin.userVariablesDef) && plugin.userVariablesDef.length
+        ? plugin.userVariablesDef.map((def: any) => ({
+              name: def.name ?? def.key,
+              value: plugin.userVariables?.[def.key]?.trim(),
+          }))
+        : Object.entries(plugin.userVariables ?? {})
+              .filter(([, v]) => v?.trim())
+              .map(([k, v]) => ({ name: k, value: v.trim() }));
+
+    return (
+        <div className="sheet-mask" onClick={onClose}>
+            <div className="add-sheet-panel plugin-detail-panel" onClick={(e) => e.stopPropagation()}>
+                <div className="plugin-detail-head">
+                    <div className="plugin-detail-title">
+                        {plugin.name}
+                        <span className="plugin-badge">v{plugin.version || "未知"}</span>
+                        <span className={`plugin-badge ${plugin.state === "Mounted" ? "ok" : "err"}`}>
+                            {plugin.state === "Mounted" ? "已挂载" : plugin.errorReason ?? "错误"}
+                        </span>
+                    </div>
+                    <button className="icon-btn" onClick={onClose}>
+                        <IconClose size={20} />
+                    </button>
+                </div>
+                <div className="plugin-detail-body">
+                    <div className="plugin-detail-row">
+                        <span className="plugin-detail-label">作者</span>
+                        <span className="plugin-detail-value">{plugin.author || "未知"}</span>
+                    </div>
+                    <div className="plugin-detail-row">
+                        <span className="plugin-detail-label">平台标识</span>
+                        <span className="plugin-detail-value plugin-detail-mono">{plugin.platform || "未知"}</span>
+                    </div>
+                    <div className="plugin-detail-row">
+                        <span className="plugin-detail-label">运行状态</span>
+                        <span className="plugin-detail-value">
+                            {plugin.state === "Mounted" ? "已挂载，可正常使用" : `加载失败（${plugin.errorReason ?? "未知原因"}）`}
+                        </span>
+                    </div>
+                    <div className="plugin-detail-row">
+                        <span className="plugin-detail-label">启用状态</span>
+                        <span className="plugin-detail-value">{plugin.enabled ? "已启用" : "已禁用"}</span>
+                    </div>
+                    <div className="plugin-detail-row">
+                        <span className="plugin-detail-label">描述</span>
+                        <span className="plugin-detail-value">{plugin.description || "暂无描述"}</span>
+                    </div>
+                    {plugin.srcUrl && (
+                        <div className="plugin-detail-row">
+                            <span className="plugin-detail-label">来源链接</span>
+                            <span
+                                className="plugin-detail-value copyable plugin-detail-mono"
+                                onClick={() => copyText(plugin.srcUrl)}
+                            >
+                                {plugin.srcUrl}
+                            </span>
+                        </div>
+                    )}
+                    <div className="plugin-detail-row">
+                        <span className="plugin-detail-label">插件指纹</span>
+                        <span
+                            className="plugin-detail-value copyable plugin-detail-mono"
+                            onClick={() => copyText(plugin.hash)}
+                        >
+                            {plugin.hash.slice(0, 16)}…{plugin.hash.slice(-8)}
+                        </span>
+                    </div>
+
+                    {Array.isArray(plugin.supportedMethods) && plugin.supportedMethods.length > 0 && (
+                        <div className="plugin-detail-block">
+                            <div className="plugin-detail-block-title">支持的能力</div>
+                            <div className="plugin-detail-tags">
+                                {plugin.supportedMethods.map((m) => (
+                                    <span key={m} className="plugin-detail-tag">
+                                        {m}
+                                    </span>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {vars.length > 0 && (
+                        <div className="plugin-detail-block">
+                            <div className="plugin-detail-block-title">用户变量</div>
+                            {vars.map((v) => (
+                                <div key={v.name} className="plugin-detail-var">
+                                    <span className="plugin-detail-var-name">{v.name}</span>
+                                    <span className="plugin-detail-var-value">{v.value || "未设置"}</span>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+}
+
 export default function PluginManagePage() {
     const [plugins, setPlugins] = useState<SerializedPlugin[]>([]);
     const [url, setUrl] = useState("");
     const [expanded, setExpanded] = useState<string | null>(null);
+    const [detail, setDetail] = useState<SerializedPlugin | null>(null);
     const defaultHash = useDefaultPluginHash();
     const fileRef = useRef<HTMLInputElement | null>(null);
 
@@ -163,7 +279,7 @@ export default function PluginManagePage() {
                                     <span className={`plugin-badge ${p.state === "Mounted" ? "ok" : "err"}`}>
                                         {p.state === "Mounted" ? "已挂载" : p.errorReason ?? "错误"}
                                     </span>
-                                    {isDefault && <span className="plugin-badge ok">默认音源</span>}
+                                    {isDefault && <span className="plugin-badge primary">默认音源</span>}
                                 </div>
                                 <div className="plugin-card-desc">
                                     {p.description || "暂无描述"}
@@ -183,6 +299,9 @@ export default function PluginManagePage() {
                         {expandedOpen && (
                             <>
                                 <div className="plugin-card-foot">
+                                    <button className="pill" onClick={() => setDetail(p)}>
+                                        详情
+                                    </button>
                                     {p.srcUrl && (
                                         <button
                                             className="pill"
@@ -273,6 +392,8 @@ export default function PluginManagePage() {
                     粘贴插件链接安装后即可搜歌、听歌
                 </div>
             )}
+
+            <PluginDetailSheet plugin={detail} onClose={() => setDetail(null)} />
         </div>
     );
 }

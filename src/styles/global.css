@@ -402,6 +402,62 @@ img {
     margin-left: auto;
 }
 
+/* 顶栏右上角操作区（搜索 / 更多等多个按钮）：标题绝对定位不占 flex 空间，需自行推到最右侧 */
+.sub-header-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+/* ---------- 列表页局部搜索 ---------- */
+
+/* 搜索框叠在整个顶栏上：负 margin 上移盖住 sub-header，失焦后保留，点「取消」卸载还原；
+   sticky 保证列表滚动时搜索框与顶栏一同吸顶 */
+.list-search-bar {
+    position: sticky;
+    top: 0;
+    z-index: 31;
+    height: calc(52px + var(--safe-top));
+    padding: var(--safe-top) 8px 0 12px;
+    margin-top: calc(-52px - var(--safe-top));
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--page-bg);
+}
+
+.list-search-bar .search-input-wrap {
+    flex: 1;
+    min-width: 0;
+}
+
+.list-search-bar .search-input-wrap input {
+    min-width: 0;
+}
+
+.ls-clear {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: rgba(128, 128, 128, 0.22);
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.ls-cancel {
+    flex-shrink: 0;
+    height: 44px;
+    padding: 0 6px;
+    display: flex;
+    align-items: center;
+    font-size: 14px;
+    color: var(--text-secondary);
+}
+
 /* ---------- 发现页 ---------- */
 
 /* 三个子页横向排布常驻：页面本身不再滚动，改为每个子页（.ptr）各自滚动并缓存位置；
@@ -1535,10 +1591,12 @@ img {
 }
 
 /* 用户滑动停止后，目标行滚到激活位置并展示 时间 + 歌词 + 播放按钮。
-   卡片与歌词列同宽（不通栏到屏幕边缘），歌词文本居中、可换行；
-   时间/播放按钮 absolute 定位到卡片外侧留白区，与卡片边缘留出间距 */
+   卡片背景向两侧延伸到歌词列留白区，时间与播放按钮对称放在背景内部左右两端，
+   歌词文本仍居中、与普通行同宽可换行 */
 .np-lyric-line.np-lyric-seekline {
     position: relative;
+    margin: 0 -32px;
+    padding: 9px 32px;
     text-align: center;
     border-radius: 12px;
     background: rgba(255, 255, 255, 0.16);
@@ -1555,7 +1613,7 @@ img {
 
 .np-lyric-seek-time {
     position: absolute;
-    left: -31px;
+    left: 8px;
     top: 50%;
     transform: translateY(-50%);
     width: 24px;
@@ -1567,7 +1625,7 @@ img {
 
 .np-lyric-seek-play {
     position: absolute;
-    right: -31px;
+    right: 8px;
     top: 50%;
     transform: translateY(-50%);
     display: flex;
@@ -1910,6 +1968,11 @@ img {
     padding: 0 8px calc(14px + var(--safe-bottom));
 }
 
+/* 无标题时补顶部留白，避免首行贴住面板圆角 */
+.add-sheet-list.no-title {
+    padding-top: 8px;
+}
+
 .add-sheet-row {
     display: flex;
     align-items: center;
@@ -1934,6 +1997,12 @@ img {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+/* 行内标签（如「默认」）与选项文字留出间距 */
+.add-sheet-row-title .plugin-badge {
+    margin-left: 7px;
+    vertical-align: 2px;
 }
 
 .add-sheet-row-sub {
@@ -2148,20 +2217,26 @@ img {
 .plugin-badge {
     font-size: 10px;
     font-weight: 500;
-    padding: 1px 7px;
-    border-radius: 9px;
-    border: 1px solid var(--divider);
+    line-height: 1.6;
+    padding: 1px 6px;
+    border-radius: 4px;
     color: var(--text-tertiary);
+    background: var(--hover-bg);
 }
 
 .plugin-badge.ok {
-    color: #2bb672;
-    border-color: rgba(43, 182, 114, 0.5);
+    color: #23a566;
+    background: rgba(35, 165, 102, 0.13);
 }
 
 .plugin-badge.err {
     color: var(--primary-color);
-    border-color: rgba(234, 61, 61, 0.5);
+    background: rgba(234, 61, 61, 0.12);
+}
+
+.plugin-badge.primary {
+    color: var(--primary-color);
+    background: rgba(236, 65, 65, 0.12);
 }
 
 .plugin-card-desc {
@@ -2251,6 +2326,124 @@ img {
     background: var(--page-bg);
     font-size: 13px;
     border: 1px solid var(--divider);
+}
+
+/* 音源详情面板 */
+
+.plugin-detail-panel {
+    max-height: 80vh;
+}
+
+.plugin-detail-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 16px 16px 10px;
+}
+
+.plugin-detail-title {
+    flex: 1;
+    min-width: 0;
+    font-size: 16px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    flex-wrap: wrap;
+}
+
+.plugin-detail-body {
+    overflow-y: auto;
+    padding: 2px 16px calc(18px + var(--safe-bottom));
+}
+
+.plugin-detail-row {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 9px 0;
+    font-size: 13px;
+    border-bottom: 1px solid var(--divider);
+}
+
+.plugin-detail-row:last-child {
+    border-bottom: none;
+}
+
+.plugin-detail-label {
+    width: 76px;
+    flex-shrink: 0;
+    font-size: 12px;
+    color: var(--text-tertiary);
+}
+
+.plugin-detail-value {
+    flex: 1;
+    min-width: 0;
+    word-break: break-all;
+}
+
+.plugin-detail-value.copyable {
+    color: var(--text-secondary);
+}
+
+.plugin-detail-value:active.copyable {
+    color: var(--text-tertiary);
+}
+
+.plugin-detail-mono {
+    font-family: ui-monospace, SFMono-Regular, Consolas, Menlo, monospace;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.plugin-detail-block {
+    margin-top: 14px;
+}
+
+.plugin-detail-block-title {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-bottom: 8px;
+}
+
+.plugin-detail-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.plugin-detail-tag {
+    font-family: ui-monospace, SFMono-Regular, Consolas, Menlo, monospace;
+    font-size: 11px;
+    padding: 2.5px 8px;
+    border-radius: 4px;
+    background: var(--hover-bg);
+    color: var(--text-secondary);
+}
+
+.plugin-detail-var {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 6px 0;
+    font-size: 12.5px;
+}
+
+.plugin-detail-var-name {
+    color: var(--text-secondary);
+    flex-shrink: 0;
+    max-width: 120px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.plugin-detail-var-value {
+    flex: 1;
+    min-width: 0;
+    color: var(--text-tertiary);
+    word-break: break-all;
 }
 
 /* ---------- 设置页 ---------- */
@@ -2599,45 +2792,137 @@ img {
     border: 1px solid var(--divider);
 }
 
-/* ---------- 下载进度：封面扇形遮罩 ---------- */
+/* ---------- 下载队列（「我的下载」页） ---------- */
 
-/* 从 12 点方向顺时针扫开的扇形：已下载部分透出封面，剩余部分盖暗色 */
-.cover-progress {
+/* 顶部进度条 */
+.dl-bar {
+    padding: 8px 14px 10px;
+    border-bottom: 1px solid var(--divider);
+    background: var(--page-bg);
+}
+
+.dl-bar-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.dl-bar-text {
+    flex: 1;
+    min-width: 0;
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.dl-bar-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.dl-bar-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 4px 10px;
+    border: none;
+    border-radius: 999px;
+    font-size: 12px;
+    color: var(--text-color);
+    background: var(--hover-bg);
+}
+
+.dl-bar-btn:active {
+    background: var(--active-bg);
+}
+
+.dl-bar-btn.danger {
+    color: var(--primary-color);
+}
+
+.dl-bar-track {
+    height: 3px;
+    border-radius: 2px;
+    background: var(--hover-bg);
+    overflow: hidden;
+}
+
+.dl-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: var(--primary-color);
+    transition: width 0.25s linear;
+}
+
+/* 任务行：与已完成记录同构（music-row + 序号），完成后落入下方记录列表；
+   蒙层盖在内容上方、占满整行高度，左缘与封面左缘对齐（10 + 22 + 10 = 42px），
+   宽度按下载进度由 calc((100% - 42px) * 比例) 从 100% 向右收缩到 0；
+   颜色走主题 token --dl-mask / --dl-mask-fail（pointer-events:none 不挡重试按钮） */
+.dl-task-list {
+    padding: 0 6px;
+}
+
+.dl-task-row {
+    position: relative;
+    overflow: hidden;
+}
+
+.dl-task-mask {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: 0;
+    z-index: 2;
+    border-radius: 10px;
+    background: var(--dl-mask);
+    pointer-events: none;
+    transition: width 0.25s linear;
+}
+
+.dl-task-row.failed .dl-task-mask {
+    background: var(--dl-mask-fail);
+    transition: none;
+}
+
+.dl-task-row .music-row-title,
+.dl-task-row .music-row-sub {
+    color: var(--text-secondary);
+}
+
+.dl-task-row.failed .music-row-title {
+    color: var(--text-color);
+}
+
+/* 右侧百分比进度：悬浮在蒙层之上，下载中/暂停时展示 */
+.dl-task-pct {
+    position: relative;
+    z-index: 3;
+    flex-shrink: 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+/* 失败任务封面上的重试按钮 */
+.dl-task-retry {
     position: absolute;
     inset: 0;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: conic-gradient(
-        transparent 0 calc(var(--p) * 1%),
-        rgba(0, 0, 0, 0.62) calc(var(--p) * 1%) 100%
-    );
-}
-
-/* 拿不到 content-length：旋转扫描（不确定态） */
-.cover-progress.indeterminate {
-    background: conic-gradient(rgba(0, 0, 0, 0.62) 0 90deg, transparent 90deg 360deg);
-    animation: cover-progress-spin 1.1s linear infinite;
-}
-
-@keyframes cover-progress-spin {
-    to {
-        transform: rotate(360deg);
-    }
-}
-
-.cover-progress-text {
-    font-style: normal;
-    font-size: 9px;
-    line-height: 1;
-    font-weight: 600;
+    border: none;
+    border-radius: inherit;
+    background: rgba(0, 0, 0, 0.45);
     color: #fff;
-    text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
 }
 
-/* 「我的下载」页顶部的下载中行：标题轻微压暗以示区别 */
-.downloading-row .music-row-title {
-    color: var(--text-secondary);
+.dl-task-retry:active {
+    background: rgba(0, 0, 0, 0.6);
 }
 
 /* Slider 组件（复用） */

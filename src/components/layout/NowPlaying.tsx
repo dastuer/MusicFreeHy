@@ -437,7 +437,6 @@ function NowPlayingInner({
 
     const openDownloadSheet = () => {
         openSingleSelect({
-            title: "下载音质",
             options: qualityOptions(),
             onSelect: (v) => {
                 downloadMusic(currentMusic, v as IMusic.IQualityKey);

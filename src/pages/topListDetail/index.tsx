@@ -11,8 +11,10 @@ import MusicListSkeleton from "@/components/base/MusicListSkeleton";
 import Cover from "@/components/base/Cover";
 import PlayAllBar from "@/components/base/PlayAllBar";
 import SelectActionsBar from "@/components/base/SelectActionsBar";
+import ListSearchBar from "@/components/base/ListSearchBar";
 import { useMusicMultiSelect } from "@/hooks/useMusicMultiSelect";
-import { IconBack } from "@/components/base/Icons";
+import { useListSearch } from "@/hooks/useListSearch";
+import { IconBack, IconSearch } from "@/components/base/Icons";
 import { showToast } from "@/core/uiAtoms";
 
 /** 排行榜详情页：getTopListDetail 分页加载 */
@@ -94,12 +96,15 @@ export default function TopListDetailPage() {
         setLoadingMore(false);
     };
 
-    // 多选（下载 / 收藏）
-    const multi = useMusicMultiSelect(musicList);
+    // 局部搜索：搜索已加载部分，播放全部 / 多选范围随之联动
+    const search = useListSearch(musicList);
+    const viewList = search.active ? search.filtered : musicList;
+    const multi = useMusicMultiSelect(musicList, viewList);
 
-    // 切换榜单时退出多选态
+    // 切换榜单时退出多选态与搜索态
     useEffect(() => {
         multi.exitSelect();
+        search.close();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [topListItem]);
 
@@ -108,10 +113,10 @@ export default function TopListDetailPage() {
     }
 
     const playAll = () => {
-        if (musicList.length) {
+        if (viewList.length) {
             TrackPlayerSingleton.playWithReplacePlayList(
-                musicList[0],
-                musicList,
+                viewList[0],
+                viewList,
                 `toplist:${topListItem.platform}-${topListItem.id}`,
             );
         } else {
@@ -135,16 +140,26 @@ export default function TopListDetailPage() {
             }}
         >
             <div
-                className={`sub-header detail-topbar${topSolid ? " solid" : ""}`}
+                className={`sub-header detail-topbar${topSolid || search.open ? " solid" : ""}`}
                 ref={topbarRef}
             >
                 <button className="icon-btn" onClick={() => goBack()}>
                     <IconBack size={22} />
                 </button>
                 <span className="sub-header-title">
-                    {topSolid ? (topListItem?.title ?? "排行榜") : "排行榜"}
+                    {topSolid || search.open ? (topListItem?.title ?? "排行榜") : "排行榜"}
                 </span>
+                <div className="sub-header-actions">
+                    <button
+                        className="icon-btn"
+                        onClick={() => (search.open ? search.close() : search.setOpen(true))}
+                        title="搜索本榜单"
+                    >
+                        <IconSearch size={20} />
+                    </button>
+                </div>
             </div>
+            {search.open && <ListSearchBar search={search} />}
             <div className="detail-hero" ref={heroRef}>
                 <div
                     className="detail-hero-bg"
@@ -164,7 +179,7 @@ export default function TopListDetailPage() {
             </div>
 
             <PlayAllBar
-                count={musicList.length}
+                count={viewList.length}
                 onPlayAll={playAll}
                 selectMode={multi.selectMode}
                 selectedCount={multi.selected.length}
@@ -181,7 +196,7 @@ export default function TopListDetailPage() {
             ) : (
                 <>
                     <MusicList
-                        musicList={musicList}
+                        musicList={viewList}
                         listId={`toplist:${topListItem.platform}-${topListItem.id}`}
                         showIndex
                         selectMode={multi.selectMode}

@@ -1,7 +1,9 @@
 import { useCallback, useMemo, useState } from "react";
+import { useAtomValue } from "jotai";
 import {
     QUALITY_LABEL,
     downloadMusicBatch,
+    downloadingAtom,
     removeDownloadRecords,
 } from "@/core/musicDownload";
 import { openMusicActions, openAddToSheet, openSingleSelect, showToast } from "@/core/uiAtoms";
@@ -13,10 +15,18 @@ import { openMusicActions, openAddToSheet, openSingleSelect, showToast } from "@
  *  - 收藏：批量加入歌单面板；
  *  - 删除（仅本地歌单）：从歌单中删除 或 删除下载记录。
  */
-export function useMusicMultiSelect(musicList: IMusic.IMusicItem[]) {
+/**
+ * @param musicList 完整列表：校验选中项仍在列表内
+ * @param scopeList 「全选」的范围，默认全列表；列表页局部搜索时传过滤结果
+ */
+export function useMusicMultiSelect(
+    musicList: IMusic.IMusicItem[],
+    scopeList: IMusic.IMusicItem[] = musicList,
+) {
     const [selectMode, setSelectMode] = useState(false);
     const [pickedItems, setPickedItems] = useState<IMusic.IMusicItem[]>([]);
-    const [downloading, setDownloading] = useState(false);
+    // 下载中状态跟随全局下载队列（有排队/下载中任务即视为下载中）
+    const downloading = useAtomValue(downloadingAtom);
 
     /** 实际生效的选中：过滤掉已不在当前列表里的歌（如刚被移出歌单） */
     const selected = useMemo(
@@ -53,28 +63,23 @@ export function useMusicMultiSelect(musicList: IMusic.IMusicItem[]) {
     }, []);
 
     const selectAll = useCallback(() => {
-        setPickedItems([...musicList]);
-    }, [musicList]);
+        setPickedItems([...scopeList]);
+    }, [scopeList]);
 
     const deselectAll = useCallback(() => {
         setPickedItems([]);
     }, []);
 
-    /** 批量下载：先选音质档 */
+    /** 批量下载：选音质档后入队（队列在「我的下载」页管理进度/暂停/停止） */
     const startDownload = useCallback(() => {
         if (!selected.length) {
             return;
         }
         const qualityOptions: IMusic.IQualityKey[] = ["standard", "high", "super", "low"];
         openSingleSelect({
-            title: "下载音质",
-            subtitle: `将下载 ${selected.length} 首歌曲`,
             options: qualityOptions.map((q) => ({ value: q, label: QUALITY_LABEL[q] })),
             onSelect: (v) => {
-                setDownloading(true);
-                void downloadMusicBatch(selected, v as IMusic.IQualityKey).finally(() => {
-                    setDownloading(false);
-                });
+                downloadMusicBatch(selected, v as IMusic.IQualityKey);
             },
         });
     }, [selected]);

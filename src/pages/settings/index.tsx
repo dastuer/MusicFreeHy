@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { useAtomValue } from "jotai";
 import { goBack, navigate } from "@/core/router";
 import { useThemeSetting, setTheme } from "@/core/theme";
 import { getQuality, setQuality } from "@/core/appConfig";
@@ -11,6 +12,17 @@ import { getWebdavConfig, getWebdavLastAt } from "@/core/dav";
 import { setDefaultQuality } from "@/core/trackPlayer";
 import { getProxyBase } from "@/core/net";
 import { isNative } from "@/core/native";
+import {
+    AUDIO_CACHE_LIMIT_OPTIONS,
+    audioCacheVersionAtom,
+    clearAudioCache,
+    enforceAudioCacheLimit,
+    formatAudioCacheSize,
+    getAudioCacheLimitLabel,
+    getAudioCacheLimitMB,
+    getAudioCacheStats,
+    setAudioCacheLimitMB,
+} from "@/core/audioCache";
 import { showToast, openPrompt, openMusicActions, openSingleSelect } from "@/core/uiAtoms";
 import { IconBack } from "@/components/base/Icons";
 
@@ -36,6 +48,10 @@ const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
     const [rememberProgress, setRememberProgress] = useState(
         localStorage.getItem("rememberProgress") !== "false",
     );
+    const [cacheLimit, setCacheLimitState] = useState(getAudioCacheLimitMB());
+    // 缓存写入 / 清理后版本号自增，占用展示跟着刷新
+    const cacheVersion = useAtomValue(audioCacheVersionAtom);
+    const cacheStats = useMemo(() => getAudioCacheStats(), [cacheVersion]);
     const webdav = getWebdavConfig();
     const webdavConfigured = Boolean(webdav.url || webdav.username);
     const webdavLastUp = getWebdavLastAt("upload");
@@ -66,6 +82,47 @@ const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
                     `默认音质：${QUALITY_OPTIONS.find((q) => q.key === v)?.label}`,
                 );
             },
+        });
+
+    const pickCacheLimit = () =>
+        openSingleSelect({
+            options: AUDIO_CACHE_LIMIT_OPTIONS,
+            value: String(cacheLimit),
+            onSelect: (v) => {
+                const mb = Number(v);
+                setCacheLimitState(mb);
+                setAudioCacheLimitMB(mb);
+                void enforceAudioCacheLimit();
+                showToast(`缓存上限：${getAudioCacheLimitLabel(mb)}`);
+            },
+        });
+
+    const clearCache = () =>
+        openMusicActions({
+            musicItem: {} as any,
+            title: "清理播放缓存",
+            subtitle: cacheStats.count
+                ? `将删除 ${cacheStats.count} 首歌的缓存（${formatAudioCacheSize(
+                      cacheStats.size,
+                  )}），不影响已下载的音乐`
+                : "当前没有已缓存的歌曲",
+            actions: [
+                {
+                    label: "清理",
+                    danger: true,
+                    onClick: () => {
+                        if (!cacheStats.count) {
+                            showToast("当前没有已缓存的歌曲");
+                            return;
+                        }
+                        void clearAudioCache().then((r) =>
+                            showToast(
+                                `已清理 ${r.removed} 首歌的缓存，释放 ${formatAudioCacheSize(r.sizeFreed)}`,
+                            ),
+                        );
+                    },
+                },
+            ],
         });
 
     return (
@@ -105,6 +162,24 @@ const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
                 >
                     <span className="settings-row-label">记忆播放进度</span>
                     <div className={`plugin-switch ${rememberProgress ? "on" : ""}`} />
+                </div>
+            </div>
+
+            <div className="settings-group">
+                <div className="settings-group-title">缓存</div>
+                <div className="settings-row" onClick={pickCacheLimit}>
+                    <span className="settings-row-label">缓存上限</span>
+                    <span className="settings-value">{getAudioCacheLimitLabel(cacheLimit)}</span>
+                    <span className="settings-value">›</span>
+                </div>
+                <div className="settings-row" onClick={clearCache}>
+                    <span className="settings-row-label">清理缓存</span>
+                    <span className="settings-value">
+                        {cacheStats.count
+                            ? `${cacheStats.count} 首 · ${formatAudioCacheSize(cacheStats.size)}`
+                            : "无缓存"}
+                    </span>
+                    <span className="settings-value">›</span>
                 </div>
             </div>
 

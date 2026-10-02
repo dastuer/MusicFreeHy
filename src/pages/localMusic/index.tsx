@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useAtomValue } from "jotai";
 import { goBack, navigate } from "@/core/router";
 import {
@@ -37,6 +37,8 @@ import Cover from "@/components/base/Cover";
 import MusicList from "@/components/base/MusicList";
 import PlayAllBar from "@/components/base/PlayAllBar";
 import SelectActionsBar from "@/components/base/SelectActionsBar";
+import ListSearchBar from "@/components/base/ListSearchBar";
+import { useListSearch } from "@/hooks/useListSearch";
 import {
     IconBack,
     IconChevronRight,
@@ -47,6 +49,7 @@ import {
     IconMusic,
     IconPause,
     IconPlay,
+    IconSearch,
     IconStop,
     IconTrash,
 } from "@/components/base/Icons";
@@ -67,23 +70,87 @@ function baseName(path: string): string {
     return at >= 0 ? path.slice(at + 1) : path;
 }
 
+/**
+ * 匹配进度条（参考网易云「获取图词」）：可暂停 / 继续 / 停止。
+ * 单独订阅 matchTaskAtom —— 「正在匹配」的曲目名每首都变，隔离在这里，
+ * 避免匹配期间整页（含 500+ 行的音乐列表）跟着每首歌重渲染一次。
+ */
+function LocalMatchBar() {
+    const matchTask = useAtomValue(matchTaskAtom);
+    if (!matchTask) {
+        return null;
+    }
+    return (
+        <div className="lm-match-bar">
+            <div className="lm-match-line">
+                <span className="lm-match-text">
+                    {matchTask.status === "paused" ? "匹配已暂停" : "正在匹配歌词与封面"}
+                    <b>
+                        {" "}
+                        {matchTask.done}/{matchTask.total}
+                    </b>
+                </span>
+                <div className="lm-match-btns">
+                    {matchTask.status === "paused" ? (
+                        <button className="lm-match-btn" onClick={resumeLocalMatch}>
+                            <IconPlay size={13} />
+                            继续
+                        </button>
+                    ) : (
+                        <button className="lm-match-btn" onClick={pauseLocalMatch}>
+                            <IconPause size={13} />
+                            暂停
+                        </button>
+                    )}
+                    <button className="lm-match-btn" onClick={stopLocalMatch}>
+                        <IconStop size={13} />
+                        停止
+                    </button>
+                </div>
+            </div>
+            {matchTask.status === "running" && matchTask.current && (
+                <div className="lm-match-current">{matchTask.current}</div>
+            )}
+            <div className="lm-match-progress">
+                <span
+                    style={{
+                        width: `${
+                            matchTask.total
+                                ? Math.round((matchTask.done / matchTask.total) * 100)
+                                : 0
+                        }%`,
+                    }}
+                />
+            </div>
+        </div>
+    );
+}
+
 /** 「本地音乐」页：本地曲库管理（播放全部 / 喜欢 / 收藏 / 删除 / 多选 / 扫描 / 详情） */
 export default function LocalMusicPage() {
-    // 订阅曲库版本号驱动整页重渲染（匹配期间每 1.2s 自增一次）；
+    // 订阅曲库版本号驱动派生数据重算（匹配期间每 1.2s 自增一次）；
     // version 不能拼进 MusicList 的 listId，否则渐进渲染窗口会被不断重置回前 150 行
     const version = useAtomValue(localMusicVersionAtom);
-    void version;
     const platform = localMusicPlatform();
+    // getLocalMusicList 走内存缓存（旧实现每次全量 JSON.parse，是页面卡顿的主因）
     const records = getLocalMusicList();
-    const musicList = records.map(toMusicItem);
-    const recordById = new Map(records.map((it) => [it.localPath, it]));
+    // 派生数据只在曲库版本变化时重算；匹配循环原地改缓存里的条目，
+    // 数组引用不变，所以依赖里必须带上 version
+    const musicList = useMemo(() => records.map(toMusicItem), [records, version]);
+    const recordById = useMemo(
+        () => new Map(records.map((it) => [it.localPath, it])),
+        [records, version],
+    );
+
+    /* 局部搜索：过滤仅作用于列表视图与播放全部 */
+    const search = useListSearch(musicList);
+    const viewList = search.active ? search.filtered : musicList;
 
     /* 多选（收藏 / 喜欢 / 删除） */
     const [selectMode, setSelectMode] = useState(false);
     const [picked, setPicked] = useState<IMusic.IMusicItem[]>([]);
-    const selected = picked.filter((it) =>
-        musicList.some((m) => m.platform === it.platform && m.id === it.id),
-    );
+    // recordById 的键就是 localPath（= 本地条目的 id），O(1) 判断替代逐条扫全表
+    const selected = picked.filter((it) => it.platform === "local" && recordById.has(it.id));
     const selectedKeys = new Set(selected.map((it) => `${it.platform}-${it.id}`));
 
     const enterSelect = () => {
@@ -254,7 +321,6 @@ export default function LocalMusicPage() {
     useBackLayer(!!detail, "local-detail-dialog", () => setDetail(null));
 
     /* 匹配歌词与封面 */
-    const matchTask = useAtomValue(matchTaskAtom);
     const [matchOpen, setMatchOpen] = useState(false);
     const [matchSources, setMatchSources] = useState<SerializedPlugin[]>([]);
     const [matchSourceHash, setMatchSourceHash] = useState("");
@@ -271,7 +337,7 @@ export default function LocalMusicPage() {
             showToast("已有匹配任务在进行中");
             return;
         }
-        if (!musicList.length) {
+        if (!records.length) {
             showToast("本地音乐列表是空的，先扫描一下吧");
             return;
         }
@@ -318,71 +384,40 @@ export default function LocalMusicPage() {
                     <IconBack size={22} />
                 </button>
                 <span className="sub-header-title">本地音乐</span>
-                <button className="icon-btn sub-header-side" onClick={openMoreMenu} title="更多操作">
-                    <IconMore size={20} />
-                </button>
+                <div className="sub-header-actions">
+                    <button
+                        className="icon-btn"
+                        onClick={() => (search.open ? search.close() : search.setOpen(true))}
+                        title="搜索本地音乐"
+                    >
+                        <IconSearch size={20} />
+                    </button>
+                    <button className="icon-btn" onClick={openMoreMenu} title="更多操作">
+                        <IconMore size={20} />
+                    </button>
+                </div>
             </div>
 
-            {/* 匹配进度条（参考网易云「获取图词」）：可暂停 / 继续 / 停止 */}
-            {matchTask && (
-                <div className="lm-match-bar">
-                    <div className="lm-match-line">
-                        <span className="lm-match-text">
-                            {matchTask.status === "paused" ? "匹配已暂停" : "正在匹配歌词与封面"}
-                            <b>
-                                {" "}
-                                {matchTask.done}/{matchTask.total}
-                            </b>
-                        </span>
-                        <div className="lm-match-btns">
-                            {matchTask.status === "paused" ? (
-                                <button className="lm-match-btn" onClick={resumeLocalMatch}>
-                                    <IconPlay size={13} />
-                                    继续
-                                </button>
-                            ) : (
-                                <button className="lm-match-btn" onClick={pauseLocalMatch}>
-                                    <IconPause size={13} />
-                                    暂停
-                                </button>
-                            )}
-                            <button className="lm-match-btn" onClick={stopLocalMatch}>
-                                <IconStop size={13} />
-                                停止
-                            </button>
-                        </div>
-                    </div>
-                    {matchTask.status === "running" && matchTask.current && (
-                        <div className="lm-match-current">{matchTask.current}</div>
-                    )}
-                    <div className="lm-match-progress">
-                        <span
-                            style={{
-                                width: `${
-                                    matchTask.total
-                                        ? Math.round((matchTask.done / matchTask.total) * 100)
-                                        : 0
-                                }%`,
-                            }}
-                        />
-                    </div>
-                </div>
-            )}
+            {/* 局部搜索栏 */}
+            {search.open && <ListSearchBar search={search} placeholder="搜索本地音乐" />}
+
+            {/* 匹配进度条：独立组件，进度 / 当前曲目每首歌都变时不带动整页重渲染 */}
+            <LocalMatchBar />
 
             {musicList.length ? (
                 <>
                     <PlayAllBar
-                        count={musicList.length}
+                        count={viewList.length}
                         onPlayAll={playAll}
                         selectMode={selectMode}
                         selectedCount={selected.length}
                         onEnterSelect={enterSelect}
                         onExitSelect={exitSelect}
-                        onSelectAll={() => setPicked([...musicList])}
+                        onSelectAll={() => setPicked([...viewList])}
                         onDeselectAll={() => setPicked([])}
                     />
                     <MusicList
-                        musicList={musicList}
+                        musicList={viewList}
                         listId="localMusic"
                         showIndex
                         selectMode={selectMode}

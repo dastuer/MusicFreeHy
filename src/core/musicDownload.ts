@@ -3,7 +3,7 @@ import { TrackPlayerSingleton } from "./trackPlayer";
 import { getProxyBase } from "./net";
 import { b64urlEncode } from "./ipc";
 import { showToast } from "./uiAtoms";
-import { callNativeMethod, isNative } from "./native";
+import { callNativeMethod, hasNativeHttp, isNative, nativePlatform, writeAndroidFile, writeIosFile } from "./native";
 
 /**
  * 歌曲下载：音质选档 → 插件解析原始直链 → 拉成 blob → 保存到本机。
@@ -17,29 +17,50 @@ import { callNativeMethod, isNative } from "./native";
  *
  * 解析复用播放器的 resolveMediaUrl：插件缺失/被禁用时能拿到同一套人话原因；
  * 拉流优先直连（CapacitorHttp 接管 fetch，无跨域限制、可带自定义请求头），
- * 失败再走伴生代理的 /media 转发流。
+ * 失败再走伴生代理的 /media 转发流。原生端响应没有流式 body，
+ * 走分块 Range 下载换取真实进度（见 nativeChunkedDownload）。
  *
  * 下载记录（含完整歌曲元数据）落在 localStorage，「我的下载」页基于它做
  * 播放全部 / 喜欢 / 收藏 / 删除（记录 + 尽力删文件）。
+ *
+ * 下载采用串行队列：入队即出现在「我的下载」页（排队 / 下载中 / 暂停 / 失败），
+ * 支持整体暂停（中止当前拉流，继续时重头下载当前首）、停止、失败重试与清除。
  */
 
-/** 全局同一时间只跑一个下载任务；UI 用它显示进行中状态 */
-export const downloadingAtom = atom(false);
+/** 下载任务状态：pending 排队中 / downloading 下载中 / paused 已暂停 / error 失败待重试 */
+export type DownloadTaskStatus = "pending" | "downloading" | "paused" | "error";
 
-/** 当前下载任务：progress 为 0~100，-1 表示不确定（拿不到 content-length，转圈扫描） */
-export interface IDownloadTaskState {
+export interface IDownloadTask {
+    /** platform-id，任务唯一键 */
+    key: string;
     item: IMusic.IMusicItem;
+    quality: IMusic.IQualityKey;
+    /** 0~100；-1 表示不确定（拿不到 content-length） */
     progress: number;
-    /** 批量下载时的序号上下文（第 index / total 首），单曲下载为 null */
-    batch: { index: number; total: number } | null;
+    status: DownloadTaskStatus;
+    /** 失败原因（status = error 时展示） */
+    error?: string;
+    /** 静默任务（批量下载）：完成/失败不弹单条 toast，队列排空后统一汇总 */
+    silent: boolean;
 }
 
-export const downloadTaskAtom = atom<IDownloadTaskState | null>(null);
+/** 下载队列（排队 / 下载中 / 暂停 / 失败的任务）：入队即出现在「我的下载」页 */
+export const downloadTasksAtom = atom<IDownloadTask[]>([]);
+
+/** 批次计数：入队累加 total，任务终结（成功/失败/停止）累加 done；队列清空时归零 */
+export const downloadCounterAtom = atom({ total: 0, done: 0 });
+
+/** 是否有进行中的下载（排队或下载中）：播放页下载按钮转圈用 */
+export const downloadingAtom = atom((get) =>
+    get(downloadTasksAtom).some((t) => t.status === "pending" || t.status === "downloading"),
+);
 
 /** 下载记录版本号：记录增删后自增，驱动「我的下载」页 / 「我的」页数量刷新 */
 export const downloadsVersionAtom = atom(0);
 
-let downloading = false;
+let queueRunning = false;
+/** 中止当前下载任务的拉流（暂停 / 停止用） */
+let currentAbort: AbortController | null = null;
 
 /* ---------- 下载记录（「我的下载」页） ---------- */
 
@@ -289,34 +310,6 @@ export function downloadSaveTargetLabel(target = getDownloadSaveTarget()): strin
 
 /* ---------- 保存通道 ---------- */
 
-/** 当前原生平台（web 返回 null） */
-export function nativePlatform(): "android" | "ios" | null {
-    if (!isNative()) {
-        return null;
-    }
-    try {
-        const p = (window as any).Capacitor?.getPlatform?.();
-        return p === "android" || p === "ios" ? p : null;
-    } catch {
-        return null;
-    }
-}
-
-/** 分块大小取 3 的倍数（字节），保证 base64 分块拼接无补位问题 */
-const WRITE_CHUNK = 3 * 1024 * 1024;
-
-function blobToBase64(blob: Blob): Promise<string> {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-            const s = String(reader.result ?? "");
-            resolve(s.slice(s.indexOf(",") + 1));
-        };
-        reader.onerror = () => reject(new Error("读取下载数据失败"));
-        reader.readAsDataURL(blob);
-    });
-}
-
 /** 按设置解析 Android 端的目标目录（绝对路径），写入与删除共用 */
 async function androidTargetDir(target: DownloadSaveTarget): Promise<string> {
     if (target === "external") {
@@ -330,35 +323,6 @@ async function androidTargetDir(target: DownloadSaveTarget): Promise<string> {
     const subfolder = getDownloadSubfolder();
     const base = target === "documents" ? String(dirs.documents) : String(dirs.filesDir);
     return subfolder === "." ? base : `${base}/${subfolder}`;
-}
-
-/** Android：经 StoragePlugin 分块写入绝对路径（绕开 Filesystem 插件在 13+ 的公共目录门禁） */
-export async function writeAndroidFile(absPath: string, blob: Blob) {
-    for (let offset = 0; offset === 0 || offset < blob.size; offset += WRITE_CHUNK) {
-        const data = await blobToBase64(blob.slice(offset, offset + WRITE_CHUNK));
-        await callNativeMethod("Storage", "writeFile", {
-            path: absPath,
-            data,
-            append: offset > 0,
-        });
-    }
-}
-
-/** iOS：经 Filesystem 插件写入沙盒目录（首块 writeFile 建文件，后续 appendFile 追加） */
-export async function writeIosFile(directory: "DOCUMENTS" | "DATA", path: string, blob: Blob) {
-    for (let offset = 0; offset === 0 || offset < blob.size; offset += WRITE_CHUNK) {
-        const data = await blobToBase64(blob.slice(offset, offset + WRITE_CHUNK));
-        if (offset === 0) {
-            await callNativeMethod("Filesystem", "writeFile", {
-                path,
-                directory,
-                data,
-                recursive: true,
-            });
-        } else {
-            await callNativeMethod("Filesystem", "appendFile", { path, directory, data });
-        }
-    }
 }
 
 function triggerBrowserDownload(filename: string, blob: Blob) {
@@ -468,12 +432,110 @@ function inferExt(url: string, contentType: string) {
     return table[(contentType || "").split(";")[0].trim().toLowerCase()] ?? "mp3";
 }
 
+/* ---------- 原生端分块下载（真实进度） ---------- */
+
+/** 原生端分块大小：兼顾进度粒度与桥接开销（数据以 base64 过桥） */
+const NATIVE_DL_CHUNK = 512 * 1024;
+
+function nativeHttpPlugin(): any {
+    try {
+        return (window as any).Capacitor?.Plugins?.CapacitorHttp;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * 原生端下载：CapacitorHttp 接管 fetch 后响应没有可读流（进度永远拿不到），
+ * 改走分块 Range 请求 —— 先用 bytes=0-0 探测总大小（206 的 Content-Range），
+ * 再逐块拉取拼成 Blob，每块结束上报一次真实进度。
+ * 服务器不支持 Range（探测返回 200 整包）时直接用探测响应完成下载。
+ */
+async function nativeChunkedDownload(
+    url: string,
+    headers: Record<string, string>,
+    onProgress?: (loaded: number, total: number) => void,
+    signal?: AbortSignal,
+): Promise<{ blob: Blob; contentType: string }> {
+    const http = nativeHttpPlugin();
+    if (!http?.request) {
+        throw new Error("原生 HTTP 不可用");
+    }
+    if (signal?.aborted) {
+        throw new DOMException("下载已中止", "AbortError");
+    }
+    const requestRange = async (range?: string) => {
+        const res = await http.request({
+            url,
+            method: "GET",
+            headers: range ? { ...headers, Range: range } : headers,
+            responseType: "arraybuffer",
+            connectTimeout: 20000,
+            readTimeout: 60000,
+        });
+        if (res.status >= 400) {
+            throw new Error(`请求失败 (${res.status})`);
+        }
+        const resHeaders: Record<string, string> = {};
+        for (const [k, v] of Object.entries(res.headers ?? {})) {
+            resHeaders[k.toLowerCase()] = Array.isArray(v) ? v.join(",") : String(v);
+        }
+        return {
+            status: Number(res.status),
+            headers: resHeaders,
+            data: res.data as ArrayBuffer,
+        };
+    };
+
+    // 探测总大小：206 → Content-Range 带总大小，分块拉；200 → 服务器不支持 Range，响应即整包
+    const probe = await requestRange("bytes=0-0");
+    const contentType = probe.headers["content-type"] ?? "";
+    if (probe.status !== 206) {
+        const size = probe.data?.byteLength ?? 0;
+        onProgress?.(size, size);
+        return { blob: new Blob([probe.data], { type: contentType }), contentType };
+    }
+    const total = Number((probe.headers["content-range"] ?? "").split("/")[1]) || 0;
+    if (!total) {
+        // 拿不到总大小：整包拉取，进度走不确定态
+        const full = await requestRange();
+        const size = full.data?.byteLength ?? 0;
+        onProgress?.(size, size);
+        return { blob: new Blob([full.data], { type: contentType }), contentType };
+    }
+
+    // 分块拉取：probe 已含第 0 字节，从 1 开始；每块结束检查中止信号（暂停/停止）
+    const chunks: ArrayBuffer[] = [probe.data];
+    for (let start = 1; start < total; ) {
+        if (signal?.aborted) {
+            throw new DOMException("下载已中止", "AbortError");
+        }
+        const end = Math.min(start + NATIVE_DL_CHUNK - 1, total - 1);
+        const part = await requestRange(`bytes=${start}-${end}`);
+        if (part.status !== 206) {
+            throw new Error(`分块下载失败 (${part.status})`);
+        }
+        chunks.push(part.data);
+        start = end + 1;
+        onProgress?.(start, total);
+    }
+    return { blob: new Blob(chunks, { type: contentType }), contentType };
+}
+
 async function fetchBlob(
     url: string,
     headers?: Record<string, string>,
     onProgress?: (loaded: number, total: number) => void,
+    signal?: AbortSignal,
 ) {
-    const resp = await fetch(url, headers && Object.keys(headers).length ? { headers } : undefined);
+    // 原生端：CapacitorHttp 接管 fetch，响应没有可读流，直接走分块 Range 下载换真实进度
+    if (isNative() && hasNativeHttp()) {
+        return nativeChunkedDownload(url, headers ?? {}, onProgress, signal);
+    }
+    const resp = await fetch(url, {
+        ...(headers && Object.keys(headers).length ? { headers } : undefined),
+        signal,
+    });
     if (!resp.ok) {
         throw new Error(`请求失败 (${resp.status})`);
     }
@@ -488,6 +550,14 @@ async function fetchBlob(
     const chunks: ArrayBuffer[] = [];
     let loaded = 0;
     for (;;) {
+        if (signal?.aborted) {
+            try {
+                await reader.cancel();
+            } catch {
+                // ignore
+            }
+            throw new DOMException("下载已中止", "AbortError");
+        }
         const { done, value } = await reader.read();
         if (done) {
             break;
@@ -499,39 +569,124 @@ async function fetchBlob(
     return { blob: new Blob(chunks, { type: contentType }), contentType };
 }
 
-/**
- * 下载一首歌。返回结果供调用方补充处理。
- * @param quality 期望音质档；插件该档不可用时解析器会自动降档，完成提示里带实际档位
- * @param silent 静默模式（批量下载用）：全程不弹 toast（开始/完成/失败都不弹），
- *               进度仍写入 downloadTaskAtom 供列表封面扇形展示
- * @param batchInfo 批量下载序号上下文，展示在「我的下载」页
- */
-export async function downloadMusic(
+/* ---------- 下载队列执行器 ---------- */
+
+function taskKey(item: IMusic.IMusicItem) {
+    return `${item.platform}-${item.id}`;
+}
+
+function patchTask(key: string, patch: Partial<IDownloadTask>) {
+    const store = getDefaultStore();
+    store.set(downloadTasksAtom, (prev) =>
+        prev.map((t) => (t.key === key ? { ...t, ...patch } : t)),
+    );
+}
+
+/** 计数器：入队累加 total，任务终结（成功/失败/停止移除）累加 done */
+function bumpCounter(dTotal: number, dDone: number) {
+    const store = getDefaultStore();
+    const c = store.get(downloadCounterAtom);
+    store.set(downloadCounterAtom, { total: c.total + dTotal, done: c.done + dDone });
+}
+
+/** 队列清空后归零计数器（下次入队重新开始一批） */
+function resetCounterIfIdle() {
+    const store = getDefaultStore();
+    if (!store.get(downloadTasksAtom).length) {
+        store.set(downloadCounterAtom, { total: 0, done: 0 });
+    }
+}
+
+/** 批量（静默）任务的结果累计，队列排空时统一播报 */
+let silentOk = 0;
+let silentFail = 0;
+
+function flushSilentSummary() {
+    if (!silentOk && !silentFail) {
+        return;
+    }
+    showToast(
+        silentFail
+            ? `批量下载完成：成功 ${silentOk} 首，失败 ${silentFail} 首`
+            : `批量下载完成：成功 ${silentOk} 首`,
+        3600,
+    );
+    silentOk = 0;
+    silentFail = 0;
+}
+
+/** 入队。同一首歌已在队列时：失败的重置为待下载，进行中的忽略；返回是否接受 */
+export function enqueueDownload(
     musicItem: IMusic.IMusicItem,
     quality: IMusic.IQualityKey,
     silent = false,
-    batchInfo: { index: number; total: number } | null = null,
-): Promise<{ ok: boolean; message?: string }> {
-    if (downloading) {
-        return { ok: false, message: "已有歌曲在下载中，请稍候" };
-    }
-    downloading = true;
+): boolean {
     const store = getDefaultStore();
-    const reportProgress = (progress: number) => {
-        store.set(downloadTaskAtom, { item: musicItem, progress, batch: batchInfo });
-    };
-    store.set(downloadingAtom, true);
-    reportProgress(-1);
-    if (!silent) {
-        showToast(`开始下载「${musicItem.title}」（${qualityShortName(quality)}）`, 3200);
+    const key = taskKey(musicItem);
+    const existing = store.get(downloadTasksAtom).find((t) => t.key === key);
+    if (existing) {
+        if (existing.status === "error") {
+            patchTask(key, { status: "pending", progress: -1, error: undefined, silent });
+            bumpCounter(0, -1);
+            void runQueue();
+            return true;
+        }
+        return false;
     }
+    store.set(downloadTasksAtom, (prev) => [
+        ...prev,
+        { key, item: musicItem, quality, progress: -1, status: "pending", silent },
+    ]);
+    bumpCounter(1, 0);
+    void runQueue();
+    return true;
+}
+
+/**
+ * 下载一首歌（入队）。立即出现在「我的下载」页，完成后落入下载记录。
+ * @param quality 期望音质档；插件该档不可用时解析器会自动降档，完成提示里带实际档位
+ */
+export function downloadMusic(musicItem: IMusic.IMusicItem, quality: IMusic.IQualityKey): void {
+    if (enqueueDownload(musicItem, quality, false)) {
+        showToast(`已加入下载队列「${musicItem.title}」（${qualityShortName(quality)}）`, 2800);
+    } else {
+        showToast(`「${musicItem.title}」已在下载队列中`, 2400);
+    }
+}
+
+/** 批量下载（多选）：按音质档入队串行下载，队列排空时播报成功/失败条数 */
+export function downloadMusicBatch(musicItems: IMusic.IMusicItem[], quality: IMusic.IQualityKey): void {
+    if (!musicItems.length) {
+        return;
+    }
+    let added = 0;
+    for (const item of musicItems) {
+        if (enqueueDownload(item, quality, true)) {
+            added += 1;
+        }
+    }
+    if (added) {
+        showToast(`已加入下载队列 ${added} 首（${qualityShortName(quality)}）`, 2800);
+    } else {
+        showToast("所选歌曲都已在下载队列中", 2400);
+    }
+}
+
+/** 执行单个任务：解析 → 拉流 → 保存 → 落记录 */
+async function runTask(key: string) {
+    const store = getDefaultStore();
+    const task = store.get(downloadTasksAtom).find((t) => t.key === key);
+    if (!task || task.status !== "pending") {
+        return;
+    }
+    const { item: musicItem, quality, silent } = task;
+    const abort = new AbortController();
+    currentAbort = abort;
+    patchTask(key, { status: "downloading", progress: -1, error: undefined });
     try {
         const res = await TrackPlayerSingleton.resolveMediaUrl(musicItem, quality);
         if (!res.ok) {
-            if (!silent) {
-                showToast(res.reason, 3600);
-            }
-            return { ok: false, message: res.reason };
+            throw new Error(res.reason);
         }
 
         const source = res.source ?? {};
@@ -550,14 +705,17 @@ export async function downloadMusic(
             const p = Math.min(97, 2 + Math.round((loaded / total) * 95));
             if (p !== lastProgress) {
                 lastProgress = p;
-                reportProgress(p);
+                patchTask(key, { progress: p });
             }
         };
 
         let fetched: { blob: Blob; contentType: string };
         try {
-            fetched = await fetchBlob(rawUrl, headers, onFetchProgress);
+            fetched = await fetchBlob(rawUrl, headers, onFetchProgress, abort.signal);
         } catch (e) {
+            if (abort.signal.aborted) {
+                throw e;
+            }
             // 带自定义头的直链被跨域拦截（浏览器/开发者模式）时，走伴生代理的媒体转发流
             const proxyBase = getProxyBase();
             if (!proxyBase) {
@@ -566,7 +724,7 @@ export async function downloadMusic(
             const proxied = `${proxyBase}/media?u=${b64urlEncode(rawUrl)}&h=${b64urlEncode(
                 JSON.stringify(headers),
             )}`;
-            fetched = await fetchBlob(proxied, undefined, onFetchProgress);
+            fetched = await fetchBlob(proxied, undefined, onFetchProgress, abort.signal);
         }
 
         const { blob, contentType } = fetched;
@@ -585,10 +743,6 @@ export async function downloadMusic(
             saved.location === "system"
                 ? `下载完成：${filename}（${actualQuality} · ${sizeText}）`
                 : `下载完成：已保存到${downloadSaveTargetLabel(saved.location)}（${actualQuality} · ${sizeText}）`;
-        reportProgress(100);
-        if (!silent) {
-            showToast(message, 3600);
-        }
         markDownloaded({
             item: slimItem(musicItem),
             quality: res.quality ?? undefined,
@@ -597,48 +751,138 @@ export async function downloadMusic(
             downloadedAt: Date.now(),
             location: saved.location,
         });
-        return { ok: true, message };
-    } catch (e: any) {
-        const message = e?.message ?? String(e);
-        if (!silent) {
-            showToast(`下载失败：${message}`, 3600);
+        // 成功：进度走满（灰底收完）后移出队列并计数
+        patchTask(key, { progress: 100 });
+        store.set(downloadTasksAtom, (prev) => prev.filter((t) => t.key !== key));
+        bumpCounter(0, 1);
+        if (silent) {
+            silentOk += 1;
+        } else {
+            showToast(message, 3600);
         }
-        return { ok: false, message };
+    } catch (e: any) {
+        if (abort.signal.aborted) {
+            // 暂停/停止已先行改写状态或移除任务；这里兜底：仍在下载中的标记回暂停
+            const cur = store.get(downloadTasksAtom).find((t) => t.key === key);
+            if (cur && cur.status === "downloading") {
+                patchTask(key, { status: "paused" });
+            }
+        } else {
+            const message = e?.message ?? String(e);
+            patchTask(key, { status: "error", error: message });
+            bumpCounter(0, 1);
+            if (silent) {
+                silentFail += 1;
+            } else {
+                showToast(`下载失败：${message}`, 3600);
+            }
+        }
     } finally {
-        downloading = false;
-        store.set(downloadingAtom, false);
-        store.set(downloadTaskAtom, null);
+        if (currentAbort === abort) {
+            currentAbort = null;
+        }
     }
 }
 
-/**
- * 批量下载（多选）：按音质档逐首串行下载，结束播报成功/失败条数。
- */
-export async function downloadMusicBatch(
-    musicItems: IMusic.IMusicItem[],
-    quality: IMusic.IQualityKey,
-): Promise<void> {
-    if (!musicItems.length) {
+/** 串行执行队列：取下一个 pending 任务跑，直到没有为止 */
+async function runQueue() {
+    if (queueRunning) {
         return;
     }
-    showToast(`开始批量下载 ${musicItems.length} 首（${qualityShortName(quality)}）`, 2800);
-    let okCount = 0;
-    let failCount = 0;
-    for (let i = 0; i < musicItems.length; i++) {
-        const res = await downloadMusic(musicItems[i], quality, true, {
-            index: i + 1,
-            total: musicItems.length,
-        });
-        if (res.ok) {
-            okCount += 1;
-        } else {
-            failCount += 1;
+    queueRunning = true;
+    try {
+        for (;;) {
+            const next = getDefaultStore()
+                .get(downloadTasksAtom)
+                .find((t) => t.status === "pending");
+            if (!next) {
+                break;
+            }
+            await runTask(next.key);
         }
+    } finally {
+        queueRunning = false;
+        // 队列真正排空（只剩失败项或为空）才播报批量汇总；暂停退出时保留计数
+        const rest = getDefaultStore().get(downloadTasksAtom);
+        if (!rest.some((t) => t.status === "pending" || t.status === "downloading" || t.status === "paused")) {
+            flushSilentSummary();
+        }
+        resetCounterIfIdle();
     }
-    showToast(
-        failCount
-            ? `批量下载完成：成功 ${okCount} 首，失败 ${failCount} 首`
-            : `批量下载完成：成功 ${okCount} 首`,
-        3600,
+}
+
+/** 一键暂停：中止当前拉流，当前首与排队中的任务都标记为已暂停（继续时当前首从头下载） */
+export function pauseAllDownloads() {
+    const store = getDefaultStore();
+    store.set(downloadTasksAtom, (prev) =>
+        prev.map((t) =>
+            t.status === "pending" || t.status === "downloading" ? { ...t, status: "paused" } : t,
+        ),
     );
+    currentAbort?.abort();
+}
+
+/** 一键继续：所有已暂停任务重新排队 */
+export function resumeAllDownloads() {
+    const store = getDefaultStore();
+    store.set(downloadTasksAtom, (prev) =>
+        prev.map((t) => (t.status === "paused" ? { ...t, status: "pending", progress: -1 } : t)),
+    );
+    void runQueue();
+}
+
+/** 停止下载：移除所有未失败的任务（失败任务保留，可单独重试/清除） */
+export function stopAllDownloads() {
+    const store = getDefaultStore();
+    const removed = store
+        .get(downloadTasksAtom)
+        .filter((t) => t.status === "pending" || t.status === "downloading" || t.status === "paused");
+    if (!removed.length) {
+        return;
+    }
+    store.set(downloadTasksAtom, (prev) => prev.filter((t) => t.status === "error"));
+    bumpCounter(0, removed.length);
+    currentAbort?.abort();
+    showToast("已停止下载任务", 2400);
+    resetCounterIfIdle();
+}
+
+/** 重试单个失败任务 */
+export function retryDownloadTask(key: string) {
+    const store = getDefaultStore();
+    const task = store.get(downloadTasksAtom).find((t) => t.key === key);
+    if (!task || task.status !== "error") {
+        return;
+    }
+    patchTask(key, { status: "pending", progress: -1, error: undefined });
+    bumpCounter(0, -1);
+    void runQueue();
+}
+
+/** 重试全部失败任务 */
+export function retryFailedDownloads() {
+    const store = getDefaultStore();
+    const failed = store.get(downloadTasksAtom).filter((t) => t.status === "error").length;
+    if (!failed) {
+        return;
+    }
+    store.set(downloadTasksAtom, (prev) =>
+        prev.map((t) =>
+            t.status === "error" ? { ...t, status: "pending", progress: -1, error: undefined } : t,
+        ),
+    );
+    bumpCounter(0, -failed);
+    void runQueue();
+}
+
+/** 清除全部失败任务 */
+export function clearFailedDownloads() {
+    const store = getDefaultStore();
+    const failed = store.get(downloadTasksAtom).filter((t) => t.status === "error").length;
+    if (!failed) {
+        return;
+    }
+    store.set(downloadTasksAtom, (prev) => prev.filter((t) => t.status !== "error"));
+    bumpCounter(-failed, -failed);
+    resetCounterIfIdle();
 }

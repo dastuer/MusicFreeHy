@@ -8,7 +8,7 @@ import { pluginHost } from "@/core/ipc";
 import { setupMediaNotification } from "@/core/mediaNotification";
 import { useThemeSetup } from "@/core/theme";
 import { ensureLikesSheet } from "@/core/musicSheet";
-import { resumeSavedMatchTask } from "@/core/localMusic";
+import { resumeSavedMatchTask, getLocalMusicCount } from "@/core/localMusic";
 import { showToast } from "@/core/uiAtoms";
 import TabBar from "@/components/layout/TabBar";
 import AppDrawer from "@/components/layout/AppDrawer";
@@ -113,6 +113,14 @@ export default function App() {
     useEffect(() => {
         // 初始化：插件宿主、播放器、喜欢的音乐歌单
         ensureLikesSheet();
+        // 预热本地曲库缓存（ensureLikesSheet 已顺带预热歌单缓存）：
+        // 把首次进入本地音乐页的全量 JSON.parse 挪到启动空闲期
+        const warmupLibrary = () => getLocalMusicCount();
+        if (typeof (window as any).requestIdleCallback === "function") {
+            (window as any).requestIdleCallback(warmupLibrary);
+        } else {
+            setTimeout(warmupLibrary, 1200);
+        }
         pluginHost.setup().catch((e: any) => console.warn("[app] 插件宿主初始化失败", e));
         TrackPlayerSingleton.setup();
         // 系统媒体通知（Android 下拉栏媒体卡片；仅原生环境生效）

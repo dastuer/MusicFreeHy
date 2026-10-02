@@ -332,4 +332,20 @@ public class StoragePlugin extends Plugin {
         res.put("deleted", deleted);
         call.resolve(res);
     }
+
+    /** 文件存在性与大小（播放缓存命中时校验文件是否仍在，不涉及权限敏感目录） */
+    @PluginMethod
+    public void statFile(PluginCall call) {
+        String path = call.getString("path");
+        if (path == null || path.trim().isEmpty()) {
+            call.reject("缺少文件路径");
+            return;
+        }
+        File file = new File(path.trim());
+        JSObject res = new JSObject();
+        res.put("exists", file.exists());
+        res.put("size", file.length());
+        res.put("isDirectory", file.isDirectory());
+        call.resolve(res);
+    }
 }
