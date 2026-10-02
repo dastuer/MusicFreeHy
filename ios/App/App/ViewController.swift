@@ -10,6 +10,12 @@ import Capacitor
  * 不会退出应用（页面最初那条记录之前没有历史，手势到那里就被系统拦住）。
  */
 class ViewController: CAPBridgeViewController {
+    /** 注册 App 内自定义插件（Capacitor 8：CAPBridgedPlugin + registerPluginInstance） */
+    override func capacitorDidLoad() {
+        super.capacitorDidLoad()
+        bridge?.registerPluginInstance(DownloadPlugin())
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         webView?.allowsBackForwardNavigationGestures = true

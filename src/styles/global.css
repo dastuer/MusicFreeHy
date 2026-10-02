@@ -1083,6 +1083,9 @@ img {
     align-items: center;
     gap: 8px;
     margin: 12px 16px 4px;
+    /* 高度固定：加载中多选按钮未渲染（内容只剩 26px 播放钮）、
+       多选态 padding 不同，否则数据加载前后行高会跳动 */
+    height: 50px;
     padding: 6px 0;
     background: transparent;
     color: var(--text-color);
@@ -1547,6 +1550,9 @@ img {
 .np-lyrics {
     flex: 1;
     min-height: 0;
+    /* 必须定位：歌词行的 offsetTop 要以滚动内容为基准（JS 焦点判定/滚动定位都按此假设），
+       否则会挂到最近的定位祖先 .np-content 上，差出头部高度导致最后一句永远选不中 */
+    position: relative;
     overflow-y: auto;
     padding: 0 32px;
     text-align: center;
@@ -2100,8 +2106,7 @@ img {
 }
 
 .drawer {
-    width: 54%;
-    max-width: 340px;
+    width: 67%;
     height: 100%;
     background: var(--bg-elev);
     padding: calc(20px + var(--safe-top)) 10px calc(14px + var(--safe-bottom));
@@ -2171,6 +2176,138 @@ img {
     color: var(--text-secondary);
     display: flex;
 }
+
+/* 行右侧附加值（如定时关闭的剩余倒计时） */
+.drawer-item-value {
+    margin-left: auto;
+    font-size: 13px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 定时关闭面板 ---------- */
+
+.sleep-timer-panel {
+    width: 100%;
+    max-width: var(--page-max);
+    background: var(--bg-elev);
+    border-radius: 18px 18px 0 0;
+    padding: 16px 16px calc(16px + var(--safe-bottom));
+    animation: sheet-up 0.22s ease-out;
+}
+
+.sleep-timer-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 15px;
+    font-weight: 700;
+    padding: 0 2px 14px;
+    border-bottom: 1px solid var(--divider);
+    font-variant-numeric: tabular-nums;
+}
+
+/* 标题行右侧的预计关闭时刻 */
+.sleep-timer-eta {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.sleep-timer-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 10px 0 4px;
+}
+
+.sleep-timer-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 10px;
+    border-radius: 10px;
+}
+
+.sleep-timer-row:active {
+    background: var(--hover-bg);
+}
+
+.sleep-timer-row-title {
+    flex: 1;
+    font-size: 14.5px;
+}
+
+/* 自定义行勾选后补充显示所选分钟数 */
+.sleep-timer-row-value {
+    margin-left: 8px;
+    font-size: 12.5px;
+    color: var(--text-secondary);
+}
+
+/* 行右侧圆形勾选状态图标：未选空心、选中品牌色实心打勾 */
+.sleep-timer-radio {
+    width: 19px;
+    height: 19px;
+    border-radius: 50%;
+    border: 1.5px solid var(--text-placeholder);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    flex-shrink: 0;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.sleep-timer-radio.on {
+    background: var(--primary-color);
+    border-color: var(--primary-color);
+}
+
+.sleep-timer-after-play {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin: 12px 2px 0;
+    font-size: 13.5px;
+    color: var(--text-secondary);
+}
+
+.sleep-timer-check {
+    width: 18px;
+    height: 18px;
+    border-radius: 6px;
+    border: 1.5px solid var(--text-placeholder);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    line-height: 1;
+    color: transparent;
+    flex-shrink: 0;
+}
+
+.sleep-timer-check.on {
+    background: var(--primary-color);
+    border-color: var(--primary-color);
+    color: #fff;
+}
+
+/* 底部操作区：确认为主按钮，取消定时为浅色 ghost（不加大面积品牌色） */
+.sleep-timer-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 14px;
+}
+
+.sleep-timer-actions .pill {
+    flex: 1;
+    justify-content: center;
+    padding: 11px;
+}
+
 
 /* ---------- 插件管理页 ---------- */
 
@@ -2801,28 +2938,40 @@ img {
     background: var(--page-bg);
 }
 
-.dl-bar-info {
+/* 第一行：状态 + 总览统计，纯文本不与按钮同排，保证完整展示不省略 */
+.dl-bar-overview {
     display: flex;
-    align-items: center;
-    gap: 8px;
+    align-items: baseline;
+    gap: 14px;
     margin-bottom: 8px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
 }
 
 .dl-bar-text {
-    flex: 1;
-    min-width: 0;
+    flex-shrink: 0;
     font-size: 12.5px;
-    color: var(--text-secondary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    font-weight: 600;
+    color: var(--text-color);
 }
 
+.dl-bar-stat {
+    flex-shrink: 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.dl-bar-stat.bad {
+    color: var(--primary-color);
+}
+
+/* 第二行：操作按钮独立成行，放不下时换行，不再挤压文字 */
 .dl-bar-actions {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 6px;
-    flex-shrink: 0;
+    margin-bottom: 8px;
 }
 
 .dl-bar-btn {
@@ -2859,26 +3008,33 @@ img {
     transition: width 0.25s linear;
 }
 
-/* 任务行：与已完成记录同构（music-row + 序号），完成后落入下方记录列表；
+/* 任务行：统一列表里的下载中/暂停/失败行，完成后原地变为记录行；
    蒙层盖在内容上方、占满整行高度，左缘与封面左缘对齐（10 + 22 + 10 = 42px），
-   宽度按下载进度由 calc((100% - 42px) * 比例) 从 100% 向右收缩到 0；
+   右缘与更多图标右缘对齐（行内边距 10 + 图标内边距 4 = 14px），
+   宽度按下载进度由 calc((100% - 56px) * 比例) 收缩到 0；
    颜色走主题 token --dl-mask / --dl-mask-fail（pointer-events:none 不挡重试按钮） */
-.dl-task-list {
-    padding: 0 6px;
-}
-
 .dl-task-row {
     position: relative;
+    /* 蒙层要全行直角：music-row 的 10px 圆角配合 overflow 裁剪会把蒙层右缘切成圆角 */
+    border-radius: 0;
     overflow: hidden;
+}
+
+.dl-task-row:active {
+    background: none;
+}
+
+/* 任务行右侧只放百分比，右缘与蒙层右缘对齐 */
+.dl-task-row .music-row-actions {
+    padding-right: 4px;
 }
 
 .dl-task-mask {
     position: absolute;
     top: 0;
     bottom: 0;
-    right: 0;
+    right: 14px;
     z-index: 2;
-    border-radius: 10px;
     background: var(--dl-mask);
     pointer-events: none;
     transition: width 0.25s linear;

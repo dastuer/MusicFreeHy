@@ -1,23 +1,22 @@
+import { useCallback, useMemo } from "react";
 import { useAtomValue } from "jotai";
 import { goBack } from "@/core/router";
 import {
     getDownloadedMusicList,
     removeDownloadRecords,
     downloadsVersionAtom,
+    downloadQueueViewAtom,
     downloadTasksAtom,
     downloadCounterAtom,
     pauseAllDownloads,
     resumeAllDownloads,
     stopAllDownloads,
-    retryDownloadTask,
     retryFailedDownloads,
     clearFailedDownloads,
-    type IDownloadTask,
 } from "@/core/musicDownload";
 import { TrackPlayerSingleton } from "@/core/trackPlayer";
 import { showToast } from "@/core/uiAtoms";
 import MusicList from "@/components/base/MusicList";
-import Cover from "@/components/base/Cover";
 import PlayAllBar from "@/components/base/PlayAllBar";
 import SelectActionsBar from "@/components/base/SelectActionsBar";
 import ListSearchBar from "@/components/base/ListSearchBar";
@@ -25,128 +24,80 @@ import { useDownloadsMultiSelect } from "@/hooks/useDownloadsMultiSelect";
 import { useListSearch } from "@/hooks/useListSearch";
 import { IconBack, IconPause, IconPlay, IconRefresh, IconSearch, IconStop, IconTrash } from "@/components/base/Icons";
 
-/** 队列任务的副标题：状态 + 进度 */
-function taskSubText(task: IDownloadTask) {
-    const base = task.item.artist || "未知艺术家";
-    switch (task.status) {
-        case "pending":
-            return `${base} · 排队等待`;
-        case "downloading":
-            return task.progress >= 0
-                ? `${base} · 正在下载 ${Math.round(task.progress)}%`
-                : `${base} · 正在下载`;
-        case "paused":
-            return `${base} · 已暂停`;
-        case "error":
-            return `${base} · 下载失败`;
-    }
-}
+/** 统一列表的一行：taskKey 非空为下载任务行（实时进度由行内自订阅），否则为已完成记录行 */
+type DownloadRow = {
+    item: IMusic.IMusicItem;
+    addedAt: number;
+    addedSeq: number;
+    taskKey?: string;
+};
 
-/** 单个下载任务行：与已完成记录同构（序号/封面/信息/进度），不可交互播放 */
-function DownloadTaskRow({ task, index }: { task: IDownloadTask; index: number }) {
-    const failed = task.status === "error";
-    // 灰底条：封面等高、左缘与封面左缘对齐，宽度按下载进度从 100% 收缩到 0%
-    const frac = failed
-        ? 1
-        : task.progress >= 0
-          ? (100 - Math.min(100, Math.max(0, task.progress))) / 100
-          : 1;
-    return (
-        <div className={`music-row dl-task-row ${failed ? "failed" : ""}`}>
-            <div
-                className="dl-task-mask"
-                style={{ width: `calc((100% - 42px) * ${frac.toFixed(4)})` }}
-            />
-            <div className="music-row-index">
-                <span className="row-num">{index}</span>
-            </div>
-            <Cover src={task.item.artwork} size={44} radius={6} className="music-row-cover">
-                {failed && (
-                    <button
-                        className="dl-task-retry"
-                        onClick={() => retryDownloadTask(task.key)}
-                        title="重试下载"
-                    >
-                        <IconRefresh size={18} />
-                    </button>
-                )}
-            </Cover>
-            <div className="music-row-info">
-                <div className="music-row-title">{task.item.title}</div>
-                <div className="music-row-sub">{taskSubText(task)}</div>
-            </div>
-            <div className="music-row-album">{task.item.album}</div>
-            <div className="music-row-actions">
-                {(task.status === "downloading" || task.status === "paused") &&
-                    task.progress >= 0 && (
-                        <span className="dl-task-pct">{Math.round(task.progress)}%</span>
-                    )}
-            </div>
-        </div>
-    );
-}
-
-/** 顶部下载进度条：整体进度 + 暂停/继续 + 停止 + 失败快捷操作 */
-function DownloadProgressBar({ tasks }: { tasks: IDownloadTask[] }) {
+/** 顶部下载进度条：自行订阅任务队列（进度刷新只重渲染本组件），整体进度 + 暂停/继续 + 停止 + 失败快捷操作 */
+function DownloadProgressBar() {
     const counter = useAtomValue(downloadCounterAtom);
+    const tasks = useAtomValue(downloadTasksAtom);
     const active = tasks.filter((t) => t.status === "downloading" || t.status === "pending");
     const pausedCount = tasks.filter((t) => t.status === "paused").length;
     const failedCount = tasks.filter((t) => t.status === "error").length;
     const isPaused = !active.length && pausedCount > 0;
 
-    // 整体进度：已完成任务 + 当前任务的百分比合成
-    const currentProgress = active.find((t) => t.status === "downloading")?.progress ?? -1;
+    // 整体进度：已完成任务数 + 各下载中任务百分比的合成（并发下载时多个任务同时在跑）
+    const progressSum = tasks
+        .filter((t) => t.status === "downloading" && t.progress >= 0)
+        .reduce((sum, t) => sum + Math.max(0, t.progress), 0);
     const overall = counter.total
-        ? Math.min(
-              100,
-              Math.round(
-                  ((counter.done + Math.max(0, currentProgress) / 100) / counter.total) * 100,
-              ),
-          )
+        ? Math.min(100, Math.round(((counter.done + progressSum / 100) / counter.total) * 100))
         : 0;
 
     const statusText = failedCount && !active.length && !pausedCount
-        ? `${failedCount} 首下载失败`
+        ? "下载失败"
         : isPaused
-          ? `已暂停 · ${counter.done}/${counter.total}`
-          : `下载中 ${counter.done}/${counter.total}`;
+          ? "已暂停"
+          : "下载中";
 
     return (
         <div className="dl-bar">
-            <div className="dl-bar-info">
+            {/* 第一行：状态 + 总览统计，纯文本不与按钮同排，保证完整展示不省略 */}
+            <div className="dl-bar-overview">
                 <span className="dl-bar-text">{statusText}</span>
-                <div className="dl-bar-actions">
-                    {active.length > 0 && (
-                        <button className="dl-bar-btn" onClick={pauseAllDownloads}>
-                            <IconPause size={14} />
-                            暂停
+                <span className="dl-bar-stat">共 {counter.total} 首</span>
+                <span className="dl-bar-stat">成功 {counter.ok}</span>
+                <span className={`dl-bar-stat ${counter.fail > 0 ? "bad" : ""}`}>
+                    失败 {counter.fail}
+                </span>
+            </div>
+            {/* 第二行：操作按钮独立成行，放不下时换行 */}
+            <div className="dl-bar-actions">
+                {active.length > 0 && (
+                    <button className="dl-bar-btn" onClick={pauseAllDownloads}>
+                        <IconPause size={14} />
+                        暂停
+                    </button>
+                )}
+                {isPaused && (
+                    <button className="dl-bar-btn" onClick={resumeAllDownloads}>
+                        <IconPlay size={14} />
+                        继续
+                    </button>
+                )}
+                {(active.length > 0 || pausedCount > 0) && (
+                    <button className="dl-bar-btn" onClick={stopAllDownloads}>
+                        <IconStop size={14} />
+                        停止
+                    </button>
+                )}
+                {failedCount > 0 && (
+                    <>
+                        <button className="dl-bar-btn" onClick={retryFailedDownloads}>
+                            <IconRefresh size={14} />
+                            重试失败
                         </button>
-                    )}
-                    {isPaused && (
-                        <button className="dl-bar-btn" onClick={resumeAllDownloads}>
-                            <IconPlay size={14} />
-                            继续
+                        <button className="dl-bar-btn danger" onClick={clearFailedDownloads}>
+                            <IconTrash size={14} />
+                            清除失败
                         </button>
-                    )}
-                    {(active.length > 0 || pausedCount > 0) && (
-                        <button className="dl-bar-btn" onClick={stopAllDownloads}>
-                            <IconStop size={14} />
-                            停止
-                        </button>
-                    )}
-                    {failedCount > 0 && (
-                        <>
-                            <button className="dl-bar-btn" onClick={retryFailedDownloads}>
-                                <IconRefresh size={14} />
-                                重试失败
-                            </button>
-                            <button className="dl-bar-btn danger" onClick={clearFailedDownloads}>
-                                <IconTrash size={14} />
-                                清除失败
-                            </button>
-                        </>
-                    )}
-                </div>
+                    </>
+                )}
             </div>
             <div className="dl-bar-track">
                 <div className="dl-bar-fill" style={{ width: `${overall}%` }} />
@@ -155,26 +106,63 @@ function DownloadProgressBar({ tasks }: { tasks: IDownloadTask[] }) {
     );
 }
 
-/** 「我的下载」页：顶部下载队列（进度/暂停/停止/失败重试），下方为已完成下载记录管理 */
+/** 「我的下载」页：顶部下载队列总进度条，下方为统一列表 ——
+ *  下载中任务行与已完成记录行按「最新添加在最上、同批保持所选顺序」交织成一条列表，
+ *  新添加的放在列表头部；并发下载从序号小的行开始，任务完成原地变为可播放记录行，
+ *  任何行位置都不变。
+ *  渲染分层：页面只订阅队列的结构视图（进度刷新不触发整页重渲染），
+ *  任务行的实时进度由行内自订阅，进度刷新只重渲染正在下载的那几行 */
 export default function DownloadsPage() {
     const downloadsVersion = useAtomValue(downloadsVersionAtom);
-    void downloadsVersion;
-    const records = getDownloadedMusicList();
-    const musicList = records.map((it) => it.item);
 
-    // 下载队列：所有任务（排队/下载中/暂停/失败）都提前展示在记录列表上方
-    const tasks = useAtomValue(downloadTasksAtom);
+    // 下载记录：只在版本号变化时重新读取（避免每次渲染都解析 localStorage）
+    const records = useMemo(() => getDownloadedMusicList(), [downloadsVersion]);
 
-    // 局部搜索：过滤仅作用于已下载记录的列表视图与播放全部
-    const search = useListSearch(musicList);
-    const viewList = search.active ? search.filtered : musicList;
-    const multi = useDownloadsMultiSelect(musicList, viewList);
+    // 任务队列结构视图：进度刷新返回同一引用，页面不随进度重渲染
+    const queueView = useAtomValue(downloadQueueViewAtom);
+
+    // 统一列表：任务行 + 记录行按添加时间倒序交织（同批按添加序号），
+    // 记录继承任务的 addedAt / addedSeq，完成行因此原位不变；
+    // 同一首正在下载时不重复显示其旧记录（由任务行代表它）
+    const mergedRows = useMemo<DownloadRow[]>(() => {
+        return [
+            ...queueView.tasks.map((t) => ({
+                item: t.item,
+                addedAt: t.addedAt,
+                addedSeq: t.addedSeq,
+                taskKey: t.key,
+            })),
+            ...records
+                .filter((r) =>
+                    queueView.tasks.every((t) => t.key !== `${r.item.platform}-${r.item.id}`),
+                )
+                .map((r) => ({
+                    item: r.item,
+                    addedAt: r.addedAt ?? r.downloadedAt,
+                    addedSeq: r.addedSeq ?? 0,
+                })),
+            // 最新添加在最上；同一批添加保持入队顺序
+        ].sort((a, b) => b.addedAt - a.addedAt || a.addedSeq - b.addedSeq);
+    }, [queueView, records]);
+    const rowByKey = new Map(mergedRows.map((r) => [`${r.item.platform}-${r.item.id}`, r]));
+    const mergedMusic = useMemo(() => mergedRows.map((r) => r.item), [mergedRows]);
+
+    // 局部搜索：作用于统一列表（任务行 + 记录行）
+    const search = useListSearch(mergedMusic);
+    const viewRows: DownloadRow[] = search.active
+        ? search.filtered.flatMap((it) => rowByKey.get(`${it.platform}-${it.id}`) ?? [])
+        : mergedRows;
+    const viewMusic = useMemo(() => viewRows.map((r) => r.item), [viewRows]);
+    // 播放全部 / 多选只作用于已下载记录行
+    const viewRecordItems = viewRows.filter((r) => !r.taskKey).map((r) => r.item);
+    const recordItems = useMemo(() => records.map((r) => r.item), [records]);
+    const multi = useDownloadsMultiSelect(recordItems, viewRecordItems);
 
     const playAll = () => {
-        if (viewList.length) {
+        if (viewRecordItems.length) {
             TrackPlayerSingleton.playWithReplacePlayList(
-                TrackPlayerSingleton.pickPlayAllStart(viewList),
-                viewList,
+                TrackPlayerSingleton.pickPlayAllStart(viewRecordItems),
+                viewRecordItems,
                 "downloads",
             );
         } else {
@@ -182,12 +170,12 @@ export default function DownloadsPage() {
         }
     };
 
-    /** 单曲删除（更多菜单 / 左滑风格入口由 MusicList 提供） */
-    const removeOne = (item: IMusic.IMusicItem) => {
+    /** 单曲删除（更多菜单）：稳定引用 */
+    const removeOne = useCallback((item: IMusic.IMusicItem) => {
         void removeDownloadRecords([item]).then((res) => {
             showToast(res.removed ? `已删除「${item.title}」的下载记录` : "没有这首的下载记录", 2800);
         });
-    };
+    }, []);
 
     return (
         <div className="page" style={{ padding: 0 }}>
@@ -208,13 +196,13 @@ export default function DownloadsPage() {
             </div>
             {search.open && <ListSearchBar search={search} placeholder="搜索下载记录" />}
 
-            {tasks.length > 0 && <DownloadProgressBar tasks={tasks} />}
+            {queueView.tasks.length > 0 && <DownloadProgressBar />}
 
-            {musicList.length || tasks.length ? (
+            {records.length || queueView.tasks.length ? (
                 <>
-                    {musicList.length > 0 && (
+                    {records.length > 0 && (
                         <PlayAllBar
-                            count={viewList.length}
+                            count={viewRecordItems.length}
                             onPlayAll={playAll}
                             selectMode={multi.selectMode}
                             selectedCount={multi.selected.length}
@@ -224,24 +212,20 @@ export default function DownloadsPage() {
                             onDeselectAll={multi.deselectAll}
                         />
                     )}
-                    {tasks.length > 0 && (
-                        <div className="dl-task-list">
-                            {/* 按队列顺序展示：第一首在最上面、先下载先完成，完成后落入下方记录列表 */}
-                            {tasks.map((t, i) => (
-                                <DownloadTaskRow key={t.key} task={t} index={i + 1} />
-                            ))}
-                        </div>
-                    )}
                     <MusicList
-                        musicList={viewList}
-                        listId={`downloads:${downloadsVersion}`}
+                        musicList={viewMusic}
+                        listId="downloads"
                         showIndex
-                        indexOffset={tasks.length}
+                        taskRowOf={(item) => {
+                            const row = rowByKey.get(`${item.platform}-${item.id}`);
+                            return row?.taskKey ? { taskKey: row.taskKey } : undefined;
+                        }}
                         selectMode={multi.selectMode}
                         selectedKeys={multi.selectedKeys}
                         onToggleSelect={multi.toggleSelect}
                         onRemoveItem={removeOne}
                         removeActionLabel="删除下载记录"
+                        hideDownload
                     />
                     {multi.selectMode && (
                         <SelectActionsBar

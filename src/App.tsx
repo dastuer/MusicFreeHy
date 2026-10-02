@@ -20,6 +20,7 @@ import MusicActionSheet from "@/components/base/MusicActionSheet";
 import AddToSheetPanel from "@/components/base/AddToSheetPanel";
 import SourceSelectSheet from "@/components/base/SourceSelectSheet";
 import SingleSelectSheet from "@/components/base/SingleSelectSheet";
+import SleepTimerSheet from "@/components/base/SleepTimerSheet";
 import PromptDialog from "@/components/base/PromptDialog";
 import HomePage from "@/pages/home";
 import MyMusicPage from "@/pages/myMusic";
@@ -34,7 +35,7 @@ import DownloadsPage from "@/pages/downloads";
 import LocalMusicPage from "@/pages/localMusic";
 import PluginManagePage from "@/pages/pluginManage";
 import SettingsPage from "@/pages/settings";
-import SettingsBackupPage from "@/pages/settings/backup";
+import BackupRestorePage from "@/pages/backupRestore";
 import SettingsWebdavPage from "@/pages/settings/webdav";
 import SettingsProxyPage from "@/pages/settings/proxy";
 import FolderSelectPage from "@/pages/folderSelect";
@@ -79,8 +80,8 @@ function renderPage(path: string, params: Record<string, any>) {
             return <PluginManagePage />;
         case "settings":
             return <SettingsPage />;
-        case "settingsBackup":
-            return <SettingsBackupPage />;
+        case "backupRestore":
+            return <BackupRestorePage />;
         case "settingsWebdav":
             return <SettingsWebdavPage />;
         case "settingsProxy":
@@ -106,7 +107,7 @@ export default function App() {
     const hideMiniPlayer =
         sourceSelectOpen ||
         route.path === "settings" ||
-        route.path === "settingsBackup" ||
+        route.path === "backupRestore" ||
         route.path === "settingsWebdav" ||
         route.path === "settingsProxy" ||
         route.path === "folderSelect";
@@ -177,6 +178,7 @@ export default function App() {
             <AddToSheetPanel />
             <SourceSelectSheet />
             <SingleSelectSheet />
+            <SleepTimerSheet />
             <PromptDialog />
             <ToastHost />
         </div>

@@ -425,6 +425,7 @@ export default function LocalMusicPage() {
                         onToggleSelect={toggleSelect}
                         onRemoveItem={(item) => confirmRemove([item])}
                         removeActionLabel="删除本地音乐"
+                        hideDownload
                         extraActions={(item) => [
                             {
                                 label: "查看详情",

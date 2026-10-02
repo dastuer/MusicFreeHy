@@ -312,6 +312,24 @@ export const IconDisc = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
     </svg>
 );
 
+export const IconAlarm = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
+    <svg {...base(size)} strokeWidth={strokeWidth}>
+        <circle cx="12" cy="13" r="8" />
+        <path d="M12 9.5V13l2.5 2.5" />
+        <path d="M5 3L2.5 5.5" />
+        <path d="M19 3l2.5 2.5" />
+    </svg>
+);
+
+export const IconDatabase = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
+    <svg {...base(size)} strokeWidth={strokeWidth}>
+        <ellipse cx="12" cy="5.5" rx="8" ry="3" />
+        <path d="M4 5.5v13c0 1.66 3.58 3 8 3s8-1.34 8-3v-13" />
+        <path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3" />
+    </svg>
+);
+
+
 export const IconMic = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
     <svg {...base(size)} strokeWidth={strokeWidth}>
         <circle cx="15" cy="9" r="4.5" />

@@ -117,6 +117,18 @@ export function closeSourceSelect() {
     getDefaultStore().set(sourceSelectOpenAtom, false);
 }
 
+/** ---------- 定时关闭面板（侧边栏入口） ---------- */
+
+export const sleepTimerOpenAtom = atom(false);
+
+export function openSleepTimer() {
+    getDefaultStore().set(sleepTimerOpenAtom, true);
+}
+
+export function closeSleepTimer() {
+    getDefaultStore().set(sleepTimerOpenAtom, false);
+}
+
 /** ---------- 单选浮窗（设置等多选一项统一交互） ---------- */
 
 export interface ISingleSelectOption {

@@ -215,8 +215,10 @@ export function nativePlatform(): "android" | "ios" | null {
 
 /* ---------- 文件写入（下载 / 本地音乐标签 / 播放缓存共用） ---------- */
 
-/** 分块大小取 3 的倍数（字节），保证 base64 分块拼接无补位问题 */
-export const WRITE_CHUNK = 3 * 1024 * 1024;
+/** 分块大小取 3 的倍数（字节），保证 base64 分块拼接无补位问题。
+ *  每块过桥要在 JS 主线程同步编解码 + 桥接序列化，块越小单次阻塞越短（约 1MB ≈ 几毫秒），
+ *  下载写盘 / 缓存写盘才不会冻结界面 */
+export const WRITE_CHUNK = Math.floor((1024 * 1024) / 3) * 3;
 
 export function blobToBase64(blob: Blob): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -239,6 +241,8 @@ export async function writeAndroidFile(absPath: string, blob: Blob) {
             data,
             append: offset > 0,
         });
+        // 写块之间让出主线程，连续写大文件时不冻结界面
+        await yieldToMainIfVisible();
     }
 }
 
@@ -256,5 +260,95 @@ export async function writeIosFile(directory: "DOCUMENTS" | "DATA" | "CACHE", pa
         } else {
             await callNativeMethod("Filesystem", "appendFile", { path, directory, data });
         }
+        await yieldToMainIfVisible();
     }
 }
+
+/** 让出主线程一拍：给渲染、输入与音频留出处理窗口。
+ *  页面在后台时定时器被钳制到 1s+，会让分块下载/写盘近乎停摆 —— 此时跳过让渡保吞吐 */
+export function yieldToMainIfVisible(): Promise<void> {
+    if (document.hidden) {
+        return Promise.resolve();
+    }
+    return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/* ---------- 原生直落磁盘下载（docs/native-download.md） ---------- */
+
+/**
+ * 直落磁盘下载的插件名：Android 复用 StoragePlugin，iOS 用独立的 DownloadPlugin。
+ * 两端语义对齐：流式写 destPath + ".part"（支持 Range 续传），进度经 downloadProgress
+ * 事件回传，成功后改名 destPath 并 resolve { path, size, contentType }。
+ */
+function downloadPluginName(): string {
+    return nativePlatform() === "ios" ? "Download" : "Storage";
+}
+
+export interface INativeDownloadResult {
+    path: string;
+    size: number;
+    /** 响应 Content-Type（扩展名推断用，部分服务器拿不到） */
+    contentType?: string;
+}
+
+/**
+ * 原生直落磁盘下载：HTTP 拉流 + 写盘整体在原生线程完成，下载字节完全不过 JS 桥，
+ * 5 路并发下载不再占用主线程。进度经 downloadProgress 事件按 taskId 过滤后透传
+ * （小 JSON，不构成桥接压力），节流由调用方处理（沿用 runTask 的 400ms patchTask 节流）。
+ *
+ * 中断走 nativeCancelDownload（保留 .part 供续传）；同 destPath 再次调用即断点续传。
+ * 插件/方法缺失（老 App 包）时 promise 拒绝，由调用方回退分块过桥路径。
+ */
+export function nativeDownloadFile(
+    taskId: string,
+    url: string,
+    headers: Record<string, string>,
+    destPath: string,
+    onProgress?: (loaded: number, total: number) => void,
+): Promise<INativeDownloadResult> {
+    return new Promise<INativeDownloadResult>((resolve, reject) => {
+        let settled = false;
+        // 事件监听先于请求注册：进度在 resolve/reject 后不再透传，并随调用结束解绑
+        const removeListener = addNativeListener(
+            downloadPluginName(),
+            "downloadProgress",
+            (data: any) => {
+                if (settled || !data || data.taskId !== taskId) {
+                    return;
+                }
+                onProgress?.(Number(data.loaded) || 0, Number(data.total) || 0);
+            },
+        );
+        const settle = (fn: () => void) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            removeListener();
+            fn();
+        };
+        callNativeMethod(downloadPluginName(), "downloadFile", { taskId, url, headers, destPath })
+            .then((res: any) => {
+                settle(() =>
+                    resolve({
+                        path: String(res?.path ?? destPath),
+                        size: Number(res?.size) || 0,
+                        contentType: res?.contentType ? String(res.contentType) : undefined,
+                    }),
+                );
+            })
+            .catch((e: any) => {
+                settle(() => reject(e));
+            });
+    });
+}
+
+/** 中断原生直落磁盘下载（保留 .part 供续传）；任务不存在 / 插件缺失均视为成功（幂等） */
+export async function nativeCancelDownload(taskId: string): Promise<void> {
+    try {
+        await callNativeMethod(downloadPluginName(), "cancelDownload", { taskId });
+    } catch {
+        // 幂等：任务已结束或插件缺失时忽略
+    }
+}
+

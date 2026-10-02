@@ -12,6 +12,7 @@ import {
     useCurrentLyric,
     loadCurrentLyric,
     applyQuality,
+    qualityRank,
 } from "@/core/trackPlayer";
 import type { IQualitySwitchResult } from "@/core/trackPlayer";
 import {
@@ -33,6 +34,8 @@ import {
     formatQualitySize,
     downloadMusic,
     downloadingAtom,
+    getDownloadRecord,
+    downloadsVersionAtom,
 } from "@/core/musicDownload";
 import Slider from "@/components/base/Slider";
 import Spinner from "@/components/base/Spinner";
@@ -54,6 +57,9 @@ import {
 
 const QUALITY_ORDER: IMusic.IQualityKey[] = ["low", "standard", "high", "super"];
 const RATE_OPTIONS = [0.75, 1, 1.25, 1.5];
+
+/** 歌词滑动激活判定区左右留白：起手落在边缘内不进入激活态，让位给系统侧滑返回 */
+const LYRIC_EDGE_MARGIN = 32;
 
 /** 音质切换结果 → 提示语（"cancelled" 时返回空串，不提示） */
 function qualitySwitchToast(res: IQualitySwitchResult, requested: IMusic.IQualityKey): string {
@@ -278,14 +284,27 @@ function NowPlayingInner({
         }, 200);
     };
 
-    const onLyricTouchStart = () => {
-        beginSeek();
+    const onLyricTouchStart = (e: React.TouchEvent) => {
         touchActiveRef.current = true;
+        // 起手落在左右边缘留白内（系统侧滑返回的起手区）：不算滑动激活，
+        // 只暂停自动跟随；滚动照常，但不弹激活卡片
+        const x = e.touches[0]?.clientX ?? 0;
+        if (x < LYRIC_EDGE_MARGIN || x > window.innerWidth - LYRIC_EDGE_MARGIN) {
+            return;
+        }
+        beginSeek();
     };
 
     const onLyricTouchEnd = () => {
         touchActiveRef.current = false;
-        startSettleCountdown();
+        if (isSeekingRef.current) {
+            startSettleCountdown();
+        }
+    };
+
+    // 侧滑返回等系统手势会接管触摸：以 cancel 收尾（不触发 touchend），这里只复位标记
+    const onLyricTouchCancel = () => {
+        touchActiveRef.current = false;
     };
 
     const onLyricWheel = () => {
@@ -341,10 +360,14 @@ function NowPlayingInner({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [seekScrollTick]);
 
-    // 自动跟随：激活行落在中线下方两行；用户滑动期间跳过
+    // 自动跟随：激活行落在中线下方两行；用户滑动期间跳过（含边缘起手、未进入激活态的滑动）
     useEffect(() => {
         const box = lyricBoxRef.current;
         if (isSeekingLyric || activeLyricIndex < 0 || !box) {
+            return;
+        }
+        if (touchActiveRef.current) {
+            // 手指还按在歌词上，不抢焦点；松手后由下一次进度更新接管
             return;
         }
         const el = box.querySelector<HTMLElement>(`[data-lrc-idx="${activeLyricIndex}"]`);
@@ -419,6 +442,13 @@ function NowPlayingInner({
         }));
     };
 
+    // 下载记录版本号：换歌 / 记录变化后重算各音质档的已下载标注
+    const downloadsVersion = useAtomValue(downloadsVersionAtom);
+    const downloadedRecord = useMemo(() => {
+        void downloadsVersion;
+        return currentMusic ? getDownloadRecord(currentMusic) : undefined;
+    }, [currentMusic, downloadsVersion]);
+
     const openQualitySheet = () => {
         openSingleSelect({
             title: "播放音质",
@@ -437,7 +467,23 @@ function NowPlayingInner({
 
     const openDownloadSheet = () => {
         openSingleSelect({
-            options: qualityOptions(),
+            title: "下载音质",
+            options: qualityOptions().map((opt) => {
+                const q = opt.value as IMusic.IQualityKey;
+                // 已下载标注：同档或更低 → 重复下载会被跳过；更高 → 覆盖升级
+                const existing = downloadedRecord?.quality;
+                if (existing) {
+                    const rank = qualityRank(q) - qualityRank(existing);
+                    if (rank < 0) {
+                        return { ...opt, desc: "已有更高音质，下载会跳过" };
+                    }
+                    if (rank === 0) {
+                        return { ...opt, desc: "已下载，重复下载会跳过" };
+                    }
+                    return { ...opt, desc: "覆盖升级现有文件" };
+                }
+                return opt;
+            }),
             onSelect: (v) => {
                 downloadMusic(currentMusic, v as IMusic.IQualityKey);
             },
@@ -529,6 +575,7 @@ function NowPlayingInner({
                         ref={lyricBoxRef}
                         onTouchStart={onLyricTouchStart}
                         onTouchEnd={onLyricTouchEnd}
+                        onTouchCancel={onLyricTouchCancel}
                         onWheel={onLyricWheel}
                         onScroll={onLyricScroll}
                         onClick={() => setShowLyrics(false)}

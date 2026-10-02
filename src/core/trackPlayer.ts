@@ -116,8 +116,8 @@ function describePlayError(e: any) {
     return e?.message ?? String(e ?? "未知原因");
 }
 
-/** 音质档位从低到高：对齐与降级都按这个顺序 */
-const QUALITY_LADDER: IMusic.IQualityKey[] = ["low", "standard", "high", "super"];
+/** 音质档位从低到高：对齐与降级都按这个顺序（下载去重 / 降档重试也按它比较） */
+export const QUALITY_LADDER: IMusic.IQualityKey[] = ["low", "standard", "high", "super"];
 
 /** ---------- 无缝切音质（后台预取 + 交接） ---------- */
 
@@ -179,6 +179,17 @@ function resolveQualityLadder(first: IMusic.IQualityKey): IMusic.IQualityKey[] {
         ladder.push("standard");
     }
     return ladder.slice(0, 3);
+}
+
+/** 音质序号（低→高），未知档位按 -1；下载去重与降档重试的档位比较都走这里 */
+export function qualityRank(q: IMusic.IQualityKey): number {
+    return QUALITY_LADDER.indexOf(q);
+}
+
+/** 从某档起逐级往低的音质序列（下载失败降档重试用）：[first, ..., "low"] */
+export function qualityLadderDown(first: IMusic.IQualityKey): IMusic.IQualityKey[] {
+    const idx = Math.max(0, QUALITY_LADDER.indexOf(first));
+    return QUALITY_LADDER.slice(0, idx + 1).reverse();
 }
 
 /** ---------- jotai atoms ---------- */
@@ -263,6 +274,30 @@ function getStoredCurrentMusic(): IMusic.IMusicItem | null {
     }
 }
 
+/** ---------- 已下载歌曲的本地播放 ---------- */
+
+/** 已下载歌曲的本地音源：src 为 WebView 可播放的本地文件地址 */
+export interface IDownloadedLocalSource {
+    src: string;
+    /** 下载时实际落盘的音质档（null 表示拿不到） */
+    quality: IMusic.IQualityKey | null;
+}
+
+/**
+ * 已下载歌曲的本地音源解析器（由 musicDownload 模块注册，避免循环依赖）：
+ * 播放器解析音源前先问它，本曲已有可播放的下载文件就直接播本地，
+ * 不再走插件解析线上直链。返回 null 表示没有本地文件（未下载 / 已被删除）。
+ */
+let downloadedSourceResolver:
+    | ((musicItem: IMusic.IMusicItem) => Promise<IDownloadedLocalSource | null>)
+    | null = null;
+
+export function setDownloadedSourceResolver(
+    fn: (musicItem: IMusic.IMusicItem) => Promise<IDownloadedLocalSource | null>,
+) {
+    downloadedSourceResolver = fn;
+}
+
 /** ---------- 播放器 ---------- */
 
 class TrackPlayer extends EventEmitter {
@@ -294,6 +329,10 @@ class TrackPlayer extends EventEmitter {
     private probeAudio: HTMLAudioElement | null = null;
     /** 在途切换的序号：换歌 / 再次切换时用它作废旧预取 */
     private qualitySwitchSeq = 0;
+    /** 当前播放是否来自「已下载的本地文件」：失败兜底与音质切换按 localPath 同规则处理 */
+    private playedFromLocalDownload = false;
+    /** 本地下载文件播放失败过的歌（本次会话内直接走线上，不再反复撞同一个坏文件） */
+    private localDownloadBypass = new Set<string>();
 
     setup() {
         if (this.audio) {
@@ -671,6 +710,17 @@ class TrackPlayer extends EventEmitter {
         const retryPosition = this.audio?.currentTime || 0;
         this.detachAudio();
 
+        // 本地下载文件播放失败（文件损坏 / WebView 读不了等）：从失败位置改走线上音源，
+        // 并把这首记进 bypass，本次会话内不再反复尝试本地
+        if (this.playedFromLocalDownload) {
+            this.playedFromLocalDownload = false;
+            this.localDownloadBypass.add(playListKey(musicItem));
+            console.warn(`[trackPlayer] 本地下载文件播放失败（${reason}），改走线上音源`);
+            this.pendingStartPosition = retryPosition;
+            await this.play(musicItem, true, this.isInPlayList(musicItem));
+            return;
+        }
+
         const lowerQuality =
             options?.allowQualityRetry === false ? null : this.lowerQualityForRetry(musicItem);
         if (lowerQuality && this.qualityRetryCount < MAX_QUALITY_RETRY) {
@@ -976,17 +1026,22 @@ class TrackPlayer extends EventEmitter {
      * 找不到可用音源时返回带人话原因的失败（插件缺失 / 被禁用 / 挂载失败是恢复备份后最常见的几种）。
      * 除播放外，下载模块也用它取直链（source.url 原始地址 + 自定义请求头）。
      * 本地音乐（带 localPath）不走插件，直接转 WebView 可访问的文件地址。
+     * 已下载的歌（下载记录里有可播放文件）同样优先播本地：经 musicDownload 注册的
+     * 解析器拿本地地址，不再请求线上；下载取直链时传 ignoreLocalDownload 跳过这层。
      */
     async resolveMediaUrl(
         musicItem: IMusic.IMusicItem,
         qualityOverride?: IMusic.IQualityKey,
         excludeUrl?: string,
+        opts?: { ignoreLocalDownload?: boolean },
     ): Promise<
         | {
               ok: true;
               src: string;
               source?: IPlugin.IMediaSourceResult;
               quality: IMusic.IQualityKey | null;
+              /** 音源来自下载到本机的文件（播放失败兜底与音质切换按 localPath 同规则处理） */
+              localDownload?: true;
           }
         | { ok: false; reason: string }
     > {
@@ -997,6 +1052,13 @@ class TrackPlayer extends EventEmitter {
                 source: { url: musicItem.localPath },
                 quality: null,
             };
+        }
+        // 已下载的歌直接播本地文件：断网可播、秒开、不耗流量（插件缺失也不影响）
+        if (!opts?.ignoreLocalDownload && !this.localDownloadBypass.has(playListKey(musicItem))) {
+            const local = await downloadedSourceResolver?.(musicItem);
+            if (local) {
+                return { ok: true, src: local.src, quality: local.quality, localDownload: true };
+            }
         }
         const plugins = await getPlugins();
         const samePlatform = plugins.filter((p) => p.platform === musicItem.platform);
@@ -1201,13 +1263,14 @@ class TrackPlayer extends EventEmitter {
             }
             this.resolvedQuality = resolved.quality;
             this.resolvedSourceUrl = resolved.source?.url ?? null;
+            this.playedFromLocalDownload = !!resolved.localDownload;
             setAtom(playingQualityAtom, resolved.quality);
             const audio = this.audio;
             if (!audio) {
                 return;
             }
             let playSrc = resolved.src;
-            if (!target.localPath) {
+            if (!target.localPath && !resolved.localDownload) {
                 // 播放缓存：命中直接读本地（秒开、省流量、断网可重听）；
                 // 未命中先在线播，同时后台整首缓存，下次播放走本地
                 const cached = await lookupCachedSrc(target, resolved.quality);
@@ -1454,11 +1517,13 @@ class TrackPlayer extends EventEmitter {
         setAtom(qualitySwitchingAtom, targetQuality);
 
         try {
-            // excludeUrl：插件常拿同一个直链糊弄不同音质，换个 URL 才算真换
+            // excludeUrl：插件常拿同一个直链糊弄不同音质，换个 URL 才算真换；
+            // 切音质永远解析线上（本地下载文件没有目标音质这一说）
             const resolved = await this.resolveMediaUrl(
                 musicItem,
                 targetQuality,
                 this.resolvedSourceUrl ?? undefined,
+                { ignoreLocalDownload: true },
             );
             if (isStale()) {
                 return { status: "cancelled" };
@@ -1652,14 +1717,15 @@ class TrackPlayer extends EventEmitter {
 
     /**
      * 切换音质。播放中走无缝交接；暂停中只作废音源（下次播放用新音质）；
-     * 本地文件没有多音质，只记下偏好。
+     * 本地文件与正在播本地下载文件的歌没有多音质，只记下偏好
+     * （下载文件想换音质用「重新下载」更新本地文件）。
      */
     async applyQuality(quality: IMusic.IQualityKey): Promise<IQualitySwitchResult> {
         setQuality(quality);
         setAtom(qualityAtom, quality);
         const music = this._currentMusic;
         const audio = this.audio;
-        if (!music || music.localPath || !audio?.src) {
+        if (!music || music.localPath || this.playedFromLocalDownload || !audio?.src) {
             return { status: "queued" };
         }
         if (audio.paused) {

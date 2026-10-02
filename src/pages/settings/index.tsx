@@ -3,12 +3,8 @@ import { useAtomValue } from "jotai";
 import { goBack, navigate } from "@/core/router";
 import { useThemeSetting, setTheme } from "@/core/theme";
 import { getQuality, setQuality } from "@/core/appConfig";
-import {
-    getDownloadSaveTarget,
-    downloadSaveTargetLabel,
-} from "@/core/musicDownload";
+import { getDownloadSaveTarget, downloadSaveTargetLabel } from "@/core/musicDownload";
 import { APP_VERSION } from "@/core/backup";
-import { getWebdavConfig, getWebdavLastAt } from "@/core/dav";
 import { setDefaultQuality } from "@/core/trackPlayer";
 import { getProxyBase } from "@/core/net";
 import { isNative } from "@/core/native";
@@ -52,11 +48,7 @@ const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
     // 缓存写入 / 清理后版本号自增，占用展示跟着刷新
     const cacheVersion = useAtomValue(audioCacheVersionAtom);
     const cacheStats = useMemo(() => getAudioCacheStats(), [cacheVersion]);
-    const webdav = getWebdavConfig();
-    const webdavConfigured = Boolean(webdav.url || webdav.username);
-    const webdavLastUp = getWebdavLastAt("upload");
-    const proxy = getProxyBase();
-    const themeLabel =
+    const proxy = getProxyBase();    const themeLabel =
         THEME_OPTIONS.find((t) => t.value === theme)?.label ?? "跟随系统";
     const qualityLabel =
         QUALITY_OPTIONS.find((q) => q.key === quality)?.label ?? "标准";
@@ -198,25 +190,6 @@ const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
                     </div>
                 </div>
             )}
-
-            <div className="settings-group">
-                <div className="settings-group-title">数据与备份</div>
-                <div className="settings-row" onClick={() => navigate("settingsBackup")}>
-                    <span className="settings-row-label">备份与恢复</span>
-                    <span className="settings-value">›</span>
-                </div>
-                <div className="settings-row" onClick={() => navigate("settingsWebdav")}>
-                    <span className="settings-row-label">WebDAV 云备份</span>
-                    <span className="settings-value">
-                        {webdavConfigured
-                            ? webdavLastUp
-                                ? `已配置 · 上次备份 ${new Date(webdavLastUp).toLocaleDateString()}`
-                                : "已配置"
-                            : "未配置"}
-                    </span>
-                    <span className="settings-value">›</span>
-                </div>
-            </div>
 
             {!isNative() && (
                 <div className="settings-group">

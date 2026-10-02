@@ -354,6 +354,9 @@ function SheetsTab({ visible }: { visible: boolean }) {
     const activeTagRef = useRef<any>(null);
     const hasContentRef = useRef(false);
     const tagsGenRef = useRef(0);
+    // 下拉刷新重绑选中标签时置位：activeTag 加载 effect 消费一次并跳过，
+    // 首页请求由 handleRefresh 统一发起，避免同一页请求发两遍
+    const skipNextFetchRef = useRef(false);
     activeTagRef.current = activeTag;
     hasContentRef.current = sheets.length > 0;
     // 音源切换时清空选中分类：旧 tag 对象属于旧音源，保留会导致
@@ -408,11 +411,19 @@ function SheetsTab({ visible }: { visible: boolean }) {
                     ...(res.data.data ?? []).flatMap((g: any) => g.data ?? []),
                 ].filter((t: any) => t && typeof t === "object");
                 setAllTags(tags);
-                const nextTag =
-                    activeTagRef.current &&
-                    tags.some((t: any) => t.title === activeTagRef.current.title)
-                        ? activeTagRef.current
-                        : tags[0] ?? null;
+                // 选中标签在新列表里仍存在时改绑到新列表对象（按 title+id 精确匹配，
+                // 退回按 title）：chips 渲染的是新对象而高亮按引用比较，沿用旧对象
+                // 会让刷新后的分类全部失去选中态
+                const prevTag = activeTagRef.current;
+                const nextTag = prevTag
+                    ? tags.find((t: any) => t.title === prevTag.title && t.id === prevTag.id) ??
+                      tags.find((t: any) => t.title === prevTag.title) ??
+                      tags[0] ??
+                      null
+                    : tags[0] ?? null;
+                if (quiet && nextTag && nextTag !== prevTag) {
+                    skipNextFetchRef.current = true;
+                }
                 activeTagRef.current = nextTag;
                 setActiveTag(nextTag);
                 setExpanded(false);
@@ -488,9 +499,14 @@ function SheetsTab({ visible }: { visible: boolean }) {
 
     // activeTag 变化 / 下拉刷新 / 音源切换（fetchSheets 身份变化）都会重拉第一页
     useEffect(() => {
-        if (activeTag !== null) {
-            fetchSheets(activeTag, 1, true);
+        if (activeTag === null) {
+            return;
         }
+        if (skipNextFetchRef.current) {
+            skipNextFetchRef.current = false;
+            return;
+        }
+        fetchSheets(activeTag, 1, true);
     }, [activeTag, fetchSheets]);
 
     const handleRefresh = useCallback(async () => {

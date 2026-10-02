@@ -21,7 +21,7 @@ export type RoutePath =
     | "localMusic"
     | "pluginManage"
     | "settings"
-    | "settingsBackup"
+    | "backupRestore"
     | "settingsWebdav"
     | "settingsProxy"
     | "folderSelect";

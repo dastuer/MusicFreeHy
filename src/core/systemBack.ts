@@ -32,6 +32,9 @@ const layers: IBackLayer[] = [];
 let pushedCount = 0;
 /** 我们自己发起、需要 popstate 忽略掉的回退次数 */
 let selfPopCount = 0;
+/** 已计划但还没执行的自身回退数（见 popHistoryEntry）；
+ *  执行前用户抢先返回时作废一次排队，避免多退一格 */
+let pendingSelfPops = 0;
 
 const HISTORY_FLAG = "__mfhBackLayer";
 
@@ -44,19 +47,36 @@ function pushHistoryEntry() {
     }
 }
 
-/** 回退掉自己压入的一条记录（对应 popstate 会被 selfPopCount 吃掉） */
+/**
+ * 回退掉自己压入的一条记录（对应 popstate 会被 selfPopCount 吃掉）。
+ *
+ * back() 的历史遍历是异步的，且同一拍里「关闭浮层 A、打开浮层 B」时
+ * B 的 pushState 会先于遍历执行 —— 立即 back() 会让遍历越过 A 自己的记录
+ * 直奔更底层（实测连续两条浮层切换后一路退到 about:blank）。
+ * 推迟到宏任务执行：本拍内的 pushState 必然先完成，这次 back() 的遍历
+ * 恰好回退 A 自己那条记录（或已关闭浮层留下的死记录），栈不再错位。
+ */
 function popHistoryEntry() {
     if (pushedCount <= 0) {
         return;
     }
     pushedCount -= 1;
-    selfPopCount += 1;
-    window.history.back();
+    pendingSelfPops += 1;
+    setTimeout(() => {
+        if (pendingSelfPops <= 0) {
+            return;
+        }
+        pendingSelfPops -= 1;
+        selfPopCount += 1;
+        window.history.back();
+    }, 0);
 }
 
 function onPopState() {
-    // iOS 侧滑 / 浏览器后退：我们压入的那条记录被系统吃掉了
-    if (selfPopCount > 0) {
+    if (pendingSelfPops > 0) {
+        // 排队的自身回退还没执行，用户先返回了：作废一次排队，按用户返回处理
+        pendingSelfPops -= 1;
+    } else if (selfPopCount > 0) {
         selfPopCount -= 1;
         return;
     }
