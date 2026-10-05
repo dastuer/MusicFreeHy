@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAtomValue, useSetAtom } from "jotai";
 import { homeTabAtom, openDrawer, showToast } from "@/core/uiAtoms";
 import { getPlugins, type SerializedPlugin } from "@/core/ipc";
@@ -22,6 +22,7 @@ import { TrackPlayerSingleton } from "@/core/trackPlayer";
 import { getMusicHistory } from "@/core/musicHistory";
 import { formatPlayCount } from "@/core/utils";
 import { useTabSwipe } from "./useTabSwipe";
+import SheetTagsPanel from "./SheetTagsPanel";
 
 /**
  * 发现页：参考网易云音乐手机版首页。
@@ -342,6 +343,11 @@ function SheetsTab({ visible }: { visible: boolean }) {
     const [plugins, setPlugins] = useState<SerializedPlugin[] | null>(null);
     const sourceHash = useGlobalSource();
     const [allTags, setAllTags] = useState<any[]>([]);
+    // 原始二级分类结构（pinned + 分组），供分类浮窗展示
+    const [tagGroups, setTagGroups] = useState<{
+        pinned: any[];
+        groups: { title?: string; data?: any[] }[];
+    } | null>(null);
     const [activeTag, setActiveTag] = useState<any>(null);
     const [sheets, setSheets] = useState<IMusic.IMusicSheetItemBase[]>([]);
     const [page, setPage] = useState(1);
@@ -367,16 +373,8 @@ function SheetsTab({ visible }: { visible: boolean }) {
         setPrevSourceHash(sourceHash);
         setActiveTag(null);
     }
-    // 分类标签折叠：默认最多两行，超出时末位显示「更多」
-    const [expanded, setExpanded] = useState(false);
-    const [visibleCount, setVisibleCount] = useState(Number.MAX_SAFE_INTEGER);
-    // 每次窗口尺寸变化都 +1：初始未溢出时 visibleCount 已是最大值，仅改它不会触发重算
-    const [layoutNonce, setLayoutNonce] = useState(0);
-    const tagsRef = useRef<HTMLDivElement | null>(null);
-    const moreRef = useRef<HTMLSpanElement | null>(null);
-    // 展开/收起高度过渡：点击时记下实时高度（动画中则是中间值），渲染后由布局效果续接
-    const pendingTagsAnimRef = useRef<number | null>(null);
-    const tagsAnimCleanupRef = useRef<(() => void) | null>(null);
+    // 二级分类浮窗（原版 MusicFree 的 SheetTags 面板）：横滑行右侧「全部」拉起
+    const [panelOpen, setPanelOpen] = useState(false);
 
     // 首页是常驻缓存页：插件安装/卸载/启停后重新拉取，新音源无需重启即可用
     const pluginsVersion = usePluginsVersion();
@@ -411,6 +409,12 @@ function SheetsTab({ visible }: { visible: boolean }) {
                     ...(res.data.data ?? []).flatMap((g: any) => g.data ?? []),
                 ].filter((t: any) => t && typeof t === "object");
                 setAllTags(tags);
+                setTagGroups({
+                    pinned: (res.data.pinned ?? []).filter(
+                        (t: any) => t && typeof t === "object",
+                    ),
+                    groups: res.data.data ?? [],
+                });
                 // 选中标签在新列表里仍存在时改绑到新列表对象（按 title+id 精确匹配，
                 // 退回按 title）：chips 渲染的是新对象而高亮按引用比较，沿用旧对象
                 // 会让刷新后的分类全部失去选中态
@@ -426,8 +430,6 @@ function SheetsTab({ visible }: { visible: boolean }) {
                 }
                 activeTagRef.current = nextTag;
                 setActiveTag(nextTag);
-                setExpanded(false);
-                setVisibleCount(Number.MAX_SAFE_INTEGER);
                 if (!nextTag) {
                     // 没有任何可用标签：不会有后续加载，停掉初始 loading
                     if (!quiet) {
@@ -438,6 +440,7 @@ function SheetsTab({ visible }: { visible: boolean }) {
             }
             if (!quiet || !hasContentRef.current) {
                 setAllTags([]);
+                setTagGroups(null);
                 setError(
                     candidates.length
                         ? "音源加载失败，试试切换音源"
@@ -537,134 +540,6 @@ function SheetsTab({ visible }: { visible: boolean }) {
         return () => observer.disconnect();
     }, [isEnd, loadingMore, loading, page, activeTag, fetchSheets]);
 
-    // 分类标签折叠：计算可见数量，保证「更多」落在两行以内
-    useLayoutEffect(() => {
-        // 三个子页常驻缓存，隐藏时是 display:none，offsetTop 全为 0：
-        // 此时测量会误判成「只有一行」且此后无人触发重算（首次加载停在推荐页时
-        // 标签正好在隐藏中返回，切到歌单页就会不截断、无「更多」）。
-        // 因此只在可见时测量，依赖里带上 visible，重新可见时补测一次。
-        if (!visible) {
-            return;
-        }
-        const container = tagsRef.current;
-        if (!container || !allTags.length || expanded) {
-            return;
-        }
-        const chips = Array.from(
-            container.querySelectorAll<HTMLElement>("[data-tag-chip]"),
-        );
-        if (!chips.length) {
-            return;
-        }
-        const rowTops = [...new Set(chips.map((el) => el.offsetTop))].sort(
-            (a, b) => a - b,
-        );
-        if (visibleCount >= allTags.length) {
-            // 初次渲染：全部标签都在位，判断是否超过两行
-            if (rowTops.length <= 2) {
-                return;
-            }
-            const twoRowCount = chips.filter(
-                (el) => el.offsetTop <= rowTops[1],
-            ).length;
-            // 末位让给「更多」，保证加上它仍只有两行
-            setVisibleCount(Math.max(1, twoRowCount - 1));
-            return;
-        }
-        // 已折叠：若「更多」掉到第三行，再收起一个
-        const moreEl = moreRef.current;
-        if (moreEl && rowTops.length >= 2 && moreEl.offsetTop > rowTops[1]) {
-            setVisibleCount((prev) => Math.max(1, prev - 1));
-        }
-    }, [allTags, expanded, visibleCount, layoutNonce, visible]);
-
-    // 窗口尺寸变化时重新计算折叠
-    useEffect(() => {
-        if (expanded) {
-            return;
-        }
-        const onResize = () => {
-            setVisibleCount(Number.MAX_SAFE_INTEGER);
-            setLayoutNonce((n) => n + 1);
-        };
-        window.addEventListener("resize", onResize);
-        return () => window.removeEventListener("resize", onResize);
-    }, [expanded]);
-
-    // 展开/收起时对标签区做高度过渡：点击只记录当前高度并翻转状态，
-    // 渲染完成后在这里从记录高度过渡到新内容的自然高度（结束后还原为自适应）
-    useLayoutEffect(() => {
-        const el = tagsRef.current;
-        if (!el) return;
-        const trans = "height 0.28s cubic-bezier(0.22, 0.61, 0.36, 1)";
-        const startH = pendingTagsAnimRef.current;
-        if (startH === null) {
-            // 过渡进行中因可见数量重算而重渲染（如展开时旋转屏幕再收起）：
-            // 锁定当前动画高度，平滑改道到新的自然高度
-            if (el.dataset.tagAnim === "1") {
-                const cur = el.getBoundingClientRect().height;
-                el.style.transition = "none";
-                el.style.height = `${cur}px`;
-                void el.offsetHeight;
-                el.style.height = "auto";
-                const endH = el.getBoundingClientRect().height;
-                el.style.height = `${cur}px`;
-                void el.offsetHeight;
-                el.style.transition = trans;
-                el.style.height = `${endH}px`;
-            }
-            return;
-        }
-        pendingTagsAnimRef.current = null;
-        // 连点打断旧动画：从点击那一刻捕获的高度续接，避免跳变
-        tagsAnimCleanupRef.current?.();
-        el.style.transition = "none";
-        el.style.height = "auto";
-        const endH = el.getBoundingClientRect().height;
-        if (Math.abs(endH - startH) < 1) {
-            el.style.transition = "";
-            el.style.height = "";
-            return;
-        }
-        el.style.height = `${startH}px`;
-        el.style.overflow = "hidden";
-        void el.offsetHeight; // 强制回流锁定起点，否则过渡不生效
-        el.style.transition = trans;
-        el.style.height = `${endH}px`;
-        let timer = 0;
-        const onEnd = (e: TransitionEvent) => {
-            if (e.target === el && e.propertyName === "height") {
-                cleanup();
-            }
-        };
-        const cleanup = () => {
-            el.removeEventListener("transitionend", onEnd);
-            clearTimeout(timer);
-            delete el.dataset.tagAnim;
-            el.style.transition = "";
-            el.style.height = "";
-            el.style.overflow = "";
-            tagsAnimCleanupRef.current = null;
-        };
-        // transitionend 可能因切后台等丢失，按时长兜底清理
-        timer = window.setTimeout(cleanup, 340);
-        el.addEventListener("transitionend", onEnd);
-        el.dataset.tagAnim = "1";
-        tagsAnimCleanupRef.current = cleanup;
-    }, [expanded, visibleCount]);
-
-    const toggleTags = (next: boolean) => {
-        const el = tagsRef.current;
-        // 不可见（高度为 0）时没有可过渡的高度，直接切换状态
-        const curH = el?.getBoundingClientRect().height ?? 0;
-        if (curH < 1) {
-            setExpanded(next);
-            return;
-        }
-        pendingTagsAnimRef.current = curH;
-        setExpanded(next);
-    };
-
     // 首次挂载 / 音源变化时加载标签（页面缓存后只发生一次，之后靠下拉刷新）
     useEffect(() => {
         loadTags();
@@ -675,37 +550,28 @@ function SheetsTab({ visible }: { visible: boolean }) {
             <div className="section-title" style={{ paddingBottom: 4 }}>
                 推荐歌单
             </div>
-            <div ref={tagsRef} className="sheet-tags" style={{ paddingBottom: 8 }}>
-                {(expanded ? allTags : allTags.slice(0, visibleCount)).map((tag: any, idx: number) => (
-                    <span
-                        key={idx}
-                        data-tag-chip
-                        className={`sheet-tag ${activeTag === tag ? "active" : ""}`}
-                        onClick={() => setActiveTag(tag)}
+            {allTags.length > 0 && (
+                <div className="sheet-tags-bar">
+                    <div className="sheet-tags-scroll">
+                        {allTags.map((tag: any, idx: number) => (
+                            <span
+                                key={idx}
+                                className={`sheet-tag ${activeTag === tag ? "active" : ""}`}
+                                onClick={() => setActiveTag(tag)}
+                            >
+                                {tag.title}
+                            </span>
+                        ))}
+                    </div>
+                    <button
+                        className="sheet-tag-all"
+                        onClick={() => setPanelOpen(true)}
                     >
-                        {tag.title}
-                    </span>
-                ))}
-                {!expanded && visibleCount < allTags.length && (
-                    <span
-                        ref={moreRef}
-                        className="sheet-tag-more"
-                        onClick={() => toggleTags(true)}
-                    >
-                        更多
+                        全部
                         <IconChevronDown size={12} strokeWidth={2.4} />
-                    </span>
-                )}
-                {expanded && visibleCount < allTags.length && (
-                    <span
-                        className="sheet-tag-more open"
-                        onClick={() => toggleTags(false)}
-                    >
-                        收起
-                        <IconChevronDown size={12} strokeWidth={2.4} />
-                    </span>
-                )}
-            </div>
+                    </button>
+                </div>
+            )}
             {error ? (
                 <div className="error-tip">{error}</div>
             ) : (
@@ -724,6 +590,16 @@ function SheetsTab({ visible }: { visible: boolean }) {
             {loadingMore && <div className="loading-tip">加载更多…</div>}
             {isEnd && sheets.length > 0 && <div className="loading-tip">没有更多了</div>}
             <div ref={sentinelRef} />
+            <SheetTagsPanel
+                open={panelOpen}
+                tagGroups={tagGroups}
+                activeTag={activeTag}
+                onPick={(tag) => {
+                    setActiveTag(tag);
+                    setPanelOpen(false);
+                }}
+                onClose={() => setPanelOpen(false)}
+            />
         </PullToRefresh>
     );
 }

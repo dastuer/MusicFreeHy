@@ -7,7 +7,7 @@ import {
     useCurrentMusic,
     useMusicState,
 } from "@/core/trackPlayer";
-import { openMusicActions, openSingleSelect } from "@/core/uiAtoms";
+import { openMusicActions, openSingleSelect, openAddToSheet } from "@/core/uiAtoms";
 import { toggleLike, getLikedMusicList, mediaKey, likesVersionAtom } from "@/core/musicSheet";
 import { navigate } from "@/core/router";
 import { formatSeconds } from "@/core/utils";
@@ -364,6 +364,10 @@ export default function MusicList({
                 label: liked ? "取消喜欢" : "喜欢",
                 onClick: () => handleToggleLike(item),
             });
+            actions.push({
+                label: "收藏到歌单",
+                onClick: () => openAddToSheet([item]),
+            });
             if (item.albumId !== undefined) {
                 actions.push({
                     label: "查看专辑",
@@ -375,6 +379,20 @@ export default function MusicList({
                                 title: item.album,
                                 artwork: item.artwork,
                                 artist: item.artist,
+                            },
+                        }),
+                });
+            }
+            if (item.artistId !== undefined) {
+                actions.push({
+                    label: "查看歌手",
+                    onClick: () =>
+                        navigate("artistDetail", {
+                            artistItem: {
+                                id: item.artistId,
+                                platform: item.platform,
+                                name: item.artist,
+                                avatar: item.artwork,
                             },
                         }),
                 });

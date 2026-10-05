@@ -2,7 +2,11 @@ package com.huah.musicfree.hy;
 
 import android.Manifest;
 import android.content.Context;
+import android.content.Intent;
+import android.net.Uri;
 import android.os.Build;
+import android.os.PowerManager;
+import android.provider.Settings;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.PermissionState;
@@ -40,7 +44,8 @@ public class MediaNotificationPlugin extends Plugin {
         MediaPlaybackService.setActionListener((action, position) -> {
             JSObject data = new JSObject();
             data.put("action", action);
-            if (position > 0) {
+            // seek 0 秒也是有效目标位，不能被 >0 过滤吞掉
+            if (position > 0 || MediaPlaybackService.ACTION_SEEK.equals(action)) {
                 data.put("position", position);
             }
             notifyListeners("action", data);
@@ -97,6 +102,47 @@ public class MediaNotificationPlugin extends Plugin {
     @PermissionCallback
     private void onPermissionResult(PluginCall call) {
         call.resolve(grantedResult(isNotificationGranted()));
+    }
+
+    /** 当前是否已加入电池优化白名单（Doze 下只有白名单应用不限网络，流式播放才不会断流） */
+    @PluginMethod
+    public void isBatteryOptimizationIgnored(PluginCall call) {
+        PowerManager pm =
+            (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
+        JSObject result = new JSObject();
+        result.put("ignored", pm != null && pm.isIgnoringBatteryOptimizations(getContext().getPackageName()));
+        call.resolve(result);
+    }
+
+    /** 弹系统对话框请求加入电池优化白名单；个别 ROM 不认这个 action 时退到应用详情页 */
+    @PluginMethod
+    public void requestIgnoreBatteryOptimizations(PluginCall call) {
+        PowerManager pm =
+            (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
+        String pkg = getContext().getPackageName();
+        if (pm == null || pm.isIgnoringBatteryOptimizations(pkg)) {
+            call.resolve();
+            return;
+        }
+        try {
+            Intent intent = new Intent(
+                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:" + pkg)
+            );
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getActivity().startActivity(intent);
+        } catch (Exception e) {
+            e.printStackTrace();
+            try {
+                Intent fallback = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                fallback.setData(Uri.parse("package:" + pkg));
+                fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                getActivity().startActivity(fallback);
+            } catch (Exception ignored) {
+                ignored.printStackTrace();
+            }
+        }
+        call.resolve();
     }
 
     private boolean isNotificationGranted() {

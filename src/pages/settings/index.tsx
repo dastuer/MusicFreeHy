@@ -1,13 +1,18 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useAtomValue } from "jotai";
 import { goBack, navigate } from "@/core/router";
 import { useThemeSetting, setTheme } from "@/core/theme";
-import { getQuality, setQuality } from "@/core/appConfig";
+import { getQuality, setQuality, getAllowCoPlay, setAllowCoPlay } from "@/core/appConfig";
 import { getDownloadSaveTarget, downloadSaveTargetLabel } from "@/core/musicDownload";
 import { APP_VERSION } from "@/core/backup";
-import { setDefaultQuality } from "@/core/trackPlayer";
+import { setDefaultQuality, applyCoPlaySessionType } from "@/core/trackPlayer";
 import { getProxyBase } from "@/core/net";
 import { isNative } from "@/core/native";
+import {
+    isAndroidNative,
+    isBatteryOptimizationIgnored,
+    requestIgnoreBatteryOptimizations,
+} from "@/core/mediaNotification";
 import {
     AUDIO_CACHE_LIMIT_OPTIONS,
     audioCacheVersionAtom,
@@ -19,7 +24,7 @@ import {
     getAudioCacheStats,
     setAudioCacheLimitMB,
 } from "@/core/audioCache";
-import { showToast, openPrompt, openMusicActions, openSingleSelect } from "@/core/uiAtoms";
+import { showToast, openPrompt, openMusicActions, openSingleSelect, lyricTranslationAtom, setLyricTranslation } from "@/core/uiAtoms";
 import { IconBack } from "@/components/base/Icons";
 
 const THEME_OPTIONS = [
@@ -41,13 +46,35 @@ const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
  */export default function SettingsPage() {
     const theme = useThemeSetting();
     const [quality, setQualityState] = useState(getQuality());
+    const showTranslation = useAtomValue(lyricTranslationAtom);
     const [rememberProgress, setRememberProgress] = useState(
         localStorage.getItem("rememberProgress") !== "false",
     );
+    const [allowCoPlay, setAllowCoPlayState] = useState(getAllowCoPlay());
     const [cacheLimit, setCacheLimitState] = useState(getAudioCacheLimitMB());
     // 缓存写入 / 清理后版本号自增，占用展示跟着刷新
     const cacheVersion = useAtomValue(audioCacheVersionAtom);
     const cacheStats = useMemo(() => getAudioCacheStats(), [cacheVersion]);
+    // 电池优化白名单状态（仅安卓）：从系统弹窗回来时靠 visibilitychange 刷新
+    const [batteryIgnored, setBatteryIgnored] = useState<boolean | null>(null);
+    useEffect(() => {
+        if (!isAndroidNative()) {
+            return undefined;
+        }
+        let alive = true;
+        const refresh = () =>
+            isBatteryOptimizationIgnored().then((v) => {
+                if (alive) {
+                    setBatteryIgnored(v ?? null);
+                }
+            });
+        refresh();
+        document.addEventListener("visibilitychange", refresh);
+        return () => {
+            alive = false;
+            document.removeEventListener("visibilitychange", refresh);
+        };
+    }, []);
     const proxy = getProxyBase();    const themeLabel =
         THEME_OPTIONS.find((t) => t.value === theme)?.label ?? "跟随系统";
     const qualityLabel =
@@ -155,6 +182,52 @@ const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
                     <span className="settings-row-label">记忆播放进度</span>
                     <div className={`plugin-switch ${rememberProgress ? "on" : ""}`} />
                 </div>
+                <div
+                    className="settings-row"
+                    onClick={() => {
+                        const next = !showTranslation;
+                        setLyricTranslation(next);
+                        showToast(next ? "歌词将同时显示翻译" : "已关闭歌词翻译");
+                    }}
+                >
+                    <span className="settings-row-label">歌词显示翻译</span>
+                    <div className={`plugin-switch ${showTranslation ? "on" : ""}`} />
+                </div>
+                <div
+                    className="settings-row"
+                    onClick={() => {
+                        const next = !allowCoPlay;
+                        setAllowCoPlayState(next);
+                        setAllowCoPlay(next);
+                        applyCoPlaySessionType();
+                        showToast(next ? "已允许与其他应用同时播放" : "已恢复独占播放");
+                    }}
+                >
+                    <span className="settings-row-label">允许与其他应用同时播放</span>
+                    <div className={`plugin-switch ${allowCoPlay ? "on" : ""}`} />
+                </div>
+                {isAndroidNative() && (
+                    <div
+                        className="settings-row"
+                        onClick={() => {
+                            if (batteryIgnored) {
+                                showToast("已忽略电池优化，后台播放更稳定");
+                                return;
+                            }
+                            void requestIgnoreBatteryOptimizations().then(() =>
+                                isBatteryOptimizationIgnored().then((v) =>
+                                    setBatteryIgnored(v ?? null),
+                                ),
+                            );
+                        }}
+                    >
+                        <span className="settings-row-label">后台播放保活</span>
+                        <span className="settings-value">
+                            {batteryIgnored === null ? "" : batteryIgnored ? "已开启" : "未开启"}
+                        </span>
+                        <span className="settings-value">›</span>
+                    </div>
+                )}
             </div>
 
             <div className="settings-group">

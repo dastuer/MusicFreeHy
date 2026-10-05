@@ -24,3 +24,12 @@ export function getQuality(): IMusic.IQualityKey {
 export function setQuality(q: IMusic.IQualityKey) {
     setConfig("defaultQuality", q);
 }
+
+/** 允许与其他应用同时播放 */
+export function getAllowCoPlay(): boolean {
+    return getConfig("allowCoPlay", false);
+}
+
+export function setAllowCoPlay(v: boolean) {
+    setConfig("allowCoPlay", v);
+}

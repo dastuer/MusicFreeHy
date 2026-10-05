@@ -48,6 +48,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <!-- MediaSessionCompat 媒体按键唤醒依赖 -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 后台播放保活：请求加入电池优化白名单（Doze 下限网会掐断流式播放） -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- 本地音乐扫描：读取媒体音频文件（Android 13+ 细分权限 / 旧系统存储权限） -->
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission

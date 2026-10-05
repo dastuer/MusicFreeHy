@@ -908,15 +908,21 @@ img {
     padding: 4px 16px;
 }
 
-/* 推荐歌单分类标签（无背景色 + 描边胶囊，默认最多两行） */
+/* 推荐歌单分类：一行横滑 + 右侧固定「全部」入口（浮窗内为二级分类） */
 
-.sheet-tags {
+.sheet-tags-bar {
     display: flex;
-    flex-wrap: wrap;
-    /* 收起动画期间容器高度大于内容，禁止默认的 stretch 把标签行/胶囊撑高 */
-    align-content: flex-start;
-    gap: 8px 10px;
-    padding: 4px 16px;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 16px 8px;
+}
+
+.sheet-tags-scroll {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
 }
 
 .sheet-tag {
@@ -935,23 +941,73 @@ img {
     font-weight: 600;
 }
 
-.sheet-tag-more {
+/* 滚动行右侧固定的「全部」：卡片底色胶囊，与普通分类区分 */
+.sheet-tag-all {
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     gap: 3px;
     padding: 4px 12px;
     font-size: 12.5px;
-    color: var(--text-secondary);
-    background: none;
-    border: 1px solid var(--divider);
+    font-weight: 600;
+    color: var(--primary-color);
+    background: var(--bg-card);
     border-radius: 999px;
-    cursor: pointer;
 }
 
-/* 展开态的「收起」：箭头翻转朝上 */
-.sheet-tag-more.open svg {
-    transform: rotate(180deg);
+.sheet-tag-all:active {
+    background: var(--active-bg);
+}
+
+/* 歌单分类浮窗（参考原版 MusicFree SheetTags：70vh 底部弹层 + 二级分类） */
+
+.tags-panel {
+    width: 100%;
+    max-width: var(--page-max);
+    height: 70vh;
+    background: var(--bg-elev);
+    border-radius: 18px 18px 0 0;
+    display: flex;
+    flex-direction: column;
+    animation: sheet-up 0.22s ease-out;
+}
+
+.tags-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 10px 4px 16px;
+}
+
+.tags-panel-title {
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.tags-panel-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 16px calc(14px + var(--safe-bottom));
+}
+
+/* 一级分组标题 */
+.tags-group-title {
+    margin: 14px 0 10px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-color);
+}
+
+.tags-panel-body > div:first-child > .tags-group-title,
+.tags-panel-body > .tags-group-title:first-child {
+    margin-top: 6px;
+}
+
+/* 二级标签胶囊容器 */
+.tags-group-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 10px;
 }
 
 /* 横向卡片行内的歌手/专辑复用 sheet-card-h */
@@ -1589,6 +1645,18 @@ img {
     font-weight: 700;
 }
 
+/* 原文行下方的翻译行：字号更小、更暗；激活行翻译随之提亮 */
+.np-lyric-trans {
+    font-size: 12.5px;
+    line-height: 1.5;
+    margin-top: 3px;
+    color: rgba(255, 255, 255, 0.34);
+}
+
+.np-lyric-line.active .np-lyric-trans {
+    color: rgba(255, 255, 255, 0.78);
+}
+
 .np-lyric-empty {
     margin-top: 40vh;
     text-align: center;
@@ -1858,6 +1926,39 @@ img {
     font-size: 11px;
     color: var(--text-tertiary);
     margin-top: 1px;
+}
+
+/* 队列内搜索：复用全局 .search-input-wrap，一行贴在表头下 */
+.queue-search {
+    padding: 0 16px 10px;
+    display: flex;
+}
+
+/* 队列拖拽排序 */
+.queue-drag-handle {
+    touch-action: none;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 36px;
+    color: var(--text-tertiary);
+    cursor: grab;
+}
+
+/* 汉堡图标转成横向的「≡」握把 */
+.queue-drag-handle svg {
+    transform: rotate(90deg);
+}
+
+/* 让位的行平滑滑开；拖拽行自身跟手，不加速度 */
+.queue-row.drag-shift {
+    transition: transform 0.16s ease;
+}
+
+.queue-search-toggle.active {
+    color: var(--primary-color);
 }
 
 /* ---------- 底部弹层通用（操作单/添加到歌单） ---------- */

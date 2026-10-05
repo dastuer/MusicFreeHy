@@ -22,6 +22,7 @@ import {
     openSingleSelect,
     openAddToSheet,
     showToast,
+    lyricTranslationAtom,
 } from "@/core/uiAtoms";
 import { isLikedMusic, toggleLike, likesVersionAtom } from "@/core/musicSheet";
 import { localMusicVersionAtom, findLocalRecord, matchSingleLocalMusic } from "@/core/localMusic";
@@ -143,6 +144,7 @@ function NowPlayingInner({
     const quality = useQuality();
     const playingQuality = usePlayingQuality();
     const lyric = useCurrentLyric();
+    const showTranslation = useAtomValue(lyricTranslationAtom);
     const likesVersion = useAtomValue(likesVersionAtom);
     const isDownloading = useAtomValue(downloadingAtom);
     // 本地音乐曲库版本号：单曲匹配成功后 bump，驱动这里的按钮状态与封面歌词刷新
@@ -532,6 +534,22 @@ function NowPlayingInner({
                           },
                       ]
                     : []),
+                ...(currentMusic.artistId !== undefined
+                    ? [
+                          {
+                              label: "查看歌手",
+                              onClick: () =>
+                                  navigate("artistDetail", {
+                                      artistItem: {
+                                          id: currentMusic.artistId,
+                                          platform: currentMusic.platform,
+                                          name: currentMusic.artist,
+                                          avatar: currentMusic.artwork,
+                                      },
+                                  }),
+                          },
+                      ]
+                    : []),
                 {
                     label: "倍速播放",
                     onClick: openRateSheet,
@@ -595,6 +613,11 @@ function NowPlayingInner({
                                               </span>
                                               <div className="np-lyric-seek-text">
                                                   {line.lrc}
+                                                  {showTranslation && line.translation && (
+                                                      <div className="np-lyric-trans">
+                                                          {line.translation}
+                                                      </div>
+                                                  )}
                                               </div>
                                               <button
                                                   className="np-lyric-seek-play"
@@ -617,6 +640,11 @@ function NowPlayingInner({
                                           }`}
                                       >
                                           {line.lrc}
+                                          {showTranslation && line.translation && (
+                                              <div className="np-lyric-trans">
+                                                  {line.translation}
+                                              </div>
+                                          )}
                                       </div>
                                   );
                               })

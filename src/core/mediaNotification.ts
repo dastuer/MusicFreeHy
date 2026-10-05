@@ -40,6 +40,11 @@ function onAndroid(): boolean {
     }
 }
 
+/** Android 原生环境（设置页的保活入口只在安卓上显示） */
+export function isAndroidNative(): boolean {
+    return onAndroid();
+}
+
 function callNative(method: string, options?: Record<string, any>): Promise<any> {
     return callNativeMethod(PLUGIN, method, options ?? {}).catch((e: any) => {
         console.warn(`[mediaNotification] ${method} 失败`, e?.message ?? e);
@@ -71,6 +76,38 @@ function currentSnapshot() {
         duration: progress.duration || music?.duration || 0,
         rate: store.get(rateAtom) || 1,
     };
+}
+
+/** 是否已加入电池优化白名单（非安卓原生环境返回 undefined） */
+export async function isBatteryOptimizationIgnored(): Promise<boolean | undefined> {
+    if (!onAndroid()) {
+        return undefined;
+    }
+    const res = await callNative("isBatteryOptimizationIgnored");
+    return res?.ignored;
+}
+
+/** 弹系统对话框请求加入电池优化白名单；成功与否由用户在对话框里决定 */
+export async function requestIgnoreBatteryOptimizations(): Promise<void> {
+    if (!onAndroid()) {
+        return;
+    }
+    // 只要弹过一次就不再自动打扰（设置页手动点不在此列）
+    localStorage.setItem("batteryKeepAlivePrompted", "1");
+    await callNative("requestIgnoreBatteryOptimizations");
+}
+
+/** 首次开播时引导一次电池优化白名单（Doze 限网是熄屏断流的根因，拒绝后不再弹） */
+function maybePromptBatteryKeepAlive() {
+    if (localStorage.getItem("batteryKeepAlivePrompted")) {
+        return;
+    }
+    localStorage.setItem("batteryKeepAlivePrompted", "1");
+    isBatteryOptimizationIgnored().then((ignored) => {
+        if (ignored === false) {
+            callNative("requestIgnoreBatteryOptimizations");
+        }
+    });
 }
 
 function pushPlayback(state: MusicState) {
@@ -150,6 +187,7 @@ export function setupMediaNotification() {
         }
         if (state === "playing") {
             ensurePermissionOnce();
+            maybePromptBatteryKeepAlive();
             startPositionSync();
         } else {
             stopPositionSync();
@@ -180,8 +218,10 @@ export function setupMediaNotification() {
                 }
                 break;
             case "close":
-                // 划掉通知视为停止播放（与网易云一致）；歌单保留，回 App 可重新播
+                // 划掉通知 / 耳机停止键：暂停播放并彻底收掉原生通知与服务。
+                // 必须显式 stop——暂停态推送会把通知再挂回来，划掉就永远刷不掉了
                 TrackPlayerSingleton.pause();
+                callNative("stop");
                 break;
             default:
                 break;

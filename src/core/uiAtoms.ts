@@ -129,6 +129,17 @@ export function closeSleepTimer() {
     getDefaultStore().set(sleepTimerOpenAtom, false);
 }
 
+/** ---------- 歌词翻译显示（播放页双行渲染，设置页开关） ---------- */
+
+export const lyricTranslationAtom = atom(
+    localStorage.getItem("lyricShowTranslation") !== "false",
+);
+
+export function setLyricTranslation(enabled: boolean) {
+    localStorage.setItem("lyricShowTranslation", String(enabled));
+    getDefaultStore().set(lyricTranslationAtom, enabled);
+}
+
 /** ---------- 单选浮窗（设置等多选一项统一交互） ---------- */
 
 export interface ISingleSelectOption {

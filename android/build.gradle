@@ -26,6 +26,18 @@ allprojects {
     }
 }
 
+// node_modules 里 capacitor 等子项目自带的 buildscript 只有 google()/mavenCentral()，
+// 在本机 fail-fast 代理策略下（gradle.properties）必然解析失败；同样补上阿里云镜像。
+subprojects {
+    buildscript {
+        repositories {
+            maven { url 'https://maven.aliyun.com/repository/google' }
+            maven { url 'https://maven.aliyun.com/repository/central' }
+            maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+        }
+    }
+}
+
 task clean(type: Delete) {
     delete rootProject.buildDir
 }

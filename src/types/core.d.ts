@@ -122,6 +122,8 @@ declare namespace ILyric {
     export interface IParsedLrcItem {
         time: number;
         lrc: string;
+        /** 翻译歌词（插件 getLyric 返回的 translation 按时间轴对齐后挂到行上） */
+        translation?: string;
         index?: number;
     }
 

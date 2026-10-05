@@ -10,11 +10,16 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.media.AudioDeviceCallback;
+import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
 import android.net.Uri;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.os.SystemClock;
 import android.support.v4.media.MediaMetadataCompat;
 import android.support.v4.media.session.MediaSessionCompat;
@@ -89,6 +94,12 @@ public class MediaPlaybackService extends Service {
     /** 当前 bitmap 对应的封面地址，避免同一首歌重复解码 */
     private String artworkBitmapKey = null;
     private boolean foregroundStarted = false;
+    /** 熄屏后 CPU 可能休眠、WiFi 会进省电模式，流式播放期间得按住这两把锁 */
+    private PowerManager.WakeLock wakeLock;
+    private WifiManager.WifiLock wifiLock;
+    /** 输出设备监听：拔耳机 / 断蓝牙时暂停，避免声音从外放突然炸出来 */
+    private AudioManager audioManager;
+    private AudioDeviceCallback audioDeviceCallback;
 
     @Override
     public void onCreate() {
@@ -130,6 +141,48 @@ public class MediaPlaybackService extends Service {
                 dispatch(ACTION_CLOSE);
             }
         });
+
+        registerHeadphoneGuard();
+    }
+
+    /** 拔出有线耳机 / 断开蓝牙耳机时暂停播放（WebView 的音频焦点不覆盖这个场景） */
+    private void registerHeadphoneGuard() {
+        try {
+            audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            if (audioManager == null) {
+                return;
+            }
+            audioDeviceCallback = new AudioDeviceCallback() {
+                @Override
+                public void onAudioDevicesRemoved(AudioDeviceInfo[] removedDevices) {
+                    if (removedDevices == null || !sPlaying) {
+                        return;
+                    }
+                    for (AudioDeviceInfo device : removedDevices) {
+                        if (device.isSink() && isHeadphoneType(device.getType())) {
+                            dispatch(ACTION_PAUSE);
+                            return;
+                        }
+                    }
+                }
+            };
+            audioManager.registerAudioDeviceCallback(audioDeviceCallback, null);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private static boolean isHeadphoneType(int type) {
+        switch (type) {
+            case AudioDeviceInfo.TYPE_WIRED_HEADSET:
+            case AudioDeviceInfo.TYPE_WIRED_HEADPHONES:
+            case AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+            case AudioDeviceInfo.TYPE_USB_HEADSET:
+            case AudioDeviceInfo.TYPE_BLE_HEADSET:
+                return true;
+            default:
+                return false;
+        }
     }
 
     @Override
@@ -155,6 +208,14 @@ public class MediaPlaybackService extends Service {
 
     @Override
     public void onDestroy() {
+        releaseKeepAlive();
+        if (audioManager != null && audioDeviceCallback != null) {
+            try {
+                audioManager.unregisterAudioDeviceCallback(audioDeviceCallback);
+            } catch (Exception ignored) {
+            }
+            audioDeviceCallback = null;
+        }
         if (instance == this) {
             instance = null;
         }
@@ -246,17 +307,70 @@ public class MediaPlaybackService extends Service {
             return;
         }
         session.setPlaybackState(buildPlaybackState());
+        // 播放与暂停都保持前台身份：暂停就退前台的话进程失去保护，
+        // ROM 省电 / 内存回收下很快被杀，表现为「暂停一会儿就自己没了」。
+        // 暂停态通知 setOngoing(false) 仍可划掉（deleteIntent → close 走彻底停止）。
+        if (!foregroundStarted) {
+            enterForeground();
+        } else {
+            postNotification();
+        }
+        // 音频本体在 WebView 里，熄屏后 WiFi 休眠 / CPU 深眠会直接掐断取流
+        updateKeepAlive();
+    }
+
+    /** 播放中持有唤醒锁与 WiFi 锁，暂停/停止即释放 */
+    private void updateKeepAlive() {
         if (sPlaying) {
-            if (!foregroundStarted) {
-                enterForeground();
-            } else {
-                postNotification();
+            try {
+                PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                if (pm != null) {
+                    if (wakeLock == null) {
+                        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MusicFreeHy:playback");
+                        wakeLock.setReferenceCounted(false);
+                    }
+                    if (!wakeLock.isHeld()) {
+                        wakeLock.acquire();
+                    }
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+            try {
+                WifiManager wm =
+                    (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                if (wm != null) {
+                    if (wifiLock == null) {
+                        int mode = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                            ? WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                            : WifiManager.WIFI_MODE_FULL_HIGH_PERF;
+                        wifiLock = wm.createWifiLock(mode, "MusicFreeHy:playback");
+                        wifiLock.setReferenceCounted(false);
+                    }
+                    if (!wifiLock.isHeld()) {
+                        wifiLock.acquire();
+                    }
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
             }
         } else {
-            // 暂停：通知保持可见但允许划掉（前台身份退掉，服务随进程留存）
-            postNotification();
-            stopForeground(STOP_FOREGROUND_DETACH);
-            foregroundStarted = false;
+            releaseKeepAlive();
+        }
+    }
+
+    private void releaseKeepAlive() {
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) {
+                wakeLock.release();
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            if (wifiLock != null && wifiLock.isHeld()) {
+                wifiLock.release();
+            }
+        } catch (Exception ignored) {
         }
     }
 
@@ -455,6 +569,7 @@ public class MediaPlaybackService extends Service {
     }
 
     private void shutdown() {
+        releaseKeepAlive();
         if (notifications != null) {
             try {
                 notifications.cancel(NOTIFICATION_ID);
