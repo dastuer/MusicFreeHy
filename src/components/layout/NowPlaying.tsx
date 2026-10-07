@@ -452,11 +452,18 @@ function NowPlayingInner({
     }, [currentMusic, downloadsVersion]);
 
     const openQualitySheet = () => {
+        // 勾与徽标一致，都跟实际播放档走：本曲降级后（插件没有请求档 / 失败降档重试）
+        // 请求档（quality）还在，实际播的是 playingQuality，勾要是还打在请求档上就和徽标对不上了
+        const effectiveQuality = playingQuality ?? quality;
         openSingleSelect({
             title: "播放音质",
-            subtitle: switchingQuality ? "正在缓冲新音质，当前播放不中断" : undefined,
+            subtitle: switchingQuality
+                ? "正在缓冲新音质，当前播放不中断"
+                : playingQuality && playingQuality !== quality
+                  ? `当前音源按${qualityShortName(playingQuality)}播放，选择其他音质可重新尝试`
+                  : undefined,
             options: qualityOptions(),
-            value: quality,
+            value: effectiveQuality,
             onSelect: async (v) => {
                 const next = v as IMusic.IQualityKey;
                 const msg = qualitySwitchToast(await applyQuality(next), next);
