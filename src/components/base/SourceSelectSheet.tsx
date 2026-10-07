@@ -1,6 +1,5 @@
 import { useAtomValue } from "jotai";
 import { sourceSelectOpenAtom, closeSourceSelect } from "@/core/uiAtoms";
-import { navigate } from "@/core/router";
 import {
     useGlobalSource,
     useUsablePlugins,
@@ -9,7 +8,7 @@ import {
     AUTO_SOURCE,
 } from "@/core/mediaSource";
 import { useBackLayer } from "@/core/systemBack";
-import { IconCheck, IconPuzzle } from "./Icons";
+import { IconCheck } from "./Icons";
 
 /**
  * 音源设置底部面板：「我的 → 音源设置」与首页侧边栏统一入口。
@@ -73,16 +72,6 @@ export default function SourceSelectSheet() {
                         </div>
                     )}
                 </div>
-                <button
-                    className="add-sheet-new"
-                    onClick={() => {
-                        closeSourceSelect();
-                        navigate("pluginManage");
-                    }}
-                >
-                    <IconPuzzle size={18} />
-                    <span>前往插件管理</span>
-                </button>
             </div>
         </div>
     );

@@ -1,13 +1,29 @@
 import { useEffect, useRef, useState } from "react";
+import {
+    DndContext,
+    PointerSensor,
+    closestCenter,
+    useSensor,
+    useSensors,
+    type DragEndEvent,
+} from "@dnd-kit/core";
+import { restrictToParentElement, restrictToVerticalAxis } from "@dnd-kit/modifiers";
+import {
+    SortableContext,
+    arrayMove,
+    useSortable,
+    verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { goBack } from "@/core/router";
 import { pluginHost, getPlugins, invalidatePluginCache, type SerializedPlugin } from "@/core/ipc";
 import { openPrompt, showToast } from "@/core/uiAtoms";
 import { setDefaultPluginHash, getGlobalSource, setGlobalSource, useDefaultPluginHash, AUTO_SOURCE } from "@/core/mediaSource";
 import { useBackLayer } from "@/core/systemBack";
-import { IconBack, IconLink, IconFileCode, IconRefresh, IconTrash, IconCheck, IconClose } from "@/components/base/Icons";
+import { IconBack, IconLink, IconFileCode, IconRefresh, IconTrash, IconCheck, IconClose, IconDragHandle } from "@/components/base/Icons";
 
 /**
- * 插件管理页：从链接/本地文件安装音源插件，启用/禁用、排序、用户变量、设为默认音源。
+ * 插件管理页：从链接/本地文件安装音源插件，启用/禁用、拖拽排序、用户变量、设为默认音源。
  * 插件格式与 MusicFree（移动端）/ MusicFreeDesktop 完全一致。
  */
 
@@ -125,6 +141,129 @@ function PluginDetailSheet({ plugin, onClose }: { plugin: SerializedPlugin | nul
     );
 }
 
+/**
+ * 可拖拽排序的插件卡片（dnd-kit useSortable）：
+ * 左侧手柄拖动换位（PointerSensor + distance 激活约束，点按不误伤展开操作），
+ * 其余交互（展开 / 启停开关）由页面传入回调。
+ */
+function SortablePluginCard({
+    plugin,
+    isDefault,
+    expanded,
+    onToggleExpand,
+    onToggleEnabled,
+    onDetail,
+    onUpdate,
+    onToggleDefault,
+    onUninstall,
+}: {
+    plugin: SerializedPlugin;
+    isDefault: boolean;
+    expanded: boolean;
+    onToggleExpand: () => void;
+    onToggleEnabled: () => void;
+    onDetail: () => void;
+    onUpdate: () => void;
+    onToggleDefault: () => void;
+    onUninstall: () => void;
+}) {
+    const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+        useSortable({ id: plugin.hash });
+
+    return (
+        <div
+            ref={setNodeRef}
+            className={`plugin-card ${isDragging ? "dragging" : ""}`}
+            style={{
+                transform: CSS.Translate.toString(transform),
+                transition,
+            }}
+        >
+            <div className="plugin-card-head" onClick={onToggleExpand}>
+                <button
+                    className="plugin-drag-handle"
+                    title="按住拖拽排序"
+                    onClick={(e) => e.stopPropagation()}
+                    {...attributes}
+                    {...listeners}
+                >
+                    <IconDragHandle size={18} />
+                </button>
+                <div className="plugin-card-main">
+                    <div className="plugin-card-name">
+                        {plugin.name}
+                        <span className="plugin-badge">{plugin.version || "未知版本"}</span>
+                        <span className={`plugin-badge ${plugin.state === "Mounted" ? "ok" : "err"}`}>
+                            {plugin.state === "Mounted" ? "已挂载" : plugin.errorReason ?? "错误"}
+                        </span>
+                        {isDefault && <span className="plugin-badge primary">默认音源</span>}
+                    </div>
+                    <div className="plugin-card-desc">
+                        {plugin.description || "暂无描述"}
+                        {plugin.author ? ` · ${plugin.author}` : ""}
+                    </div>
+                </div>
+                <div
+                    className={`plugin-switch ${plugin.enabled ? "on" : ""}`}
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleEnabled();
+                    }}
+                />
+            </div>
+
+            {expanded && (
+                <>
+                    <div className="plugin-card-foot">
+                        <button className="pill" onClick={onDetail}>
+                            详情
+                        </button>
+                        {plugin.srcUrl && (
+                            <button className="pill" onClick={onUpdate}>
+                                <IconRefresh size={13} />
+                                更新
+                            </button>
+                        )}
+                        <button className="pill" onClick={onToggleDefault}>
+                            {isDefault ? <IconCheck size={13} /> : null}
+                            {isDefault ? "取消默认" : "设为默认"}
+                        </button>
+                        <button
+                            className="pill"
+                            style={{ color: "var(--primary-color)" }}
+                            onClick={onUninstall}
+                        >
+                            <IconTrash size={13} />
+                            卸载
+                        </button>
+                    </div>
+
+                    {Array.isArray(plugin.userVariablesDef) && plugin.userVariablesDef.length > 0 && (
+                        <div className="plugin-vars">
+                            {plugin.userVariablesDef.map((def: any) => (
+                                <div key={def.key} className="plugin-var-row">
+                                    <label title={def.hint ?? def.key}>{def.name ?? def.key}</label>
+                                    <input
+                                        defaultValue={plugin.userVariables?.[def.key] ?? ""}
+                                        placeholder={def.hint ?? "请输入"}
+                                        onBlur={(e) => {
+                                            pluginHost.setUserVariables(plugin.hash, {
+                                                ...plugin.userVariables,
+                                                [def.key]: e.target.value.trim(),
+                                            });
+                                            showToast("已保存，下次调用生效");
+                                        }}
+                                    />
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </>
+            )}
+        </div>
+    );
+}
+
 export default function PluginManagePage() {
     const [plugins, setPlugins] = useState<SerializedPlugin[]>([]);
     const [url, setUrl] = useState("");
@@ -132,6 +271,12 @@ export default function PluginManagePage() {
     const [detail, setDetail] = useState<SerializedPlugin | null>(null);
     const defaultHash = useDefaultPluginHash();
     const fileRef = useRef<HTMLInputElement | null>(null);
+
+    // 按下移动超过 6px 才进入拖拽：手柄上的轻点仍按普通点击处理；
+    // 手柄的 touch-action:none 让触摸拖拽不触发页面滚动（PointerSensor 鼠标/触摸通用）
+    const sensors = useSensors(
+        useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    );
 
     const refresh = async () => {
         invalidatePluginCache();
@@ -193,16 +338,57 @@ export default function PluginManagePage() {
         }
     };
 
-    const movePlugin = async (hash: string, dir: -1 | 1) => {
-        const hashes = plugins.map((p) => p.hash);
-        const idx = hashes.indexOf(hash);
-        const target = idx + dir;
-        if (target < 0 || target >= hashes.length) {
+    /** 松手落位：本地立即重排（不闪回原序），order 持久化后与桌面端 / 音源顺序保持一致 */
+    const onDragEnd = ({ active, over }: DragEndEvent) => {
+        if (!over || active.id === over.id) {
             return;
         }
-        [hashes[idx], hashes[target]] = [hashes[target], hashes[idx]];
-        pluginHost.setPluginOrder(hashes);
-        await refresh();
+        const hashes = plugins.map((p) => p.hash);
+        const from = hashes.indexOf(String(active.id));
+        const to = hashes.indexOf(String(over.id));
+        if (from < 0 || to < 0) {
+            return;
+        }
+        const next = arrayMove(hashes, from, to);
+        pluginHost.setPluginOrder(next);
+        setPlugins((prev) => arrayMove(prev, from, to));
+        void refresh();
+    };
+
+    const toggleEnabled = (p: SerializedPlugin) => {
+        pluginHost.setPluginEnabled(p.hash, !p.enabled);
+        setTimeout(refresh, 60);
+    };
+
+    const updatePlugin = async (p: SerializedPlugin) => {
+        showToast("正在更新…");
+        const res = await pluginHost.installPluginFromUrl(p.srcUrl!);
+        showToast(res.success ? "已是最新版本" : res.message ?? "更新失败");
+        refresh();
+    };
+
+    const toggleDefault = async (p: SerializedPlugin, isDefault: boolean) => {
+        if (isDefault) {
+            setDefaultPluginHash(null);
+            showToast("已取消默认音源");
+        } else {
+            setDefaultPluginHash(p.hash);
+            showToast(`已将「${p.name}」设为默认音源，全局音源已切换`);
+        }
+        refresh();
+    };
+
+    const uninstallPlugin = async (p: SerializedPlugin, isDefault: boolean) => {
+        await pluginHost.uninstallPlugin(p.hash);
+        // 卸载的是默认音源 / 当前全局音源时同步清理
+        if (getGlobalSource() === p.hash) {
+            setGlobalSource(AUTO_SOURCE);
+        }
+        if (isDefault) {
+            setDefaultPluginHash(null);
+        }
+        showToast(`已卸载「${p.name}」`);
+        refresh();
     };
 
     return (
@@ -264,126 +450,36 @@ export default function PluginManagePage() {
             </div>
             <div className="settings-tip" style={{ paddingTop: 4 }}>
                 支持标准 MusicFree 音源插件（.js）或插件订阅集（.json）。安装后与桌面端互通。
+                <br />
+                按住左侧手柄可拖拽调整插件顺序（顺序即搜索 / 播放的尝试优先级）。
             </div>
 
-            {plugins.map((p, idx) => {
-                const isDefault = defaultHash === p.hash;
-                const expandedOpen = expanded === p.hash;
-                return (
-                    <div key={p.hash} className="plugin-card">
-                        <div className="plugin-card-head" onClick={() => setExpanded(expandedOpen ? null : p.hash)}>
-                            <div className="plugin-card-main">
-                                <div className="plugin-card-name">
-                                    {p.name}
-                                    <span className="plugin-badge">{p.version || "未知版本"}</span>
-                                    <span className={`plugin-badge ${p.state === "Mounted" ? "ok" : "err"}`}>
-                                        {p.state === "Mounted" ? "已挂载" : p.errorReason ?? "错误"}
-                                    </span>
-                                    {isDefault && <span className="plugin-badge primary">默认音源</span>}
-                                </div>
-                                <div className="plugin-card-desc">
-                                    {p.description || "暂无描述"}
-                                    {p.author ? ` · ${p.author}` : ""}
-                                </div>
-                            </div>
-                            <div
-                                className={`plugin-switch ${p.enabled ? "on" : ""}`}
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    pluginHost.setPluginEnabled(p.hash, !p.enabled);
-                                    setTimeout(refresh, 60);
-                                }}
-                            />
-                        </div>
-
-                        {expandedOpen && (
-                            <>
-                                <div className="plugin-card-foot">
-                                    <button className="pill" onClick={() => setDetail(p)}>
-                                        详情
-                                    </button>
-                                    {p.srcUrl && (
-                                        <button
-                                            className="pill"
-                                            onClick={async () => {
-                                                showToast("正在更新…");
-                                                const res = await pluginHost.installPluginFromUrl(p.srcUrl!);
-                                                showToast(res.success ? "已是最新版本" : res.message ?? "更新失败");
-                                                refresh();
-                                            }}
-                                        >
-                                            <IconRefresh size={13} />
-                                            更新
-                                        </button>
-                                    )}
-                                    <button
-                                        className="pill"
-                                            onClick={() => {
-                                                if (isDefault) {
-                                                    setDefaultPluginHash(null);
-                                                    showToast("已取消默认音源");
-                                                } else {
-                                                    setDefaultPluginHash(p.hash);
-                                                    showToast(`已将「${p.name}」设为默认音源，全局音源已切换`);
-                                                }
-                                                refresh();
-                                            }}
-                                    >
-                                        {isDefault ? <IconCheck size={13} /> : null}
-                                        {isDefault ? "取消默认" : "设为默认"}
-                                    </button>
-                                    <button className="pill" onClick={() => movePlugin(p.hash, -1)} disabled={idx === 0}>
-                                        上移
-                                    </button>
-                                    <button className="pill" onClick={() => movePlugin(p.hash, 1)} disabled={idx === plugins.length - 1}>
-                                        下移
-                                    </button>
-                                    <button
-                                        className="pill"
-                                        style={{ color: "var(--primary-color)" }}
-                                        onClick={async () => {
-                                            await pluginHost.uninstallPlugin(p.hash);
-                                            // 卸载的是默认音源 / 当前全局音源时同步清理
-                                            if (getGlobalSource() === p.hash) {
-                                                setGlobalSource(AUTO_SOURCE);
-                                            }
-                                            if (defaultHash === p.hash) {
-                                                setDefaultPluginHash(null);
-                                            }
-                                            showToast(`已卸载「${p.name}」`);
-                                            refresh();
-                                        }}
-                                    >
-                                        <IconTrash size={13} />
-                                        卸载
-                                    </button>
-                                </div>
-
-                                {Array.isArray(p.userVariablesDef) && p.userVariablesDef.length > 0 && (
-                                    <div className="plugin-vars">
-                                        {p.userVariablesDef.map((def: any) => (
-                                            <div key={def.key} className="plugin-var-row">
-                                                <label title={def.hint ?? def.key}>{def.name ?? def.key}</label>
-                                                <input
-                                                    defaultValue={p.userVariables?.[def.key] ?? ""}
-                                                    placeholder={def.hint ?? "请输入"}
-                                                    onBlur={(e) => {
-                                                        pluginHost.setUserVariables(p.hash, {
-                                                            ...p.userVariables,
-                                                            [def.key]: e.target.value.trim(),
-                                                        });
-                                                        showToast("已保存，下次调用生效");
-                                                    }}
-                                                />
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-                            </>
-                        )}
-                    </div>
-                );
-            })}
+            <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                modifiers={[restrictToVerticalAxis, restrictToParentElement]}
+                onDragEnd={onDragEnd}
+            >
+                <SortableContext
+                    items={plugins.map((p) => p.hash)}
+                    strategy={verticalListSortingStrategy}
+                >
+                    {plugins.map((p) => (
+                        <SortablePluginCard
+                            key={p.hash}
+                            plugin={p}
+                            isDefault={defaultHash === p.hash}
+                            expanded={expanded === p.hash}
+                            onToggleExpand={() => setExpanded(expanded === p.hash ? null : p.hash)}
+                            onToggleEnabled={() => toggleEnabled(p)}
+                            onDetail={() => setDetail(p)}
+                            onUpdate={() => void updatePlugin(p)}
+                            onToggleDefault={() => void toggleDefault(p, defaultHash === p.hash)}
+                            onUninstall={() => void uninstallPlugin(p, defaultHash === p.hash)}
+                        />
+                    ))}
+                </SortableContext>
+            </DndContext>
 
             {!plugins.length && (
                 <div className="empty-tip">

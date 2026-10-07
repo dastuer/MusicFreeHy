@@ -397,6 +397,18 @@ export const IconMultiSelect = ({ size = 22, strokeWidth = 1.8 }: IIconProps) =>
 
 export const IconBack = IconChevronLeft;
 
+/** 拖拽手柄（两列六点的 grip 样式） */
+export const IconDragHandle = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
+    <svg {...base(size)} strokeWidth={strokeWidth} fill="currentColor" stroke="none">
+        <circle cx="9" cy="6" r="1.4" />
+        <circle cx="15" cy="6" r="1.4" />
+        <circle cx="9" cy="12" r="1.4" />
+        <circle cx="15" cy="12" r="1.4" />
+        <circle cx="9" cy="18" r="1.4" />
+        <circle cx="15" cy="18" r="1.4" />
+    </svg>
+);
+
 /** 播放中的声波动画小图标 */
 export const IconPlaying = ({ size = 16 }: IIconProps) => (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor" className="icon-playing">

@@ -129,7 +129,8 @@ function LocalMatchBar() {
 /** 「本地音乐」页：本地曲库管理（播放全部 / 喜欢 / 收藏 / 删除 / 多选 / 扫描 / 详情） */
 export default function LocalMusicPage() {
     // 订阅曲库版本号驱动派生数据重算（匹配期间每 1.2s 自增一次）；
-    // version 不能拼进 MusicList 的 listId，否则渐进渲染窗口会被不断重置回前 150 行
+    // toMusicItem 按记录对象缓存结果，版本自增时未匹配到的曲目复用原引用，
+    // 列表只重渲染发生变化的那几行（renderAll 全量展示，不受渐进窗口限制）
     const version = useAtomValue(localMusicVersionAtom);
     const platform = localMusicPlatform();
     // getLocalMusicList 走内存缓存（旧实现每次全量 JSON.parse，是页面卡顿的主因）
@@ -419,6 +420,7 @@ export default function LocalMusicPage() {
                     <MusicList
                         musicList={viewList}
                         listId="localMusic"
+                        renderAll
                         showIndex
                         selectMode={selectMode}
                         selectedKeys={selectedKeys}

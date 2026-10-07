@@ -215,6 +215,8 @@ const MusicListRow = memo(function MusicListRow({
  * 歌曲列表（Pad 形态）：序号/播放中动画、封面、歌名+歌手、专辑（宽屏）、时长、红心、更多。
  * 渐进渲染：导航帧只构建首屏 FIRST_STEP 行，随后每帧补齐 FILL_CHUNK 行到 RENDER_STEP，
  * 滚动触底按 SCROLL_STEP 追加 —— 一次性渲染 150+ 行复杂 DOM 会卡住页面进入动画。
+ * renderAll：分帧补齐到全部行数（不设 150 窗口上限），配合稳定行回调，
+ * 用于本地音乐这类「必须看全」且外部状态会持续刷新的列表。
  * 多选态：序号位变勾选圈，点行切换选中（由页面驱动）。
  */
 
@@ -241,6 +243,7 @@ export default function MusicList({
     extraActions,
     hideDownload = false,
     taskRowOf,
+    renderAll = false,
 }: {
     musicList: IMusic.IMusicItem[];
     listId: string;
@@ -263,6 +266,8 @@ export default function MusicList({
     hideDownload?: boolean;
     /** 行级下载任务：与已完成记录交织成统一列表时，由页面按歌曲返回任务态参数 */
     taskRowOf?: (item: IMusic.IMusicItem) => IMusicListTaskRow | undefined;
+    /** 全量渲染：分帧补齐到全部行数，不设 150 滚动窗口上限（本地音乐页） */
+    renderAll?: boolean;
 }) {
     const currentMusic = useCurrentMusic();
     const musicState = useMusicState();
@@ -280,6 +285,34 @@ export default function MusicList({
         [musicList],
     );
 
+    // 每次渲染同步最新数据到 ref：行回调保持引用稳定（列表重建 / 页面 props
+    // 变化都不换回调），配合 MusicListRow 的 memo，外部状态刷新（本地音乐
+    // 匹配进度、下载进度）时只有数据真正变化的行重渲染。
+    // likedSet 也放这里：handleMore 只读不订阅，喜欢操作刷新的是各行的 liked
+    // prop，不会换 handleMore 引用导致全列表重渲染
+    const latestRef = useRef({
+        safeList,
+        listId,
+        selectMode,
+        onToggleSelect,
+        extraActions,
+        hideDownload,
+        onRemoveItem,
+        removeActionLabel,
+        likedSet,
+    });
+    latestRef.current = {
+        safeList,
+        listId,
+        selectMode,
+        onToggleSelect,
+        extraActions,
+        hideDownload,
+        onRemoveItem,
+        removeActionLabel,
+        likedSet,
+    };
+
     // 换列表重置回首屏窗口
     useEffect(() => {
         setVisibleCount(FIRST_STEP);
@@ -288,9 +321,10 @@ export default function MusicList({
     }, [listId]);
 
     // 首屏后分帧补齐到渲染窗口：每帧 FILL_CHUNK 行，
-    // 避免导航帧一次性构建整个窗口的 DOM 卡住页面进入
+    // 避免导航帧一次性构建整个窗口的 DOM 卡住页面进入；
+    // renderAll 不设 150 上限，补齐到全部行数
     useEffect(() => {
-        const target = Math.min(safeList.length, RENDER_STEP);
+        const target = renderAll ? safeList.length : Math.min(safeList.length, RENDER_STEP);
         if (visibleCount >= target) {
             return;
         }
@@ -298,7 +332,7 @@ export default function MusicList({
             setVisibleCount((c) => Math.min(c + FILL_CHUNK, target));
         });
         return () => cancelAnimationFrame(raf);
-    }, [visibleCount, safeList.length]);
+    }, [visibleCount, safeList.length, renderAll]);
 
     // 已喜欢的集合：一次取喜欢列表建 Set（O(n+m)），不再逐首 isLikedMusic 扫描
     useEffect(() => {
@@ -325,17 +359,18 @@ export default function MusicList({
 
     const visible = safeList.slice(0, visibleCount);
 
-    // 行级回调：全部稳定引用（依赖均为 memo 化数据 / 低频状态），
+    // 行级回调：全部稳定引用（数据从 latestRef 现取，不进依赖），
     // 配合 MusicListRow 的 memo，下载进度等高频刷新时未变化行直接跳过
     const handleRowClick = useCallback(
         (item: IMusic.IMusicItem) => {
-            if (selectMode) {
-                onToggleSelect?.(item);
+            const latest = latestRef.current;
+            if (latest.selectMode) {
+                latest.onToggleSelect?.(item);
                 return;
             }
-            TrackPlayerSingleton.playWithReplacePlayList(item, safeList, listId);
+            TrackPlayerSingleton.playWithReplacePlayList(item, latest.safeList, latest.listId);
         },
-        [selectMode, onToggleSelect, safeList, listId],
+        [],
     );
 
     const handleToggleLike = useCallback((item: IMusic.IMusicItem) => {
@@ -354,6 +389,13 @@ export default function MusicList({
 
     const handleMore = useCallback(
         (item: IMusic.IMusicItem) => {
+            const {
+                extraActions,
+                hideDownload,
+                onRemoveItem,
+                removeActionLabel,
+                likedSet,
+            } = latestRef.current;
             const liked = likedSet.has(`${item.platform}-${item.id}`);
             const actions = [] as any[];
             actions.push({
@@ -446,7 +488,7 @@ export default function MusicList({
             }
             openMusicActions({ musicItem: item, actions });
         },
-        [likedSet, extraActions, hideDownload, onRemoveItem, removeActionLabel, handleToggleLike],
+        [handleToggleLike],
     );
 
     return (

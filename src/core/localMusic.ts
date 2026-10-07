@@ -187,10 +187,23 @@ export function getLocalMusicCount(): number {
     return readLibrary().length;
 }
 
-/** 曲库记录 → 播放器 / 列表用的音乐条目（artwork 转成 WebView 可加载的地址） */
+/**
+ * 曲库记录 → 播放器 / 列表用的音乐条目（artwork 转成 WebView 可加载的地址）。
+ *
+ * 按记录对象缓存转换结果：匹配循环更新记录走的是「原地合并字段」，
+ * 没被匹配的条目对象引用不变，全列表重建时能直接复用缓存的同一音乐项引用，
+ * 让 MusicListRow 的 memo 真正生效（否则每 1.2s 的节流 bump 会让整列表重渲染，
+ * 上千行的本地列表在低端机上会明显卡顿）。
+ */
+const musicItemCache = new WeakMap<ILocalMusicRecord, IMusic.IMusicItem>();
+
 export function toMusicItem(record: ILocalMusicRecord): IMusic.IMusicItem {
+    const cached = musicItemCache.get(record);
+    if (cached) {
+        return cached;
+    }
     const artwork = record.matchedArtwork || record.artwork;
-    return {
+    const item: IMusic.IMusicItem = {
         id: record.localPath,
         platform: "local",
         title: record.title,
@@ -202,6 +215,8 @@ export function toMusicItem(record: ILocalMusicRecord): IMusic.IMusicItem {
         // 匹配到的歌词随条目带给播放器（loadCurrentLyric 优先读 musicItem.lyric）
         ...(record.lyricPath ? { lyric: { lrc: localFileUrl(record.lyricPath) } } : {}),
     };
+    musicItemCache.set(record, item);
+    return item;
 }
 
 /** 按 localPath / id 反查曲库记录（播放器 / 历史里的条目 → 曲库记录） */
