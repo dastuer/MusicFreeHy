@@ -1,9 +1,10 @@
 /**
- * 编译 + 局域网调试快捷脚本（Windows / Git Bash / PowerShell 通用）
+ * 编译 + 局域网调试快捷脚本（Windows / macOS 通用）
  *
  * 用法：
  *   npm run android:connect            # 连接局域网设备（mDNS 自动发现，或 --host ip:port 指定）
  *   npm run android:run                # 编译 Web + 同步 + Gradle 打包 + 安装启动 + 开调试端口
+ *   npm run android:run -- --release   # 打正式签名包安装（手机上已装正式包时用它覆盖，数据保留）
  *   npm run android:run -- --no-build  # 跳过 Web 构建（只重打原生包）
  *   npm run android:live               # 局域网热重载调试：手机加载电脑上的 vite 开发服务器，
  *                                      # 改 src 下代码手机即时生效，无需重新打包
@@ -26,15 +27,34 @@ const PATCHED_CONFIG = path.join(
     "app/src/main/assets/capacitor.config.json",
 );
 
+const IS_WIN = process.platform === "win32";
+
+/** macOS 用系统的 java_home 命令定位 JDK（没有就空着，gradlew 会退回 PATH 里的 java） */
+function macJavaHome() {
+    try {
+        return execFileSync("/usr/libexec/java_home", []).toString().trim();
+    } catch {
+        return "";
+    }
+}
+
+const DEFAULT_SDK = IS_WIN
+    ? "D:\\Android\\Sdk"
+    : path.join(os.homedir(), "Library", "Android", "sdk");
+
 const ENV = {
-    // 注意：默认值优先于继承的 JAVA_HOME —— 本机全局 JAVA_HOME 指向 jdk-11，
+    // 注意：默认值优先于继承的 JAVA_HOME —— Windows 全局 JAVA_HOME 常指向老 JDK，
     // 会让 AGP 8.13 的构建脚本解析失败；确需覆盖时设置 DEVICE_JAVA_HOME
-    JAVA_HOME: process.env.DEVICE_JAVA_HOME || "D:\\Android\\jdk-21.0.12.1+1",
-    ANDROID_HOME: process.env.ANDROID_HOME || "D:\\Android\\Sdk",
+    JAVA_HOME: process.env.DEVICE_JAVA_HOME || (IS_WIN ? "D:\\Android\\jdk-21.0.12.1+1" : macJavaHome()),
+    ANDROID_HOME: process.env.ANDROID_HOME || DEFAULT_SDK,
     // 与 vite.config.ts 的 server.port 保持一致；strictPort 下端口被占会直接报错
     VITE_PORT: process.env.VITE_PORT || "5175",
 };
-const ADB = path.join(ENV.ANDROID_HOME, "platform-tools", "adb.exe");
+const ADB = path.join(
+    ENV.ANDROID_HOME,
+    "platform-tools",
+    IS_WIN ? "adb.exe" : "adb",
+);
 const APP_ID = fs
     .readFileSync(path.join(ANDROID_DIR, "app/build.gradle"), "utf8")
     .match(/applicationId\s+"([^"]+)"/)?.[1];
@@ -141,22 +161,33 @@ async function ensureDevice(hostArg) {
     );
 }
 
-/** Gradle 打 debug 包 */
-async function buildApk() {
-    const gradlew = path.join(ANDROID_DIR, "gradlew.bat");
-    await run("cmd", ["/c", gradlew, "assembleDebug", "--console=plain"], {
+/** Gradle 打包：--release 走正式签名（与手机上已装的包同签名可覆盖），默认 debug */
+async function buildApk(release) {
+    const task = release ? "assembleRelease" : "assembleDebug";
+    if (IS_WIN) {
+        const gradlew = path.join(ANDROID_DIR, "gradlew.bat");
+        await run("cmd", ["/c", gradlew, task, "--console=plain"], {
+            cwd: ANDROID_DIR,
+            env: envForGradle(),
+        });
+        return;
+    }
+    const gradlew = path.join(ANDROID_DIR, "gradlew");
+    await run(gradlew, [task, "--console=plain"], {
         cwd: ANDROID_DIR,
         env: envForGradle(),
     });
 }
 
-const apkPath = path.join(
-    ANDROID_DIR,
-    "app/build/outputs/apk/debug/app-debug.apk",
-);
+const apkPath = (release) =>
+    path.join(
+        ANDROID_DIR,
+        "app/build/outputs/apk",
+        release ? "release/app-release.apk" : "debug/app-debug.apk",
+    );
 
-async function install(serial) {
-    await run(ADB, ["-s", serial, "install", "-r", apkPath]);
+async function install(serial, release) {
+    await run(ADB, ["-s", serial, "install", "-r", apkPath(release)]);
 }
 
 async function launch(serial) {
@@ -217,11 +248,11 @@ async function buildAndSync(skipBuild = false) {
 }
 
 /** 命令：run —— 完整编译安装 */
-async function cmdRun({ noBuild }) {
+async function cmdRun({ noBuild, release }) {
     await buildAndSync(noBuild);
     const serial = await ensureDevice(process.env.DEVICE_HOST);
-    await buildApk();
-    await install(serial);
+    await buildApk(release);
+    await install(serial, release);
     await launch(serial);
     await forwardDevtools(serial);
     printDebugHint(serial);
@@ -383,7 +414,7 @@ async function cmdLive() {
 
 const cmd = process.argv[2];
 const flags = new Set(process.argv.slice(3));
-const options = { noBuild: flags.has("--no-build") };
+const options = { noBuild: flags.has("--no-build"), release: flags.has("--release") };
 
 const commands = {
     connect: cmdConnect,
