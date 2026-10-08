@@ -941,22 +941,19 @@ img {
     font-weight: 600;
 }
 
-/* 滚动行右侧固定的「全部」：卡片底色胶囊，与普通分类区分 */
+/* 滚动行右侧固定的「全部」：普通文字 + 展开箭头 */
 .sheet-tag-all {
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    padding: 4px 12px;
+    padding: 2px 0;
     font-size: 12.5px;
-    font-weight: 600;
-    color: var(--primary-color);
-    background: var(--bg-card);
-    border-radius: 999px;
+    color: var(--text-secondary);
 }
 
 .sheet-tag-all:active {
-    background: var(--active-bg);
+    color: var(--text-tertiary);
 }
 
 /* 歌单分类浮窗（参考原版 MusicFree SheetTags：70vh 底部弹层 + 二级分类） */
