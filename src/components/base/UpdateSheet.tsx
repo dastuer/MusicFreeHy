@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAtomValue } from "jotai";
 import {
     closeUpdateSheet,
@@ -8,6 +8,7 @@ import {
 } from "@/core/uiAtoms";
 import { useBackLayer } from "@/core/systemBack";
 import {
+    canInstallApk,
     cancelUpdateDownload,
     dismissUpdateSheet,
     downloadUpdateApk,
@@ -67,6 +68,36 @@ function UpdateSheetBody({
     const [progress, setProgress] = useState({ loaded: 0, total: 0 });
     const [apkPath, setApkPath] = useState<string | null>(null);
     const [needPermission, setNeedPermission] = useState(false);
+    /** 授权返回后的自动续装只做一次：仍无权限就保持提示，不反复跳授权页 */
+    const autoRetriedRef = useRef(false);
+
+    // 跳「允许安装未知应用」授权页后返回：预检权限，已授权直接续装，不用再手动点
+    useEffect(() => {
+        if (!needPermission || !apkPath) {
+            return undefined;
+        }
+        const onVisible = () => {
+            if (document.visibilityState !== "visible" || autoRetriedRef.current) {
+                return;
+            }
+            autoRetriedRef.current = true;
+            void (async () => {
+                if (!(await canInstallApk())) {
+                    return; // 还没授权：面板上的提示仍在，用户可手动再点
+                }
+                try {
+                    const res = await installUpdateApk(apkPath);
+                    if (!res?.needPermission) {
+                        setNeedPermission(false);
+                    }
+                } catch (e: any) {
+                    showToast(`无法启动安装：${e?.message ?? e ?? "未知错误"}`);
+                }
+            })();
+        };
+        document.addEventListener("visibilitychange", onVisible);
+        return () => document.removeEventListener("visibilitychange", onVisible);
+    }, [needPermission, apkPath]);
 
     const startDownload = () => {
         setNeedPermission(false);
@@ -76,6 +107,8 @@ function UpdateSheetBody({
             .then((path) => {
                 setApkPath(path);
                 setPhase("downloaded");
+                // 下载完成即自动跳安装，不用再点「立即安装」
+                void install(path);
             })
             .catch((e: any) => {
                 setPhase("idle");
@@ -92,12 +125,10 @@ function UpdateSheetBody({
         void cancelUpdateDownload();
     };
 
-    const install = async () => {
-        if (!apkPath) {
-            return;
-        }
+    /** 拉起系统安装器；需授权时面板转入提示态，授权返回由上面的监听自动续装 */
+    const install = async (path: string) => {
         try {
-            const res = await installUpdateApk(apkPath);
+            const res = await installUpdateApk(path);
             if (res?.needPermission) {
                 setNeedPermission(true);
             }
@@ -182,7 +213,7 @@ function UpdateSheetBody({
                                 稍后再说
                             </button>
                         )}
-                        <button className="pill primary" onClick={() => void install()}>
+                        <button className="pill primary" onClick={() => apkPath && void install(apkPath)}>
                             立即安装
                         </button>
                     </>
