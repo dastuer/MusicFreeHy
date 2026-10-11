@@ -1,7 +1,7 @@
 {
-  "versionCode": 4,
-  "versionName": "1.0.3",
-  "changelog": "- 每次启动应用都检查更新（去掉 24 小时节流）\n- 「允许安装未知应用」授权返回后自动继续安装，无需再手动点击",
-  "apkUrl": "https://gitee.com/huaihui/MusicFreeHy/releases/download/v1.0.3/MusicFreeHy-1.0.3.apk",
+  "versionCode": 5,
+  "versionName": "1.0.4",
+  "changelog": "- 下载完成后自动跳转安装，无需二次确认",
+  "apkUrl": "https://gitee.com/huaihui/MusicFreeHy/releases/download/v1.0.4/MusicFreeHy-1.0.4.apk",
   "publishedAt": "2026-10-11"
 }
