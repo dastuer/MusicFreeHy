@@ -1,7 +1,7 @@
 {
-  "versionCode": 2,
-  "versionName": "1.0.1",
-  "changelog": "- 发版 v1.0.1（versionCode 2）\n- 检查更新清单地址分支修正为 main（API 建仓 private 参数未生效导致仓库默认私有，raw 403 的根因）\n- 检查更新清单地址定为 Gitee 仓库 raw 直链\n- 应用内检查更新：Gitee 清单+Release 附件数据源（零 token 只读直链），原生 UpdatePlugin 读版本/落盘路径/拉起安装器，启动 4s 静默检查+设置页手动检查，新版本面板带进度/断点续传/忽略/强制更新；README 移除签名密码明文；含原生音频插件与跨页转场滑动等存量改动\n- 推荐歌单「全部」按钮改普通文字样式：去红色加粗与胶囊背景，改次要文字色纯文字+箭头\n- 本地音乐匹配期间全量展示不再卡 150 首（renderAll + 条目引用缓存 + 稳定行回调），插件管理改 dnd-kit 拖拽排序，音源浮窗删前往插件管理入口\n- 设备脚本兼容 macOS：JDK/SDK 默认路径与 adb/gradlew 按平台取，run 支持 --release 打正式签名包覆盖安装\n- 修复播放详情页音质降级后徽标与音质选择器选中态不一致：选择器勾改为跟随实际播放档，降级时补充说明\n- 新增歌词翻译与队列拖拽排序搜索，耳机拔出自动暂停，单曲循环无缝衔接，定时关闭淡出，菜单补查看歌手收藏入口，电池保活引导与共播开关，歌单标签面板独立组件，修复 capacitor 子项目依赖镜像\n- 新增定时关闭与备份恢复独立页，下载改原生直落磁盘，已下载歌曲可本地播放",
-  "apkUrl": "https://gitee.com/huaihui/MusicFreeHy/releases/download/v1.0.1/MusicFreeHy-1.0.1.apk",
+  "versionCode": 3,
+  "versionName": "1.0.2",
+  "changelog": "- 修复应用内检查更新失败的问题\n- 检查更新功能随本版本首次可用",
+  "apkUrl": "https://gitee.com/huaihui/MusicFreeHy/releases/download/v1.0.2/MusicFreeHy-1.0.2.apk",
   "publishedAt": "2026-10-11"
 }
