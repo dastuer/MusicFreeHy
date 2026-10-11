@@ -44,10 +44,8 @@ export interface ILocalVersion {
     versionName: string;
 }
 
-/** 上次启动自动检查时间戳（24h 节流）；忽略的版本号；均为设备本地偏好，不进备份白名单 */
-const LAST_AUTO_CHECK_KEY = "update.lastAutoCheckAt";
+/** 「忽略此版本」记录（设备本地偏好，不进备份白名单）：启动自动检查不再提示该版本 */
 const IGNORED_VERSION_KEY = "update.ignoredVersionCode";
-const AUTO_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /** 下载通道的任务 ID（原生 downloadProgress 事件按它过滤；与歌曲下载任务不共用命名） */
 const UPDATE_TASK_ID = "app-update-apk";
@@ -123,22 +121,14 @@ export interface ICheckUpdateResult {
 /**
  * 检查更新：拉清单并与本机版本比较。versionCode 为唯一权威；
  * code 相同时比较 versionName，兜住历史包 versionName 写法差异（如 "1.0" vs "1.0.0"）。
- * 静默模式 24h 节流且跳过已忽略版本；手动检查不受限。
+ * 每次启动都会检查（无节流）；「忽略此版本」只对启动自动检查生效，手动检查仍会弹出。
  */
 export async function checkForUpdate(
     options: { manual?: boolean } = {},
 ): Promise<ICheckUpdateResult> {
     const local = await getLocalVersion();
-    const now = Date.now();
-    if (!options.manual) {
-        const last = Number(getConfig(LAST_AUTO_CHECK_KEY, 0));
-        if (now - last < AUTO_CHECK_INTERVAL_MS) {
-            return { manifest: null, local };
-        }
-    }
     const raw = await fetchManifestText(UPDATE_MANIFEST_URL);
     const manifest = parseManifest(raw);
-    setConfig(LAST_AUTO_CHECK_KEY, now);
     const isNewer =
         manifest.versionCode > local.versionCode ||
         (manifest.versionCode === local.versionCode &&
@@ -174,8 +164,8 @@ export async function silentCheckForUpdate(): Promise<void> {
         if (manifest) {
             openUpdateSheet({ manifest, local: await getLocalVersion() });
         }
-    } catch {
-        // 静默失败：无网 / 清单未部署 / 老包缺插件，都不打扰用户
+    } catch (e) {
+        console.warn("[update] 启动自动检查失败", e);
     }
 }
 
@@ -222,6 +212,16 @@ export async function installUpdateApk(
 ): Promise<{ needPermission?: boolean }> {
     const res = await callNativeMethod("AppUpdate", "installApk", { path });
     return res ?? {};
+}
+
+/** 是否已获「安装未知应用」授权：面板在授权页返回后先预检，已授权才自动续装 */
+export async function canInstallApk(): Promise<boolean> {
+    try {
+        const res = await callNativeMethod("AppUpdate", "canInstall");
+        return !!res?.granted;
+    } catch {
+        return false;
+    }
 }
 
 /** 「稍后再说」：下载中先取消（.part 保留），再关面板 */
