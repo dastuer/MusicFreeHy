@@ -98,6 +98,11 @@ export const IconHeart = ({
     </svg>
 );
 
+/** 实心红心：用于「已喜欢」等强调态 */
+export const IconHeartSolid = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
+    <IconHeart size={size} strokeWidth={strokeWidth} filled />
+);
+
 export const IconRepeatOff = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
     <svg {...base(size)} strokeWidth={strokeWidth}>
         <path d="M17 3l3 3-3 3" />
@@ -406,6 +411,23 @@ export const IconDragHandle = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => 
         <circle cx="15" cy="12" r="1.4" />
         <circle cx="9" cy="18" r="1.4" />
         <circle cx="15" cy="18" r="1.4" />
+    </svg>
+);
+
+/** 查看详情（圆圈 i） */
+export const IconInfo = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
+    <svg {...base(size)} strokeWidth={strokeWidth}>
+        <circle cx="12" cy="12" r="8.5" />
+        <path d="M12 11v5" />
+        <path d="M12 8h.01" />
+    </svg>
+);
+
+/** 编辑 / 重命名（铅笔） */
+export const IconEdit = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
+    <svg {...base(size)} strokeWidth={strokeWidth}>
+        <path d="M4 20l1-4L16.5 4.5a2.1 2.1 0 0 1 3 3L8 19l-4 1z" />
+        <path d="M14.5 6.5l3 3" />
     </svg>
 );
 

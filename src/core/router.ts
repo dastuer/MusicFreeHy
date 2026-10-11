@@ -55,6 +55,9 @@ const tabStacksAtom = atom<Record<TabId, ITabStack>>({
 
 const activeTabAtom = atom<TabId>("discover");
 
+/** switchTab 的 skipSlide 一次性登记（手势切换自带滑动时跳过 App 层动画） */
+let skipTabSlideOnce = false;
+
 const store = getDefaultStore();
 
 /** 导航到新页面（压栈，截断前进历史） */
@@ -95,9 +98,18 @@ export function goBack(): boolean {
     return false;
 }
 
-export function switchTab(tab: TabId) {
+export function switchTab(tab: TabId, opts: { skipSlide?: boolean } = {}) {
     pendingPush = false;
+    // 手势切换自带两页跟手滑动，登记跳过 App 层的点击切换滑动动画
+    skipTabSlideOnce = !!opts.skipSlide;
     store.set(activeTabAtom, tab);
+}
+
+/** App 层布局 effect 取走「跳过一次滑动动画」登记；一次一用 */
+export function consumeTabSlideSkip(): boolean {
+    const skip = skipTabSlideOnce;
+    skipTabSlideOnce = false;
+    return skip;
 }
 
 /**

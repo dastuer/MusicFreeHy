@@ -7,7 +7,7 @@ import { tryPluginMethod } from "@/core/pluginUtils";
 import Cover from "@/components/base/Cover";
 import Spinner from "@/components/base/Spinner";
 import PullToRefresh from "@/components/base/PullToRefresh";
-import { navigate, useCurrentRoute } from "@/core/router";
+import { navigate, switchTab, useCurrentRoute } from "@/core/router";
 import {
     IconMenu,
     IconSearch,
@@ -23,6 +23,7 @@ import { getMusicHistory } from "@/core/musicHistory";
 import { formatPlayCount } from "@/core/utils";
 import { useTabSwipe } from "./useTabSwipe";
 import SheetTagsPanel from "./SheetTagsPanel";
+import MyMusicPage from "@/pages/myMusic";
 
 /**
  * 发现页：参考网易云音乐手机版首页。
@@ -31,6 +32,8 @@ import SheetTagsPanel from "./SheetTagsPanel";
  *  - 排行榜：榜单分组（来自音源插件 getTopLists）
  * 三个子页横向排布做页面缓存：始终挂载，切换 Tab / 跳转详情都不会卸载，
  * 已加载数据与滚动位置原样保留；支持左右滑动切换（useTabSwipe），
+ * 排行榜子页左滑跨切到「我的」Tab——轨道末尾常驻「我的」整页面板，
+ * 滑动过程实时露出其内容，松手补完成后交接（与「我的」页右滑切回成对），
  * 下拉可手动刷新当前页数据。
  */
 
@@ -61,6 +64,9 @@ export default function HomePage() {
         index: tabIndex,
         onIndexChange: (i) => setTab(TABS[i].id),
         enabled: routeActive,
+        // 排行榜左滑跨切到「我的」（末页右侧的跨页面板真实翻页露出内容）；
+        // 手势自带滑动，跳过 App 层的 Tab 点击动画
+        onCrossSwipe: () => switchTab("mine", { skipSlide: true }),
     });
 
     return (
@@ -90,7 +96,9 @@ export default function HomePage() {
                 </button>
             </div>
 
-            {/* 三个子页横向排布常驻，切 tab / 手势滑动平移轨道；数据缓存由各自组件内的状态承担 */}
+            {/* 三个子页 + 「我的」跨页面板横向排布常驻，切 tab / 手势滑动平移轨道；
+                数据缓存由各自组件内的状态承担。「我的」面板只在排行榜左滑时露出，
+                与路由层的「我的」页内容一致，切换瞬间无缝接管 */}
             <div className="home-panes" ref={panesRef}>
                 <div className="home-panes-track" ref={trackRef}>
                     <RecommendTab
@@ -100,6 +108,9 @@ export default function HomePage() {
                     />
                     <SheetsTab visible={routeActive} />
                     <TopListTab visible={routeActive} />
+                    <div className="home-pane">
+                        <MyMusicPage crossSwipe={false} />
+                    </div>
                 </div>
             </div>
         </div>

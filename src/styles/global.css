@@ -89,6 +89,8 @@ img {
     flex: 1;
     min-height: 0;
     position: relative;
+    /* 「我的」⇄「发现」跨页滑动时两页整屏平移，滑出屏的一侧由这里裁掉 */
+    overflow: hidden;
 }
 
 .page {
@@ -277,10 +279,6 @@ img {
 
 .icon-btn:active {
     opacity: 0.6;
-}
-
-.like-btn.liked {
-    color: var(--primary-color);
 }
 
 .section-title {
@@ -943,6 +941,7 @@ img {
 
 /* 滚动行右侧固定的「全部」：普通文字 + 展开箭头 */
 .sheet-tag-all {
+    position: relative;
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
@@ -950,6 +949,18 @@ img {
     padding: 2px 0;
     font-size: 12.5px;
     color: var(--text-secondary);
+}
+
+/* 左侧渐隐投影：用页面底色盖住滑到右缘的分类，区分固定按钮与滚动内容 */
+.sheet-tag-all::before {
+    content: "";
+    position: absolute;
+    top: -6px;
+    bottom: -6px;
+    right: 100%;
+    width: 24px;
+    background: linear-gradient(to right, transparent, var(--page-bg));
+    pointer-events: none;
 }
 
 .sheet-tag-all:active {
@@ -1237,7 +1248,9 @@ img {
     opacity: 0.55;
 }
 
-/* 多选底部操作栏：下载 / 收藏 / 删除 */
+/* 多选底部操作栏：下载 / 收藏 / 删除
+   贴底策略：列表超一屏时由 sticky 在滚动中吸附在页底；
+   不满一屏时由 .page.selecting 的 flex 列 + margin-top:auto 压到底 */
 .select-actions-bar {
     position: sticky;
     bottom: 0;
@@ -1248,6 +1261,21 @@ img {
     padding: 6px 10px calc(10px + var(--safe-bottom));
     background: var(--page-bg);
     border-top: 1px solid var(--divider);
+}
+
+/* 多选态页面：转为 flex 列让操作栏始终落在页底；
+   子项禁用收缩，防止长列表被 flex 压缩而不滚动 */
+.page.selecting {
+    display: flex;
+    flex-direction: column;
+}
+
+.page.selecting > * {
+    flex-shrink: 0;
+}
+
+.page.selecting .select-actions-bar {
+    margin-top: auto;
 }
 
 .select-action {
@@ -2019,12 +2047,24 @@ img {
 }
 
 .action-sheet-item {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 12px;
     width: 100%;
     text-align: left;
     padding: 13px 12px;
     font-size: 14.5px;
     border-radius: 10px;
+    color: var(--text-color);
+}
+
+.action-sheet-item > svg {
+    flex-shrink: 0;
+    color: var(--text-secondary);
+}
+
+.action-sheet-item.danger > svg {
+    color: var(--primary-color);
 }
 
 .action-sheet-item:active {
@@ -2037,7 +2077,8 @@ img {
 
 .cancel {
     margin-top: 6px;
-    display: block;
+    display: flex;
+    justify-content: center;
     width: 100%;
     padding: 13px;
     text-align: center;
@@ -2401,6 +2442,95 @@ img {
 }
 
 .sleep-timer-actions .pill {
+    flex: 1;
+    justify-content: center;
+    padding: 11px;
+}
+
+
+/* ---------- 检查更新面板 ---------- */
+
+.update-panel {
+    width: 100%;
+    max-width: var(--page-max);
+    background: var(--bg-elev);
+    border-radius: 18px 18px 0 0;
+    padding: 16px 16px calc(16px + var(--safe-bottom));
+    animation: sheet-up 0.22s ease-out;
+}
+
+.update-panel-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 15px;
+    font-weight: 700;
+    padding: 0 2px 10px;
+    font-variant-numeric: tabular-nums;
+}
+
+.update-panel-date {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.update-panel-version {
+    padding: 0 2px 12px;
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--divider);
+}
+
+.update-panel-force {
+    color: var(--primary-color);
+}
+
+.update-panel-log {
+    max-height: 32vh;
+    overflow-y: auto;
+    margin: 12px 2px 0;
+    padding: 12px;
+    border-radius: 10px;
+    background: var(--hover-bg);
+    font-size: 13.5px;
+    line-height: 1.7;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text-color);
+}
+
+.update-panel-progress {
+    margin: 12px 2px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.update-panel-progress-text {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+/* 授权提示（需「允许安装未知应用」）与强制更新说明 */
+.update-panel-tip {
+    margin: 10px 2px 0;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+}
+
+.update-panel-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 14px;
+}
+
+.update-panel-actions .pill {
     flex: 1;
     justify-content: center;
     padding: 11px;

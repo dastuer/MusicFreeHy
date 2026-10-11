@@ -23,18 +23,22 @@ export default function MusicActionSheet() {
                         {state.subtitle ?? state.musicItem.artist}
                     </div>
                 </div>
-                {state.actions.map((action, idx) => (
-                    <button
-                        key={idx}
-                        className={`action-sheet-item ${action.danger ? "danger" : ""}`}
-                        onClick={() => {
-                            closeMusicActions();
-                            action.onClick();
-                        }}
-                    >
-                        {action.label}
-                    </button>
-                ))}
+                {state.actions.map((action, idx) => {
+                    const Icon = action.icon;
+                    return (
+                        <button
+                            key={idx}
+                            className={`action-sheet-item ${action.danger ? "danger" : ""}`}
+                            onClick={() => {
+                                closeMusicActions();
+                                action.onClick();
+                            }}
+                        >
+                            {Icon ? <Icon size={18} strokeWidth={1.8} /> : null}
+                            <span>{action.label}</span>
+                        </button>
+                    );
+                })}
                 <button className="action-sheet-item cancel" onClick={() => closeMusicActions()}>
                     取消
                 </button>

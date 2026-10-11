@@ -13,7 +13,8 @@ import {
     getLocalMusicCount,
     localMusicVersionAtom,
 } from "@/core/localMusic";
-import { navigate } from "@/core/router";
+import { navigate, switchTab } from "@/core/router";
+import { useSwipeToDiscover } from "./useSwipeToDiscover";
 import { openPrompt, openMusicActions, openDrawer, showToast } from "@/core/uiAtoms";
 import Cover from "@/components/base/Cover";
 import {
@@ -22,17 +23,28 @@ import {
     IconMenu,
     IconHistory,
     IconDownload,
+    IconEdit,
     IconFolderMusic,
     IconHeart,
     IconListMusic,
     IconChevronRight,
+    IconPlayCircle,
     IconPlay,
     IconSearch,
+    IconTrash,
 } from "@/components/base/Icons";
 import { TrackPlayerSingleton } from "@/core/trackPlayer";
 
 /** 我的页：我的歌单（含我喜欢的音乐）/ 本地音乐 / 播放历史 / 设置；音源、插件等低频入口收进左上角侧边栏 */
-export default function MyMusicPage() {
+export default function MyMusicPage({ crossSwipe = true }: { crossSwipe?: boolean }) {
+    // 整页右滑切回「发现」（回到离开时的排行榜子页），与排行榜左滑跨切到本页成对；
+    // 手势自带两页跟手滑动，skipSlide 跳过 App 层的 Tab 点击动画。
+    // 发现页轨道里还常驻一份本页副本（跨页面板），副本禁用手势避免重复绑事件
+    const pageRef = useSwipeToDiscover(
+        () => switchTab("discover", { skipSlide: true }),
+        crossSwipe,
+    );
+
     const sheetsVersion = useAtomValue(sheetsVersionAtom);
     const downloadsVersion = useAtomValue(downloadsVersionAtom);
     const localVersion = useAtomValue(localMusicVersionAtom);
@@ -64,7 +76,7 @@ export default function MyMusicPage() {
     };
 
     return (
-        <div className="page">
+        <div className="page" ref={pageRef}>
             <div className="mine-topbar">
                 <button className="icon-btn" onClick={() => openDrawer()}>
                     <IconMenu size={22} />
@@ -187,6 +199,7 @@ export default function MyMusicPage() {
                                     actions: [
                                         {
                                             label: "重命名歌单",
+                                            icon: IconEdit,
                                             onClick: () => {
                                                 openPrompt({
                                                     title: "重命名歌单",
@@ -205,6 +218,7 @@ export default function MyMusicPage() {
                                         },
                                         {
                                             label: "播放歌单",
+                                            icon: IconPlayCircle,
                                             onClick: () => {
                                                 if (sheet.musicList?.length) {
                                                     TrackPlayerSingleton.playWithReplacePlayList(
@@ -219,6 +233,7 @@ export default function MyMusicPage() {
                                         },
                                         {
                                             label: "删除歌单",
+                                            icon: IconTrash,
                                             danger: true,
                                             onClick: () => {
                                                 deleteSheet(sheet.id);

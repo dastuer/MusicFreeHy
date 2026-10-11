@@ -83,6 +83,10 @@ public class MediaPlaybackService extends Service {
     /** 上次上报进度时的时间戳，播放中用它外推出「现在的进度」 */
     private static volatile long sPositionWall = 0;
     private static volatile float sRate = 1f;
+    /** 持续部分唤醒锁超时时长：快进/长歌兜底，防 ROM 异常掉锁（2 小时） */
+    private static final long WAKELOCK_TIMEOUT_MS = 2 * 60 * 60 * 1000L;
+    /** 前台心跳间隔：唤醒锁 + WiFi 锁被系统悄悄释放时重新按住 */
+    private static final long KEEPALIVE_INTERVAL_MS = 30 * 1000L;
 
     private static MediaPlaybackService instance;
 
@@ -97,6 +101,15 @@ public class MediaPlaybackService extends Service {
     /** 熄屏后 CPU 可能休眠、WiFi 会进省电模式，流式播放期间得按住这两把锁 */
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
+    /** 前台心跳：校验唤醒锁 / WiFi 锁仍被持有（MIUI 等 ROM 会悄悄释放它们） */
+    private final Runnable keepAliveTick = new Runnable() {
+        @Override
+        public void run() {
+            updateKeepAlive();
+            main.postDelayed(this, KEEPALIVE_INTERVAL_MS);
+        }
+    };
+    private boolean keepAliveTicking = false;
     /** 输出设备监听：拔耳机 / 断蓝牙时暂停，避免声音从外放突然炸出来 */
     private AudioManager audioManager;
     private AudioDeviceCallback audioDeviceCallback;
@@ -209,6 +222,8 @@ public class MediaPlaybackService extends Service {
     @Override
     public void onDestroy() {
         releaseKeepAlive();
+        main.removeCallbacks(keepAliveTick);
+        keepAliveTicking = false;
         if (audioManager != null && audioDeviceCallback != null) {
             try {
                 audioManager.unregisterAudioDeviceCallback(audioDeviceCallback);
@@ -317,6 +332,7 @@ public class MediaPlaybackService extends Service {
         }
         // 音频本体在 WebView 里，熄屏后 WiFi 休眠 / CPU 深眠会直接掐断取流
         updateKeepAlive();
+        updateKeepAliveTick();
     }
 
     /** 播放中持有唤醒锁与 WiFi 锁，暂停/停止即释放 */
@@ -330,7 +346,9 @@ public class MediaPlaybackService extends Service {
                         wakeLock.setReferenceCounted(false);
                     }
                     if (!wakeLock.isHeld()) {
-                        wakeLock.acquire();
+                        // 传超时参数防 ROM 异常掉锁：锁能持续整首歌，
+                        // 不会被系统回收（参考 ExoPlayer setWakeMode 的实现思路）
+                        wakeLock.acquire(WAKELOCK_TIMEOUT_MS);
                     }
                 }
             } catch (Exception e) {
@@ -356,6 +374,19 @@ public class MediaPlaybackService extends Service {
             }
         } else {
             releaseKeepAlive();
+        }
+    }
+
+    /** 播放中起前台心跳：校验唤醒锁 / WiFi 锁仍被持有，掉了就重新按住 */
+    private void updateKeepAliveTick() {
+        if (sPlaying) {
+            if (!keepAliveTicking) {
+                keepAliveTicking = true;
+                main.postDelayed(keepAliveTick, KEEPALIVE_INTERVAL_MS);
+            }
+        } else if (keepAliveTicking) {
+            keepAliveTicking = false;
+            main.removeCallbacks(keepAliveTick);
         }
     }
 
@@ -570,6 +601,8 @@ public class MediaPlaybackService extends Service {
 
     private void shutdown() {
         releaseKeepAlive();
+        main.removeCallbacks(keepAliveTick);
+        keepAliveTicking = false;
         if (notifications != null) {
             try {
                 notifications.cancel(NOTIFICATION_ID);

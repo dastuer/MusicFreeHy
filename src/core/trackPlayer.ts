@@ -6,6 +6,11 @@ import { setMusicHistory } from "./musicHistory";
 import { getQuality, setQuality, getConfig, getAllowCoPlay } from "./appConfig";
 import { localFileUrl } from "./native";
 import { lookupCachedSrc, requestAudioCacheStore } from "./audioCache";
+import {
+    createAudioElement,
+    destroyAudioBackend,
+    NativeAudioElement,
+} from "./nativeAudio";
 
 export type MusicState = "playing" | "paused" | "stopped" | "loading";
 export type MusicRepeatMode = "off" | "queue" | "single";
@@ -65,11 +70,6 @@ const MAX_HISTORY = 50;
 const MIN_REMEMBER_POSITION = 5;
 const END_GAP = 5;
 
-/** 共播模式下被抢焦点后的续播延迟（等对方的焦点请求落定再回抢） */
-const CO_PLAY_RESUME_DELAY = 300;
-/** 续播冷却：15 秒内只回抢一次，对方再抢就让位，免得两边来回抢占打架 */
-const CO_PLAY_RESUME_COOLDOWN = 15000;
-
 /**
  * 队列里认一首歌用的键。与 `musicSheet` 的 `mediaKey` 同一约定。
  */
@@ -94,8 +94,8 @@ function toQueueableList(musicItems: IMusic.IMusicItem[]) {
     });
 }
 
-/** MediaError 转成人话（见 HTMLMediaElement.error） */
-function describeMediaError(err?: MediaError | null) {
+/** MediaError 转成人话（见 HTMLMediaElement.error；原生后端错误同形） */
+function describeMediaError(err?: Pick<MediaError, "code" | "message"> | null) {
     switch (err?.code) {
         case 1:
             return "音频加载被中断";
@@ -148,7 +148,7 @@ const SEAMLESS_RESEEK_GAP = 1500;
 const SEAMLESS_KICK_DELAY = 3000;
 
 /** `position` 之后连续可播的缓冲末端；没落进缓冲区间返回 0 */
-function bufferedEndAfter(audio: HTMLAudioElement, position: number): number {
+function bufferedEndAfter(audio: AudioBackend, position: number): number {
     const ranges = audio.buffered;
     let end = 0;
     for (let i = 0; i < ranges.length; i++) {
@@ -158,6 +158,51 @@ function bufferedEndAfter(audio: HTMLAudioElement, position: number): number {
         }
     }
     return end;
+}
+
+/** ---------- 无缝切下一首（后台预加载 + 交接） ---------- */
+
+/**
+ * 换歌的空隙来自两段：插件解析音源（最长 15s）+ 音频加载缓冲。
+ * 当前歌剩 NEXT_PRELOAD_AHEAD 秒时就把下一首的这两段提前做完，播完零间隙续上：
+ *  - WebView 后端：解析出直链后另开一个 <audio> 预缓冲，ended 时直接交接（同切音质的 probe 模式）；
+ *  - 原生 ExoPlayer 后端（单实例，双播放器会顶掉正在播的歌）：把下一首 append 进
+ *    播放列表，ExoPlayer 自己预缓冲并在当前曲目播完时无缝自动续播，JS 只在
+ *    itemtransition 事件里做换歌簿记（弹 atom / 刷媒体会话），不碰播放器。
+ * 任一环节不顺利（解析失败 / 缓冲不动）就放弃预加载，ended 时走原有换歌链路兜底。
+ */
+
+/** 剩余多少秒开始预加载下一首 */
+const NEXT_PRELOAD_AHEAD = 30;
+
+/** 预加载失败后同曲多久内不重试（避免坏音源在结尾反复打插件） */
+const NEXT_PRELOAD_RETRY_AFTER = 60000;
+
+/** WebView 预缓冲元素视为就绪的最小缓冲秒数 */
+const NEXT_PRELOAD_PROBE_LEAD = 3;
+
+/** 预缓冲迟迟没有数据时静音催流的等待时间（iOS 会无视未开播元素的 preload） */
+const NEXT_PRELOAD_KICK_DELAY = 3000;
+
+/** 预缓冲就绪轮询间隔 */
+const NEXT_PRELOAD_POLL = 1000;
+
+/** 下一首的预加载记录 */
+interface INextTrackPreload {
+    musicItem: IMusic.IMusicItem;
+    /** resolveMediaUrl 的成功结果（commit 时的音质 / 音源状态以它为准） */
+    resolved: {
+        src: string;
+        source?: IPlugin.IMediaSourceResult;
+        quality: IMusic.IQualityKey | null;
+        localDownload?: true;
+    } | null;
+    /** 缓存判定后的最终播放地址 */
+    playSrc: string | null;
+    /** WebView 后端：预缓冲用的临时播放器 */
+    probe: AudioBackend | null;
+    /** 原生后端：是否已 append 进 ExoPlayer 播放列表 */
+    appended: boolean;
 }
 
 /**
@@ -308,8 +353,14 @@ export function setDownloadedSourceResolver(
 
 /** ---------- 播放器 ---------- */
 
+/**
+ * 播放器后端：Android 上优先 ExoPlayer 代理（不参与音频焦点仲裁 + 大缓冲，
+ * 共播时抖音抢焦点不影响播放），插件缺失回退 WebView <audio>。
+ */
+type AudioBackend = HTMLAudioElement | NativeAudioElement;
+
 class TrackPlayer extends EventEmitter {
-    private audio: HTMLAudioElement | null = null;
+    private audio: AudioBackend | null = null;
     private _repeatMode: MusicRepeatMode = "off";
     private _playList: IMusic.IMusicItem[] = [];
     /** 当前队列是哪份列表装进来的（整队替换标识，重启时跟着队列一起还原） */
@@ -336,7 +387,7 @@ class TrackPlayer extends EventEmitter {
     private qualityRetrying = false;
     private qualityRetryCount = 0;
     /** 无缝切音质时后台缓冲用的临时播放器，交接后变成主播放器 */
-    private probeAudio: HTMLAudioElement | null = null;
+    private probeAudio: AudioBackend | null = null;
     /** 在途切换的序号：换歌 / 再次切换时用它作废旧预取 */
     private qualitySwitchSeq = 0;
     /** 当前播放是否来自「已下载的本地文件」：失败兜底与音质切换按 localPath 同规则处理 */
@@ -345,21 +396,61 @@ class TrackPlayer extends EventEmitter {
     private localDownloadBypass = new Set<string>();
     /** 接下来的一次 pause 事件是应用主动发起的（区别于系统抢音频焦点打断） */
     private internalPausePending = false;
-    /** 主动暂停的序号：共播续播定时器靠它识别「用户在延迟窗口里按了暂停」 */
+    /** 用户主动暂停了（播放键 / 通知栏 / 耳机）：共播回抢据此让位，换歌/恢复播放时清零 */
+    private userPaused = false;
+    /** 主动暂停的序号：标记共播回抢发生过的会话序号 */
     private userPauseSeq = 0;
-    /** 上次共播续播的时间点，冷却期内不再回抢 */
-    private lastCoPlayResumeAt = 0;
+    /** 共播续播巡逻的定时器：后台页面定时器被强节流，靠 visibilitychange 补跑 */
+    private coPlayResumeTimer: ReturnType<typeof setTimeout> | null = null;
+    /** 正在执行的共播续播尝试序号：换歌 / 用户暂停时作废在途 play() */
+    private coPlayResumeSeq = 0;
+    /** 下一首的预加载记录（null = 没有在途预加载） */
+    private nextPreload: INextTrackPreload | null = null;
+    /** 预加载会话序号：换歌 / 队列变动 / 换音质时作废在途预加载 */
+    private nextPreloadSeq = 0;
+    /** 预加载流程启动中（resolve 是异步的，防止 timeupdate 高频重入） */
+    private preloadStarting = false;
+    /** 最近一次预加载失败的曲键与时间：同曲一段时间内不再撞同一个坏音源 */
+    private preloadFailedKey = "";
+    private preloadFailedAt = 0;
 
     setup() {
         if (this.audio) {
             return;
         }
-        const audio = new Audio();
+        // 先造 WebView <audio> 占位（探测是异步的，别让首播等它）；
+        // 原生后端可用时无缝换成 ExoPlayer 代理。
+        const audio: AudioBackend = new Audio();
         audio.preload = "auto";
         audio.volume = getStoredVolume();
         this.attachAudioListeners(audio);
         this.audio = audio;
         applyCoPlaySessionType();
+        void createAudioElement().then((backend) => {
+            if (this.audio !== audio) {
+                return; // 期间已经被换掉（理论不可能，防御）
+            }
+            const previous = this.audio;
+            // 占位 <audio> 已在播：换后端后按原进度续播（探测通常几十毫秒内完成，
+            // 冷启动抢在这个窗口开播的概率很低，但仍要兜住）
+            const wasPlaying = !!previous.src && !previous.paused && !previous.error;
+            const resumePosition = previous.currentTime || 0;
+            const resumeSrc = previous.src;
+            backend.preload = "auto";
+            backend.volume = getStoredVolume();
+            this.attachAudioListeners(backend);
+            this.audio = backend;
+            this.destroyAudioElement(previous);
+            this.syncLoopFlag();
+            this.applyNativeFocusMode();
+            if (wasPlaying && this._currentMusic) {
+                backend.src = resumeSrc;
+                this.applyStartPosition(backend, resumePosition);
+                backend.play().catch((e: any) => {
+                    console.warn("[trackPlayer] 原生后端接管起播失败", e?.name ?? e);
+                });
+            }
+        });
 
         // Pad 版：切后台 / 关页面前把「听到哪儿」写进 localStorage（桌面端是退出握手写 session.json）
         const persist = () => this.persistProgress();
@@ -374,7 +465,7 @@ class TrackPlayer extends EventEmitter {
         this.syncLoopFlag();
     }
 
-    private attachAudioListeners(audio: HTMLAudioElement) {
+    private attachAudioListeners(audio: AudioBackend) {
         audio.addEventListener("ended", this.onEnded);
         audio.addEventListener("timeupdate", this.onProgress);
         audio.addEventListener("loadedmetadata", this.onProgress);
@@ -384,9 +475,11 @@ class TrackPlayer extends EventEmitter {
         audio.addEventListener("error", this.onAudioError);
         audio.addEventListener("waiting", this.onAudioWaiting);
         audio.addEventListener("stalled", this.onAudioStall);
+        // 仅原生后端会发：ExoPlayer 播完当前曲目自动续播预载的下一首
+        audio.addEventListener("itemtransition", this.onItemTransition);
     }
 
-    private detachAudioListeners(audio: HTMLAudioElement) {
+    private detachAudioListeners(audio: AudioBackend) {
         audio.removeEventListener("ended", this.onEnded);
         audio.removeEventListener("timeupdate", this.onProgress);
         audio.removeEventListener("loadedmetadata", this.onProgress);
@@ -396,18 +489,13 @@ class TrackPlayer extends EventEmitter {
         audio.removeEventListener("error", this.onAudioError);
         audio.removeEventListener("waiting", this.onAudioWaiting);
         audio.removeEventListener("stalled", this.onAudioStall);
+        audio.removeEventListener("itemtransition", this.onItemTransition);
     }
 
     /** 彻底弃用一个播放器实例：摘掉监听，免得它的 pause/error 事件回头改状态 */
-    private destroyAudioElement(audio: HTMLAudioElement) {
+    private destroyAudioElement(audio: AudioBackend) {
         this.detachAudioListeners(audio);
-        audio.pause();
-        audio.removeAttribute("src");
-        try {
-            audio.load();
-        } catch {
-            // ignore
-        }
+        destroyAudioBackend(audio);
     }
 
     /**
@@ -525,6 +613,16 @@ class TrackPlayer extends EventEmitter {
         };
         setAtom(progressAtom, progress);
         this.emit(TrackPlayerEvents.ProgressChanged, progress);
+        const remaining =
+            Number.isFinite(progress.duration) && progress.duration > 0
+                ? progress.duration - progress.position
+                : Infinity;
+        this.maybeStartNextTrackPreload(remaining);
+        // seek 回中段后剩余时间又变多了：停掉被静音催播的预缓冲元素，别让它白跑
+        const probe = this.nextPreload?.probe;
+        if (probe && !probe.paused && remaining > NEXT_PRELOAD_AHEAD) {
+            probe.pause();
+        }
     };
 
     private clearStallWatch = () => {
@@ -585,51 +683,134 @@ class TrackPlayer extends EventEmitter {
         if (this.isLoading) {
             return;
         }
+        if (internal) {
+            this.userPaused = true;
+        }
         if (this._currentMusic) {
             setAtom(musicStateAtom, "paused");
         }
         this.syncMediaSessionState();
         if (!internal) {
-            this.maybeResumeAfterFocusLoss();
+            this.handleFocusLossSilently();
         }
     };
 
     /**
      * 共播模式下被抢了音频焦点（其他应用开播把 WebView 的播放暂停了）：
-     * 稍等对方落定后原地续播。冷却期内再被抢就让位，免得两边来回抢占。
+     * 先同步回抢一次，抢不回来就进「续播巡逻」——短暂停表后按指数退避重试，
+     * 直到续播成功 / 用户暂停 / 换歌 / 巡逻时间耗尽。
+     *
+     * 为什么单次回抢不够（刷抖音卡顿暂停的实测根因）：抖音这种「声明 TRANSIENT
+     * 焦点再立即放弃」的高频抢焦点应用，会在 pause 事件同帧再次抢走焦点，此时
+     * 同步 play() 常抛 AbortError；而页面在后台时定时器被内核强节流，旧实现
+     * 又没有重试，让位一次就永久停了（已暂停的页面没有任何事件能再触发续播）。
+     * 音频焦点只是建议性的，系统本来就允许两个流混音：巡逻期每次 play() 成功后
+     * 音频与对方同时出声（参考网易云的做法：抢不过就等它松手再续，而不是让位）。
+     *
+     * 原生后端（ExoPlayer）下这个方法不会被触发：共播开时根本不参与焦点仲裁，
+     * 没有任何外部应用能让我们暂停 —— 这正是把播放搬出 WebView 的意义。
+     *
+     * 全程静默：不翻 UI 播放态、不刷媒体通知，避免焦点拉锯时界面抖动。
+     * 用户主动暂停（暂停键/通知栏/换歌）走 internalPausePending，不进这里。
      */
-    private maybeResumeAfterFocusLoss() {
+    private handleFocusLossSilently() {
         const audio = this.audio;
         if (
             !getAllowCoPlay()
+            || this.userPaused
             || !audio
             || !this._currentMusic
             || !audio.src
             || audio.ended
             || audio.error
             || this.reconnecting
-            || Date.now() - this.lastCoPlayResumeAt < CO_PLAY_RESUME_COOLDOWN
+            || this.qualityRetrying
         ) {
             return;
         }
-        this.lastCoPlayResumeAt = Date.now();
-        const audioAtSchedule = audio;
-        const pauseSeqAtSchedule = this.userPauseSeq;
-        setTimeout(() => {
-            // 延迟窗口里用户自己按了暂停 / 换了歌 / 出错了就不再续
-            if (
-                this.audio === audioAtSchedule
-                && this.userPauseSeq === pauseSeqAtSchedule
-                && this._currentMusic
-                && audioAtSchedule.paused
-                && !audioAtSchedule.ended
-                && !audioAtSchedule.error
-            ) {
-                audioAtSchedule.play().catch((e) => {
-                    console.warn("[trackPlayer] 共播续播失败", e?.name ?? e);
-                });
+        const seq = ++this.coPlayResumeSeq;
+        audio.play().catch((e) => {
+            if (seq !== this.coPlayResumeSeq || audio !== this.audio || this.userPaused) {
+                return;
             }
-        }, CO_PLAY_RESUME_DELAY);
+            console.warn("[trackPlayer] 共播回抢被拦截，转入续播巡逻", e?.name ?? e);
+            this.startCoPlayResumeWatch(seq);
+        });
+    }
+
+    /**
+     * 把共播开关同步给原生后端的焦点策略：
+     * 共播开 → ExoPlayer 不参与音频焦点仲裁（抖音随便抢，我们不动）；
+     * 共播关 → 正常仲裁（别人开播我们让位暂停）。
+     * WebView 回退路径没有这个能力，靠上面的巡逻兜底。
+     */
+    applyNativeFocusMode() {
+        const audio = this.audio;
+        if (audio instanceof NativeAudioElement) {
+            audio.setAudioFocusMode(!getAllowCoPlay());
+        }
+    }
+
+    /**
+     * 续播巡逻：play() 被拒后按 300ms→600ms→…（上限 2s）退避重试，总巡逻 45s。
+     * 后台页面 setInterval 可能被节流到 1 次/分钟，所以另挂 visibilitychange
+     * 兜底：抖音退后台 / 用户切回来时立刻补一次，不让「页面不可见」拖死巡逻。
+     */
+    private startCoPlayResumeWatch(seq: number) {
+        this.stopCoPlayResumeWatch();
+        let delay = 300;
+        const startedAt = Date.now();
+        const attempt = () => {
+            this.coPlayResumeTimer = null;
+            const audio = this.audio;
+            if (
+                seq !== this.coPlayResumeSeq
+                || !audio
+                || !audio.src
+                || this.userPaused
+                || !getAllowCoPlay()
+            ) {
+                this.stopCoPlayResumeWatch();
+                return;
+            }
+            if (!audio.paused) {
+                // 已续上（可能是回抢成功 / 用户点了播放）
+                this.stopCoPlayResumeWatch();
+                return;
+            }
+            if (Date.now() - startedAt > 45000) {
+                this.stopCoPlayResumeWatch();
+                console.warn("[trackPlayer] 共播续播巡逻超时，保持暂停");
+                return;
+            }
+            audio.play().catch(() => {
+                // 仍被焦点占用 / 自动播放拦截：等下一轮
+            });
+            delay = Math.min(delay * 2, 2000);
+            this.coPlayResumeTimer = setTimeout(attempt, delay);
+        };
+        this.coPlayResumeTimer = setTimeout(attempt, delay);
+        document.addEventListener("visibilitychange", this.coPlayResumeOnVisible);
+    }
+
+    private coPlayResumeOnVisible = () => {
+        if (document.visibilityState === "visible" && this.coPlayResumeTimer) {
+            // 回前台立刻补一次，别干等被节流的 interval
+            const audio = this.audio;
+            if (audio?.paused && audio.src && !this.userPaused && getAllowCoPlay()) {
+            audio.play().catch(() => {
+                // 失败无妨，定时器还在巡逻
+            });
+            }
+        }
+    };
+
+    private stopCoPlayResumeWatch() {
+        if (this.coPlayResumeTimer) {
+            clearTimeout(this.coPlayResumeTimer);
+            this.coPlayResumeTimer = null;
+        }
+        document.removeEventListener("visibilitychange", this.coPlayResumeOnVisible);
     }
 
     private onAudioPlay = () => {
@@ -759,7 +940,7 @@ class TrackPlayer extends EventEmitter {
     }
 
     /** 把播放位置摆到目标处（HAVE_NOTHING 时赋值会成为「默认起播位置」） */
-    private applyStartPosition(audio: HTMLAudioElement, position: number) {
+    private applyStartPosition(audio: AudioBackend, position: number) {
         if (!(position > 0) || !Number.isFinite(position)) {
             return;
         }
@@ -881,6 +1062,10 @@ class TrackPlayer extends EventEmitter {
         if (!this._currentMusic) {
             return;
         }
+        // 下一首已预加载好：直接交接，跳过「解析音源 + 重新加载」的空隙
+        if (await this.tryCommitPreloadedNext()) {
+            return;
+        }
         if (this.pendingNextIndex() >= 0) {
             await this.skipToNext();
             return;
@@ -919,6 +1104,318 @@ class TrackPlayer extends EventEmitter {
         }
         await this.skipToNext();
     };
+
+    /** ---------- 下一首预加载 ---------- */
+
+    /**
+     * 按换歌语义算出「接下来会播的那首」：待播（下一首播放）优先，其次队列顺序，
+     * 与 onEnded / skipToNext 的取歌规则一致。没有下一首（队列空 / 单曲列表外的
+     * repeat off 收尾）返回 null。单曲循环交给 audio.loop，不参与预加载。
+     */
+    private async computeNextMusicItem(): Promise<IMusic.IMusicItem | null> {
+        const pendingIndex = this.pendingNextIndex();
+        if (pendingIndex >= 0) {
+            return this._playList[pendingIndex];
+        }
+        if (!this._playList.length) {
+            return null;
+        }
+        // repeat off 的队尾歌播完就停（onEnded 里会走 PlayEnd），不算有下一首
+        const curIndex = this.getMusicIndexInPlayList(this._currentMusic);
+        if (
+            curIndex === this._playList.length - 1 &&
+            this._repeatMode === "off" &&
+            this._playList.length > 1
+        ) {
+            return null;
+        }
+        const nextIndex = await this.getNextIndex(1);
+        return nextIndex >= 0 ? this._playList[nextIndex] : null;
+    }
+
+    /** 结尾窗口触发预加载：remaining 已在 onProgress 算好（Infinity = 时长未知） */
+    private maybeStartNextTrackPreload(remaining: number) {
+        if (this.nextPreload || this.preloadStarting || this.isLoading) {
+            return;
+        }
+        if (this._repeatMode === "single" || !this._currentMusic || !this.audio?.src) {
+            return;
+        }
+        if (remaining > NEXT_PRELOAD_AHEAD || remaining <= 0.3) {
+            return;
+        }
+        this.preloadStarting = true;
+        void this.startNextTrackPreload();
+    }
+
+    /** 预加载流程：解析下一首音源 → 判缓存 → 按后端决定 append 播放列表或开预缓冲元素 */
+    private async startNextTrackPreload() {
+        const seq = ++this.nextPreloadSeq;
+        try {
+            const next = await this.computeNextMusicItem();
+            if (seq !== this.nextPreloadSeq) {
+                return;
+            }
+            if (!next) {
+                return;
+            }
+            // 这首的预加载刚失败过：冷却期内不再撞同一个坏音源
+            if (
+                this.preloadFailedKey === playListKey(next) &&
+                Date.now() - this.preloadFailedAt < NEXT_PRELOAD_RETRY_AFTER
+            ) {
+                return;
+            }
+            const preload: INextTrackPreload = {
+                musicItem: next,
+                resolved: null,
+                playSrc: null,
+                probe: null,
+                appended: false,
+            };
+            this.nextPreload = preload;
+            console.info(`[trackPlayer] 预加载下一首：${next.title}`);
+            const resolved = await this.resolveMediaUrl(next);
+            if (seq !== this.nextPreloadSeq || this.nextPreload !== preload) {
+                return;
+            }
+            if (!resolved.ok) {
+                this.nextPreload = null;
+                this.preloadFailedKey = playListKey(next);
+                this.preloadFailedAt = Date.now();
+                console.warn(`[trackPlayer] 预加载下一首失败：${resolved.reason}`);
+                return;
+            }
+            preload.resolved = resolved;
+            let playSrc = resolved.src;
+            if (!next.localPath && !resolved.localDownload) {
+                // 与 play() 同规则：命中播放缓存直接用本地文件（交接后即秒开）；
+                // 未命中顺路把整首后台缓存，本次预缓冲与下次播放都受益
+                const cached = await lookupCachedSrc(next, resolved.quality);
+                if (seq !== this.nextPreloadSeq || this.nextPreload !== preload) {
+                    return;
+                }
+                if (cached) {
+                    playSrc = cached;
+                } else {
+                    requestAudioCacheStore(next, resolved.quality, resolved.source);
+                }
+            }
+            preload.playSrc = playSrc;
+            const audio = this.audio;
+            if (!audio) {
+                this.nextPreload = null;
+                return;
+            }
+            if (audio instanceof NativeAudioElement) {
+                // ExoPlayer 播放列表：当前曲目播完自动无缝续播，无需 JS 干预
+                try {
+                    await audio.appendNextSource(playSrc);
+                } catch (e: any) {
+                    console.warn("[trackPlayer] 追加预载曲目失败", e?.message ?? e);
+                    this.nextPreload = null;
+                    return;
+                }
+                if (seq !== this.nextPreloadSeq || this.nextPreload !== preload) {
+                    audio.clearNextSources();
+                    return;
+                }
+                preload.appended = true;
+            } else {
+                const probe: AudioBackend = new Audio();
+                probe.preload = "auto";
+                preload.probe = probe;
+                probe.src = playSrc;
+                this.monitorPreloadProbe(probe, seq, preload);
+            }
+        } finally {
+            this.preloadStarting = false;
+        }
+    }
+
+    /**
+     * 盯着预缓冲元素：缓冲够开头几秒就算就绪（ended 交接时不再等待）；
+     * 迟迟没数据且主播放器在播时静音催一下流（iOS 不理未开播元素的 preload）；
+     * 加载失败就整体作废，ended 时走原有换歌链路兜底。
+     */
+    private monitorPreloadProbe(probe: AudioBackend, seq: number, preload: INextTrackPreload) {
+        const startedAt = Date.now();
+        let kicked = false;
+        const timer = setInterval(() => {
+            if (seq !== this.nextPreloadSeq || this.nextPreload !== preload) {
+                // 已作废：probe 由 abortNextTrackPreload 统一销毁
+                clearInterval(timer);
+                return;
+            }
+            if (probe.error) {
+                clearInterval(timer);
+                console.warn("[trackPlayer] 预加载的下一首缓冲失败，放弃预加载");
+                this.abortNextTrackPreload();
+                return;
+            }
+            const duration = probe.duration;
+            const lead = Number.isFinite(duration) && duration > 0
+                ? Math.min(NEXT_PRELOAD_PROBE_LEAD, duration)
+                : NEXT_PRELOAD_PROBE_LEAD;
+            if (probe.readyState >= 3 && bufferedEndAfter(probe, 0) >= lead - 0.1) {
+                clearInterval(timer);
+                return;
+            }
+            const main = this.audio;
+            if (
+                !kicked &&
+                Date.now() - startedAt >= NEXT_PRELOAD_KICK_DELAY &&
+                main &&
+                !main.paused &&
+                !main.error
+            ) {
+                kicked = true;
+                probe.volume = 0;
+                probe.play().catch(() => {
+                    // 催不动就算了，preload 还在拉流
+                });
+            }
+        }, NEXT_PRELOAD_POLL);
+    }
+
+    /**
+     * 作废在途预加载：队列变动 / 换歌 / 换音质 / 改重复模式都会走到这里。
+     * 原生后端要把 append 进播放列表的曲目一并撤下，否则 ExoPlayer 会在
+     * 当前曲播完自动续播一首 JS 侧已经不认的歌。
+     */
+    abortNextTrackPreload() {
+        this.nextPreloadSeq += 1;
+        const preload = this.nextPreload;
+        this.nextPreload = null;
+        if (preload?.probe) {
+            this.destroyAudioElement(preload.probe);
+        }
+        if (preload?.appended && this.audio instanceof NativeAudioElement) {
+            this.audio.clearNextSources();
+        }
+    }
+
+    /**
+     * WebView 后端的歌播完了：预缓冲元素若可用就交接，否则走原有链路。
+     * 复核一遍取歌语义（队列可能刚变过），对不上就作废预加载。
+     */
+    private async tryCommitPreloadedNext(): Promise<boolean> {
+        const preload = this.nextPreload;
+        // appended 的曲目由 ExoPlayer 自动续播，播完不会产生 ended 事件
+        if (!preload?.playSrc || preload.appended || !preload.probe) {
+            return false;
+        }
+        const next = await this.computeNextMusicItem();
+        // 等待期间用户手动换了歌 / 队列又变了：让位，走常规链路
+        if (this.nextPreload !== preload) {
+            return false;
+        }
+        if (!next || playListKey(next) !== playListKey(preload.musicItem)) {
+            this.abortNextTrackPreload();
+            return false;
+        }
+        await this.commitPreloadedNext(preload);
+        return true;
+    }
+
+    /**
+     * 原生后端：ExoPlayer 播完当前曲自动续播了预载的下一首（index >= 1）。
+     * 声音已经接上了，这里只做换歌簿记，让 JS 侧状态跟上播放器的现实。
+     */
+    private onItemTransition = async (ev: any) => {
+        const index = Number(ev?.index) || 0;
+        if (index < 1) {
+            return; // setSource / 队列操作引起的过渡，不是自动续播
+        }
+        const preload = this.nextPreload;
+        if (!preload?.appended) {
+            // 理论不达（append 与作废配对管理）：兜底按 ended 处理，重新对齐状态
+            console.warn("[trackPlayer] 收到非预期的曲目过渡，按换歌兜底处理");
+            await this.onEnded();
+            return;
+        }
+        await this.commitPreloadedNext(preload);
+    };
+
+    /**
+     * 交接预载的下一首：簿记与 play() 的换歌分支一致（队列 / 历史 / atom /
+     * 媒体会话），音频侧两条后端不同——原生已在播新曲，只翻状态；WebView
+     * 把预缓冲元素扶正为主播放器再开播。
+     */
+    private async commitPreloadedNext(preload: INextTrackPreload) {
+        this.nextPreload = null;
+        this.nextPreloadSeq += 1;
+        const target = preload.musicItem;
+        const playId = `${target.platform}-${target.id}-${Date.now()}-${++this.playSeq}`;
+        this.pendingPlayId = playId;
+
+        this.stallNudges = 0;
+        this.pendingStartPosition = 0;
+        this.userPaused = false;
+        this.coPlayResumeSeq += 1;
+        this.stopCoPlayResumeWatch();
+        if (!this.isInPlayList(target)) {
+            this.add(target);
+        }
+        this._currentMusic = target;
+        this.consumePendingNext(target);
+        this.pushHistory(target);
+        setAtom(currentMusicAtom, target);
+        this.emit(TrackPlayerEvents.CurrentMusicChanged, target);
+        setMusicHistory(target);
+        this.persistPlayList();
+        setAtom(progressAtom, { position: 0, duration: target.duration ?? 0 });
+        this.resolvedQuality = preload.resolved?.quality ?? null;
+        this.resolvedSourceUrl = preload.resolved?.source?.url ?? null;
+        this.playedFromLocalDownload = !!preload.resolved?.localDownload;
+        setAtom(playingQualityAtom, preload.resolved?.quality ?? null);
+        this.clearStallWatch();
+        this.clearPendingSeek();
+        await this.updateMediaSession(target);
+        // 簿记期间用户手动点了播放（playId 已被取代）：交出控制权
+        if (this.pendingPlayId !== playId) {
+            return;
+        }
+
+        if (preload.appended) {
+            // 原生后端：ExoPlayer 已经在出声，簿记完成即无缝换歌成功。
+            // 过渡不产生 playing 事件，重试计数器在这里手工清零（WebView 路径由
+            // onAudioPlaying 统一清）
+            this.isLoading = false;
+            this.autoSkipCount = 0;
+            this.qualityRetryCount = 0;
+            this.reconnectCount = 0;
+            setAtom(musicStateAtom, "playing");
+            return;
+        }
+
+        // WebView 后端：预缓冲元素接棒。数据已缓冲好，交接只是换实例 + 起播
+        const probe = preload.probe!;
+        const old = this.audio;
+        if (old) {
+            this.destroyAudioElement(old);
+        }
+        this.audio = probe;
+        this.attachAudioListeners(probe);
+        probe.volume = getStoredVolume();
+        probe.muted = false;
+        probe.playbackRate = this._rate;
+        probe.loop = this._repeatMode === "single";
+        try {
+            probe.currentTime = 0;
+        } catch {
+            // ignore
+        }
+        this.isLoading = false;
+        try {
+            await probe.play();
+        } catch (e: any) {
+            console.warn("[trackPlayer] 预载交接起播失败，回退常规换歌", e?.name ?? e);
+            await this.play(target, true, this.isInPlayList(target));
+            return;
+        }
+        setAtom(musicStateAtom, "playing");
+    }
 
     /** ---------- 播放列表管理 ---------- */
     get playList() {
@@ -1009,6 +1506,8 @@ class TrackPlayer extends EventEmitter {
         beforeIndex?: number,
         shouldShuffle?: boolean,
     ): number {
+        // 队列变动可能改变「下一首」，在途预加载作废（仍在结尾窗口的话下个 timeupdate 重来）
+        this.abortNextTrackPreload();
         const inQueue = new Set(this._playList.map(playListKey));
         const valid = toQueueableList(musicItems).filter((it) => !inQueue.has(playListKey(it)));
         const list = [...this._playList];
@@ -1081,6 +1580,7 @@ class TrackPlayer extends EventEmitter {
         if (index < 0) {
             return;
         }
+        this.abortNextTrackPreload();
         const removingCurrent = this.isCurrentMusic(musicItem);
         const list = [...this._playList];
         list.splice(index, 1);
@@ -1113,6 +1613,7 @@ class TrackPlayer extends EventEmitter {
         if (from === to || from < 0 || from >= len || to < 0 || to >= len) {
             return;
         }
+        this.abortNextTrackPreload();
         const list = [...this._playList];
         const [moved] = list.splice(from, 1);
         list.splice(to, 0, moved);
@@ -1123,6 +1624,7 @@ class TrackPlayer extends EventEmitter {
 
     /** 清空播放队列，正在播的这首继续播 */
     clearPlayList() {
+        this.abortNextTrackPreload();
         this._playList = [];
         setAtom(playListAtom, []);
         this._pendingNext = [];
@@ -1344,6 +1846,8 @@ class TrackPlayer extends EventEmitter {
             return;
         }
         const target = musicItem ?? this._currentMusic!;
+        // 新的播放请求取代一切在途预加载（原生后端撤下已 append 的曲目）
+        this.abortNextTrackPreload();
         const playId = `${target.platform}-${target.id}-${Date.now()}-${++this.playSeq}`;
         this.pendingPlayId = playId;
 
@@ -1359,6 +1863,10 @@ class TrackPlayer extends EventEmitter {
         if (isNew) {
             this.stallNudges = 0;
             this.pendingStartPosition = 0;
+            this.userPaused = false;
+            // 换歌：旧歌的共播续播巡逻作废
+            this.coPlayResumeSeq += 1;
+            this.stopCoPlayResumeWatch();
             if (addToPlayList && !this.isInPlayList(target)) {
                 this.add(target);
             }
@@ -1441,6 +1949,7 @@ class TrackPlayer extends EventEmitter {
         if (!audio) {
             return;
         }
+        this.userPaused = false;
         if (!audio.src) {
             if (this._currentMusic) {
                 this.play(this._currentMusic, true);
@@ -1462,12 +1971,21 @@ class TrackPlayer extends EventEmitter {
             return;
         }
         this.userPauseSeq += 1;
+        // 用户主动暂停：作废在途的共播续播巡逻，别再替用户把歌抢回来
+        this.coPlayResumeSeq += 1;
+        this.stopCoPlayResumeWatch();
         const audio = this.audio;
         if (audio && !audio.paused) {
             // 只有真的在播才有 pause 事件，标记也别留到下一次外部暂停上
             this.internalPausePending = true;
         }
+        this.userPaused = true;
         audio?.pause();
+        // 预载保留（恢复播放后还能无缝续上），但静音催播的预缓冲元素跟着停
+        const probe = this.nextPreload?.probe;
+        if (probe && !probe.paused) {
+            probe.pause();
+        }
         setAtom(musicStateAtom, "paused");
     }
 
@@ -1606,6 +2124,7 @@ class TrackPlayer extends EventEmitter {
         const order: MusicRepeatMode[] = ["off", "queue", "single"];
         const next = order[(order.indexOf(this._repeatMode) + 1) % order.length];
         this._repeatMode = next;
+        this.abortNextTrackPreload();
         setAtom(repeatModeAtom, next);
         localStorage.setItem("repeatMode", next);
         this.syncLoopFlag();
@@ -1658,7 +2177,7 @@ class TrackPlayer extends EventEmitter {
         const seq = ++this.qualitySwitchSeq;
         const isStale = () => seq !== this.qualitySwitchSeq;
         const livePosition = () => this.audio?.currentTime ?? 0;
-        let probe: HTMLAudioElement | null = null;
+        let probe: AudioBackend | null = null;
         let committed = false;
         setAtom(qualitySwitchingAtom, targetQuality);
 
@@ -1678,6 +2197,8 @@ class TrackPlayer extends EventEmitter {
                 return { status: "failed", reason: resolved.reason };
             }
 
+            // 只在 WebView 后端走到这（原生后端在 applyQuality 里已降级重挂），
+            // 双 <audio> 预取是无缝交接的关键
             probe = new Audio();
             probe.preload = "auto";
             probe.playbackRate = this._rate;
@@ -1724,7 +2245,7 @@ class TrackPlayer extends EventEmitter {
 
     /** 等预取播放器把播放头之后 SEAMLESS_LEAD 秒缓冲好（播放头会一直往前追） */
     private waitForProbeBuffered(
-        probe: HTMLAudioElement,
+        probe: AudioBackend,
         livePosition: () => number,
         isStale: () => boolean,
     ): Promise<void> {
@@ -1805,7 +2326,7 @@ class TrackPlayer extends EventEmitter {
      * 新实例已经缓冲过播放头位置，所以听起来只是同一个位置接着播。
      */
     private commitQualitySwitch(
-        probe: HTMLAudioElement,
+        probe: AudioBackend,
         resolved: {
             src: string;
             source?: IPlugin.IMediaSourceResult;
@@ -1873,6 +2394,8 @@ class TrackPlayer extends EventEmitter {
     async applyQuality(quality: IMusic.IQualityKey): Promise<IQualitySwitchResult> {
         setQuality(quality);
         setAtom(qualityAtom, quality);
+        // 预载的下一首是按旧音质解析的，作废后按新档重预
+        this.abortNextTrackPreload();
         const music = this._currentMusic;
         const audio = this.audio;
         if (!music || music.localPath || this.playedFromLocalDownload || !audio?.src) {
@@ -1882,6 +2405,14 @@ class TrackPlayer extends EventEmitter {
             this.pendingStartPosition = audio.currentTime || 0;
             this.detachAudio();
             return { status: "queued" };
+        }
+        // 原生后端是单实例 ExoPlayer：双播放器预取会顶掉正在播的歌。
+        // 降级为「原位置重挂新音质」——大缓冲下交接间隙极短，可接受。
+        if (audio instanceof NativeAudioElement) {
+            const position = audio.currentTime || 0;
+            await this.play(music, true, false, quality);
+            this.pendingStartPosition = 0;
+            return { status: "switched", quality };
         }
         return this.switchQualitySeamless(music, quality);
     }
@@ -1900,12 +2431,15 @@ class TrackPlayer extends EventEmitter {
 export const TrackPlayerSingleton = new TrackPlayer();
 
 /**
- * 把「允许与其他应用同时播放」声明给浏览器的音频会话（Audio Session API，
- * 较新的 Chromium WebView 才支持，feature-detect 后设置）。
- * ambient = 与其他应用混音共存：开播不抢音频焦点，也不会被别人的焦点请求打断；
- * 不支持的内核走 onAudioPause 里「被抢焦点自动续播」的兜底。
+ * 把「允许与其他应用同时播放」声明给播放后端：
+ *  - 原生 ExoPlayer 后端：共播开 = 不参与音频焦点仲裁（抖音抢焦点不影响我们），
+ *    共播关 = 正常仲裁（别人开播我们让位）；
+ *  - 浏览器音频会话（Audio Session API，较新的 Chromium WebView 才支持）：
+ *    ambient = 与其他应用混音共存；不支持的内核走 onAudioPause 里
+ *    「被抢焦点自动续播」的兜底。
  */
 export function applyCoPlaySessionType() {
+    TrackPlayerSingleton.applyNativeFocusMode();
     try {
         const session = (navigator as any).audioSession;
         if (session) {
@@ -1945,6 +2479,8 @@ export function useQualitySwitching() {
 export function setDefaultQuality(quality: IMusic.IQualityKey) {
     setQuality(quality);
     setAtom(qualityAtom, quality);
+    // 在途预载按旧档解析的，作废后按新档重预
+    TrackPlayerSingleton.abortNextTrackPreload();
 }
 /** 播放栏即时切换音质：后台缓冲目标音质，缓冲好了再无缝交接（设置页改默认值用 setDefaultQuality） */
 export function applyQuality(quality: IMusic.IQualityKey) {

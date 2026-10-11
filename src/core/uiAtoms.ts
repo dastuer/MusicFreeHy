@@ -1,5 +1,7 @@
+import type { ComponentType } from "react";
 import { atom, getDefaultStore } from "jotai";
 import { atomWithReset } from "jotai/utils";
+import type { IUpdateManifest, ILocalVersion } from "./appUpdate";
 
 /** ---------- UI 全局状态 ---------- */
 
@@ -47,6 +49,8 @@ export function showToast(content: string, duration = 2400) {
 
 export interface IMusicAction {
     label: string;
+    /** 行首图标（Icons.tsx 的 SVG 组件），缺省只显示文字 */
+    icon?: ComponentType<{ size?: number; strokeWidth?: number }>;
     danger?: boolean;
     onClick: () => void;
 }
@@ -166,4 +170,21 @@ export function openSingleSelect(state: ISingleSelectState) {
 
 export function closeSingleSelect() {
     getDefaultStore().set(singleSelectAtom, null);
+}
+
+/** ---------- 发现新版本面板（启动自动检查 / 设置页手动检查共用） ---------- */
+
+export interface IUpdateSheetState {
+    manifest: IUpdateManifest;
+    local: ILocalVersion;
+}
+
+export const updateSheetAtom = atomWithReset<IUpdateSheetState | null>(null);
+
+export function openUpdateSheet(state: IUpdateSheetState) {
+    getDefaultStore().set(updateSheetAtom, state);
+}
+
+export function closeUpdateSheet() {
+    getDefaultStore().set(updateSheetAtom, null);
 }

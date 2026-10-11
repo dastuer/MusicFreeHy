@@ -1,6 +1,13 @@
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { useAtomValue } from "jotai";
-import { useCurrentRoute, useIsTabRoot } from "@/core/router";
+import {
+    useCurrentRoute,
+    useIsTabRoot,
+    useActiveTab,
+    TAB_ROOT,
+    consumeTabSlideSkip,
+    type TabId,
+} from "@/core/router";
 import { sourceSelectOpenAtom } from "@/core/uiAtoms";
 import { TrackPlayerSingleton, TrackPlayerEvents } from "@/core/trackPlayer";
 import type { IPlayFailurePayload } from "@/core/trackPlayer";
@@ -9,6 +16,8 @@ import { setupMediaNotification } from "@/core/mediaNotification";
 import { useThemeSetup } from "@/core/theme";
 import { ensureLikesSheet } from "@/core/musicSheet";
 import { resumeSavedMatchTask, getLocalMusicCount } from "@/core/localMusic";
+import { silentCheckForUpdate } from "@/core/appUpdate";
+import { isNative } from "@/core/native";
 import { showToast } from "@/core/uiAtoms";
 import TabBar from "@/components/layout/TabBar";
 import AppDrawer from "@/components/layout/AppDrawer";
@@ -21,6 +30,7 @@ import AddToSheetPanel from "@/components/base/AddToSheetPanel";
 import SourceSelectSheet from "@/components/base/SourceSelectSheet";
 import SingleSelectSheet from "@/components/base/SingleSelectSheet";
 import SleepTimerSheet from "@/components/base/SleepTimerSheet";
+import UpdateSheet from "@/components/base/UpdateSheet";
 import PromptDialog from "@/components/base/PromptDialog";
 import HomePage from "@/pages/home";
 import MyMusicPage from "@/pages/myMusic";
@@ -102,7 +112,85 @@ export default function App() {
     useThemeSetup();
     const route = useCurrentRoute();
     const isTabRoot = useIsTabRoot();
+    const activeTab = useActiveTab();
     const sourceSelectOpen = useAtomValue(sourceSelectOpenAtom);
+    const swapRef = useRef<HTMLDivElement | null>(null);
+
+    // 底部 Tab 点击的两页滑动切换：提交后、绘制前布置初始位移（无闪帧）。
+    // 发现→我的双页滑动（home 左出、我的右入）；我的→发现时「我的」层已随路由
+    // 卸载，home 从左侧单页滑入。手势切换自带跟手滑动，经 skipSlide 登记跳过。
+    const prevTabRef = useRef<TabId>(activeTab);
+    const prevPathRef = useRef(route.path);
+    const tabAnimCleanupRef = useRef<(() => void) | null>(null);
+    useLayoutEffect(() => {
+        const prevTab = prevTabRef.current;
+        const prevPath = prevPathRef.current;
+        prevTabRef.current = activeTab;
+        prevPathRef.current = route.path;
+        if (prevTab === activeTab) {
+            return;
+        }
+        // 连点时立刻收尾上一次动画，防止旧清理定时器踩掉新动画
+        tabAnimCleanupRef.current?.();
+        tabAnimCleanupRef.current = null;
+        if (consumeTabSlideSkip()) {
+            return;
+        }
+        // 仅根页→根页的切换做滑动；从深层页面切 Tab 维持原硬切
+        if (prevPath !== TAB_ROOT[prevTab] || route.path !== TAB_ROOT[activeTab]) {
+            return;
+        }
+        const swap = swapRef.current;
+        const keep = swap?.querySelector<HTMLElement>(":scope > .page-keepalive");
+        if (!swap || !keep) {
+            return;
+        }
+        const paneW = swap.clientWidth || 1;
+        const DUR = 260;
+        const EASE = "cubic-bezier(0.22, 0.61, 0.36, 1)";
+        if (prevTab === "discover") {
+            const layer = swap.querySelector<HTMLElement>(":scope > .page-swap-layer");
+            if (!layer) {
+                return;
+            }
+            // React 刚把 home 置为 display:none，动画期间临时显形并滑出
+            keep.style.display = "";
+            keep.style.transition = "none";
+            keep.style.transform = "translateX(0)";
+            layer.style.transition = "none";
+            layer.style.transform = `translateX(${paneW}px)`;
+            void keep.offsetWidth; // 强制回流，让下面的位移以过渡形式播放
+            keep.style.transition = `transform ${DUR}ms ${EASE}`;
+            layer.style.transition = `transform ${DUR}ms ${EASE}`;
+            keep.style.transform = `translateX(${-paneW}px)`;
+            layer.style.transform = "translateX(0)";
+            tabAnimCleanupRef.current = () => {
+                keep.style.transition = "none";
+                keep.style.display = "none"; // 恢复 React 侧的隐藏意图
+                keep.style.transform = "";
+                layer.style.transition = "none";
+                layer.style.transform = "";
+            };
+        } else {
+            keep.style.transition = "none";
+            keep.style.transform = `translateX(${-paneW}px)`;
+            void keep.offsetWidth;
+            keep.style.transition = `transform ${DUR}ms ${EASE}`;
+            keep.style.transform = "translateX(0)";
+            tabAnimCleanupRef.current = () => {
+                keep.style.transition = "none";
+                keep.style.transform = "";
+            };
+        }
+        const cleanup = tabAnimCleanupRef.current;
+        window.setTimeout(() => {
+            if (tabAnimCleanupRef.current === cleanup) {
+                cleanup();
+                tabAnimCleanupRef.current = null;
+            }
+        }, DUR + 40);
+    }, [activeTab, route.path]);
+
     // 设置类页面（含音源设置面板）与文件夹选择页不展示底部播放条，聚焦配置操作
     const hideMiniPlayer =
         sourceSelectOpen ||
@@ -142,7 +230,17 @@ export default function App() {
             );
         };
         TrackPlayerSingleton.on(TrackPlayerEvents.PlayFailed, onPlayFailed);
+        // 检查更新（仅原生环境）：延后 4s 避开启动初始化高峰；24h 节流与静默失败在 core 内处理
+        let updateTimer: ReturnType<typeof setTimeout> | undefined;
+        if (isNative()) {
+            updateTimer = setTimeout(() => {
+                void silentCheckForUpdate();
+            }, 4000);
+        }
         return () => {
+            if (updateTimer) {
+                clearTimeout(updateTimer);
+            }
             TrackPlayerSingleton.off(TrackPlayerEvents.PlayFailed, onPlayFailed);
         };
     }, []);
@@ -152,7 +250,7 @@ export default function App() {
     return (
         <div className="app-root">
             <div className="phone-frame">
-                <div className="page-swap">
+                <div className="page-swap" ref={swapRef}>
                     {/* 发现页常驻缓存：跳转任何页面都保留推荐/歌单/排行榜的数据与滚动位置 */}
                     <div
                         className="page-keepalive"
@@ -179,6 +277,7 @@ export default function App() {
             <SourceSelectSheet />
             <SingleSelectSheet />
             <SleepTimerSheet />
+            <UpdateSheet />
             <PromptDialog />
             <ToastHost />
         </div>

@@ -7,6 +7,7 @@ import {
     removeDownloadRecords,
 } from "@/core/musicDownload";
 import { openMusicActions, openAddToSheet, openSingleSelect, showToast } from "@/core/uiAtoms";
+import { IconListMusic, IconTrash } from "@/components/base/Icons";
 
 /**
  * 列表页多选逻辑（推荐歌单 / 排行榜 / 本地歌单共用）：
@@ -108,6 +109,7 @@ export function useMusicMultiSelect(
                 actions: [
                     {
                         label: "从歌单中删除",
+                        icon: IconListMusic,
                         danger: true,
                         onClick: () => {
                             onRemoveFromSheet(selected);
@@ -117,6 +119,7 @@ export function useMusicMultiSelect(
                     },
                     {
                         label: "删除下载文件",
+                        icon: IconTrash,
                         danger: true,
                         onClick: () => {
                             void removeDownloadRecords(selected).then((res) => {

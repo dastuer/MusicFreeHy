@@ -178,7 +178,7 @@ export default function DownloadsPage() {
     }, []);
 
     return (
-        <div className="page" style={{ padding: 0 }}>
+        <div className={multi.selectMode ? "page selecting" : "page"} style={{ padding: 0 }}>
             <div className="sub-header">
                 <button className="icon-btn" onClick={() => goBack()}>
                     <IconBack size={22} />

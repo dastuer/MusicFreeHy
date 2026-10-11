@@ -15,7 +15,7 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
-        versionName "1.0"
+        versionName "1.0.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -55,6 +55,10 @@ dependencies {
     implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
     // 播放通知：MediaSessionCompat + MediaStyle（下拉栏媒体卡片）
     implementation "androidx.media:media:1.7.0"
+    // 原生音频后端：共播时完全不入音频焦点仲裁 + 30~60s 大缓冲（WebView <audio> 做不到）
+    implementation "androidx.media3:media3-exoplayer:1.8.0"
+    implementation "androidx.media3:media3-datasource-okhttp:1.8.0"
+    implementation "com.squareup.okhttp3:okhttp:4.12.0"
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
     implementation project(':capacitor-android')

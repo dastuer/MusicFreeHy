@@ -43,8 +43,12 @@ import {
     IconBack,
     IconChevronRight,
     IconClose,
+    IconDatabase,
     IconFolderMusic,
     IconFolderPlus,
+    IconFolderSearch,
+    IconInfo,
+    IconLyric,
     IconMore,
     IconMusic,
     IconPause,
@@ -212,10 +216,12 @@ export default function LocalMusicPage() {
             actions: [
                 {
                     label: "仅移除记录（保留文件）",
+                    icon: IconDatabase,
                     onClick: () => doRemove(targets, false),
                 },
                 {
                     label: "同时删除音频文件",
+                    icon: IconTrash,
                     danger: true,
                     onClick: () => doRemove(targets, true),
                 },
@@ -235,10 +241,12 @@ export default function LocalMusicPage() {
             actions: [
                 {
                     label: "扫描本地音乐",
+                    icon: IconFolderSearch,
                     onClick: () => void openScan(),
                 },
                 {
                     label: "匹配歌词与封面",
+                    icon: IconLyric,
                     onClick: () => void openMatchSheet(),
                 },
             ],
@@ -379,7 +387,7 @@ export default function LocalMusicPage() {
     useBackLayer(matchOpen, "local-match-sheet", () => setMatchOpen(false));
 
     return (
-        <div className="page" style={{ padding: 0 }}>
+        <div className={selectMode ? "page selecting" : "page"} style={{ padding: 0 }}>
             <div className="sub-header">
                 <button className="icon-btn" onClick={() => goBack()}>
                     <IconBack size={22} />
@@ -431,6 +439,7 @@ export default function LocalMusicPage() {
                         extraActions={(item) => [
                             {
                                 label: "查看详情",
+                                icon: IconInfo,
                                 onClick: () => setDetail(recordById.get(`${item.id}`) ?? null),
                             },
                         ]}

@@ -7,7 +7,9 @@ import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
  *  - 在内容区横向拖动，轨道与红条逐帧跟手（直接写 DOM，拖动过程零 React 渲染）；
  *  - 松手按位移（超过页宽 15%）或甩动速度（≥0.3px/ms）决定翻页，否则回弹；
  *  - 点击 tab / goTab 跳转时由确认页变化的布局 effect 带补间动画滑到位；
- *  - 首尾页继续拖动有橡皮筋阻尼；切页动画半途再次拖动可无缝续接。
+ *  - 首尾页继续拖动有橡皮筋阻尼；切页动画半途再次拖动可无缝续接；
+ *  - 末页（排行榜）继续左滑是跨页翻页：真实露出「我的」面板（onCrossSwipe），
+ *    松手达标补完成后切 Tab，与「我的」页右滑切回组成一对跨 Tab 横滑。
  *
  * 让位规则（原生滚动优先）：
  *  - 纵向滑动交给子页自身滚动与 PullToRefresh 下拉刷新；
@@ -36,9 +38,18 @@ interface IUseTabSwipeOptions {
     onIndexChange: (index: number) => void;
     /** 发现页整体可见（路由停留在发现页）时才响应手势 */
     enabled: boolean;
+    /** 末页（排行榜）左滑跨切「我的」：调用方在轨道末尾渲染「我的」整页面板，
+     *  拖动即真实翻页露出内容；松手达标时先补完翻页再回调（切 Tab），内容无缝交接 */
+    onCrossSwipe?: () => void;
 }
 
-export function useTabSwipe({ count, index, onIndexChange, enabled }: IUseTabSwipeOptions) {
+export function useTabSwipe({
+    count,
+    index,
+    onIndexChange,
+    enabled,
+    onCrossSwipe,
+}: IUseTabSwipeOptions) {
     const panesRef = useRef<HTMLDivElement | null>(null);
     const trackRef = useRef<HTMLDivElement | null>(null);
     const indicatorRef = useRef<HTMLSpanElement | null>(null);
@@ -47,9 +58,11 @@ export function useTabSwipe({ count, index, onIndexChange, enabled }: IUseTabSwi
     const indexRef = useRef(index);
     const enabledRef = useRef(enabled);
     const onIndexChangeRef = useRef(onIndexChange);
+    const onCrossSwipeRef = useRef(onCrossSwipe);
     indexRef.current = index;
     enabledRef.current = enabled;
     onIndexChangeRef.current = onIndexChange;
+    onCrossSwipeRef.current = onCrossSwipe;
 
     // 手势现场数据全部放在 ref 里：拖动过程中零渲染
     const gestureRef = useRef({
@@ -141,6 +154,9 @@ export function useTabSwipe({ count, index, onIndexChange, enabled }: IUseTabSwi
         }
         const g = gestureRef.current;
         const last = count - 1;
+        // 末页右侧还有一块「我的」跨页面板（onCrossSwipe 存在时由调用方渲染），
+        // 只有拖出它之外才进入橡皮筋阻尼
+        const maxP = last + (onCrossSwipeRef.current ? 1 : 0);
         let mousePressed = false;
         let lastTouchAt = 0;
 
@@ -207,8 +223,8 @@ export function useTabSwipe({ count, index, onIndexChange, enabled }: IUseTabSwi
             const p =
                 pRaw < 0
                     ? pRaw * EDGE_RESIST
-                    : pRaw > last
-                      ? last + (pRaw - last) * EDGE_RESIST
+                    : pRaw > maxP
+                      ? maxP + (pRaw - maxP) * EDGE_RESIST
                       : pRaw;
             placeTrack((g.startIndex - p) * g.paneW + g.compensate, false);
             placeIndicator(p, false);
@@ -253,6 +269,24 @@ export function useTabSwipe({ count, index, onIndexChange, enabled }: IUseTabSwi
                 }
             }
             const moved = -g.rawDx / g.paneW; // 正 = 向左拖 = 去下一页
+            // 末页左滑跨页：拖动已真实露出「我的」面板，松手达标时先补完翻页，
+            // 面板与路由层「我的」页内容一致，切换瞬间无缝；不达标原地回弹
+            if (g.startIndex === last && g.rawDx < 0) {
+                if (velocity < -FLICK_VELOCITY || moved >= SNAP_RATIO) {
+                    track.style.transition = "transform 0.16s ease-out";
+                    track.style.transform = `translateX(${-(last + 1) * 100}%)`;
+                    window.setTimeout(() => {
+                        onCrossSwipeRef.current?.();
+                        // 页面已隐藏，轨道瞬时归位供下次进入
+                        placeTrack(0, false);
+                    }, 190);
+                } else {
+                    placeTrack(0, true);
+                    placeIndicator(g.startIndex, true);
+                    paintTabs(g.startIndex);
+                }
+                return;
+            }
             let target = g.startIndex;
             if (Math.abs(velocity) >= FLICK_VELOCITY) {
                 target = g.startIndex + (velocity < 0 ? 1 : -1);

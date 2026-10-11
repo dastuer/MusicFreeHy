@@ -126,7 +126,7 @@ export default function TopListDetailPage() {
 
     return (
         <div
-            className="page"
+            className={multi.selectMode ? "page selecting" : "page"}
             style={{ padding: 0 }}
             onScroll={(e) => {
                 const topbar = topbarRef.current;
@@ -203,6 +203,13 @@ export default function TopListDetailPage() {
                         selectedKeys={multi.selectedKeys}
                         onToggleSelect={multi.toggleSelect}
                     />
+                    <AutoLoadMore
+                        onLoadMore={loadMore}
+                        loadingMore={loadingMore}
+                        hasMore={!isEnd && musicList.length > 0}
+                        itemsLength={musicList.length}
+                        showEndTip={!multi.selectMode && musicList.length > 6}
+                    />
                     {multi.selectMode && (
                         <SelectActionsBar
                             count={multi.selected.length}
@@ -211,13 +218,6 @@ export default function TopListDetailPage() {
                             onCollect={multi.startCollect}
                         />
                     )}
-                    <AutoLoadMore
-                        onLoadMore={loadMore}
-                        loadingMore={loadingMore}
-                        hasMore={!isEnd && musicList.length > 0}
-                        itemsLength={musicList.length}
-                        showEndTip={musicList.length > 6}
-                    />
                 </>
             )}
         </div>

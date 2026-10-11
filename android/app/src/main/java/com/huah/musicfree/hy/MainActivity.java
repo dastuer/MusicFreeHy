@@ -13,6 +13,8 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(MediaNotificationPlugin.class);
         registerPlugin(LocalMusicPlugin.class);
         registerPlugin(StoragePlugin.class);
+        registerPlugin(NativeAudioPlugin.class);
+        registerPlugin(UpdatePlugin.class);
         super.onCreate(savedInstanceState);
     }
 

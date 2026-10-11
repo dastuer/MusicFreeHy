@@ -66,9 +66,8 @@ cd android && ./gradlew assembleRelease  # 签名正式包 app-release.apk
 ```
 
 产物在 `android/app/build/outputs/apk/{debug,release}/`。Release 签名读取 `android/keystore.properties`
-（`storeFile / storePassword / keyAlias / keyPassword`），密钥文件 `android/app/musicfree-hy.keystore`
-已生成（storepass: `musicfreehy2024`，有效期 30 年）。**两者均已 gitignore，注意备份密钥**——
-换密钥后无法覆盖安装旧版本。
+（`storeFile / storePassword / keyAlias / keyPassword`），密钥文件为 `android/app/musicfree-hy.keystore`。
+**两者均已 gitignore、不入库**——签名密码与密钥文件只在本地，注意备份；换密钥后无法覆盖安装旧版本。
 
 原生工程（`android/`、`ios/`）已生成并配置好：
 

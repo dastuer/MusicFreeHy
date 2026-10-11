@@ -7,11 +7,24 @@ import {
     useCurrentMusic,
     useMusicState,
 } from "@/core/trackPlayer";
-import { openMusicActions, openSingleSelect, openAddToSheet } from "@/core/uiAtoms";
+import { openMusicActions, openSingleSelect, openAddToSheet, type IMusicAction } from "@/core/uiAtoms";
 import { toggleLike, getLikedMusicList, mediaKey, likesVersionAtom } from "@/core/musicSheet";
 import { navigate } from "@/core/router";
 import { formatSeconds } from "@/core/utils";
-import { IconCheck, IconHeart, IconMore, IconPlaying, IconRefresh } from "./Icons";
+import {
+    IconCheck,
+    IconDisc,
+    IconDownload,
+    IconHeart,
+    IconHeartSolid,
+    IconListMusic,
+    IconMic,
+    IconMore,
+    IconPlayCircle,
+    IconPlaying,
+    IconRefresh,
+    IconTrash,
+} from "./Icons";
 import Spinner from "./Spinner";
 import {
     downloadMusic,
@@ -120,10 +133,8 @@ const MusicListRow = memo(function MusicListRow({
     checked,
     isCurrent,
     musicState,
-    liked,
     taskRow,
     onRowClick,
-    onToggleLike,
     onMore,
 }: {
     item: IMusic.IMusicItem;
@@ -134,10 +145,8 @@ const MusicListRow = memo(function MusicListRow({
     checked: boolean;
     isCurrent: boolean;
     musicState: string;
-    liked: boolean;
     taskRow?: IMusicListTaskRow;
     onRowClick: (item: IMusic.IMusicItem) => void;
-    onToggleLike: (item: IMusic.IMusicItem) => void;
     onMore: (item: IMusic.IMusicItem) => void;
 }) {
     if (taskRow) {
@@ -181,16 +190,6 @@ const MusicListRow = memo(function MusicListRow({
             <div className="music-row-actions">
                 {!selectMode && (
                     <>
-                        <button
-                            className={`icon-btn like-btn ${liked ? "liked" : ""}`}
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                onToggleLike(item);
-                            }}
-                            title={liked ? "取消喜欢" : "喜欢"}
-                        >
-                            <IconHeart size={17} filled={liked} />
-                        </button>
                         <span className="music-row-duration">
                             {formatSeconds(item.duration)}
                         </span>
@@ -212,7 +211,7 @@ const MusicListRow = memo(function MusicListRow({
 });
 
 /**
- * 歌曲列表（Pad 形态）：序号/播放中动画、封面、歌名+歌手、专辑（宽屏）、时长、红心、更多。
+ * 歌曲列表（Pad 形态）：序号/播放中动画、封面、歌名+歌手、专辑（宽屏）、时长、更多。
  * 渐进渲染：导航帧只构建首屏 FIRST_STEP 行，随后每帧补齐 FILL_CHUNK 行到 RENDER_STEP，
  * 滚动触底按 SCROLL_STEP 追加 —— 一次性渲染 150+ 行复杂 DOM 会卡住页面进入动画。
  * renderAll：分帧补齐到全部行数（不设 150 窗口上限），配合稳定行回调，
@@ -257,11 +256,7 @@ export default function MusicList({
     onToggleSelect?: (item: IMusic.IMusicItem) => void;
     removeActionLabel?: string;
     /** 追加到「更多」菜单的操作（本地音乐的查看详情等页面级动作） */
-    extraActions?: (item: IMusic.IMusicItem) => {
-        label: string;
-        onClick: () => void;
-        danger?: boolean;
-    }[];
+    extraActions?: (item: IMusic.IMusicItem) => IMusicAction[];
     /** 隐藏「下载」菜单项（本地音乐 / 我的下载页没有下载意义） */
     hideDownload?: boolean;
     /** 行级下载任务：与已完成记录交织成统一列表时，由页面按歌曲返回任务态参数 */
@@ -273,7 +268,7 @@ export default function MusicList({
     const musicState = useMusicState();
     const likesVersion = useAtomValue(likesVersionAtom);
     // 全局喜欢集合：与具体列表无关，懒初始化一次；仅喜欢操作 / likesVersion 变化时重建，
-    // 不放进每帧渲染的依赖 —— 否则下载进度刷新会反复解析 localStorage 并引发额外渲染
+    // 只供「更多」菜单显示喜欢态，不进渲染依赖
     const [likedSet, setLikedSet] = useState<Set<string>>(
         () => new Set(getLikedMusicList().map(mediaKey)),
     );
@@ -288,8 +283,7 @@ export default function MusicList({
     // 每次渲染同步最新数据到 ref：行回调保持引用稳定（列表重建 / 页面 props
     // 变化都不换回调），配合 MusicListRow 的 memo，外部状态刷新（本地音乐
     // 匹配进度、下载进度）时只有数据真正变化的行重渲染。
-    // likedSet 也放这里：handleMore 只读不订阅，喜欢操作刷新的是各行的 liked
-    // prop，不会换 handleMore 引用导致全列表重渲染
+    // likedSet 也放这里：handleMore 只读不订阅，不会换 handleMore 引用导致全列表重渲染
     const latestRef = useRef({
         safeList,
         listId,
@@ -397,22 +391,26 @@ export default function MusicList({
                 likedSet,
             } = latestRef.current;
             const liked = likedSet.has(`${item.platform}-${item.id}`);
-            const actions = [] as any[];
+            const actions: IMusicAction[] = [];
             actions.push({
                 label: "下一首播放",
+                icon: IconPlayCircle,
                 onClick: () => TrackPlayerSingleton.addNext(item),
             });
             actions.push({
                 label: liked ? "取消喜欢" : "喜欢",
+                icon: liked ? IconHeartSolid : IconHeart,
                 onClick: () => handleToggleLike(item),
             });
             actions.push({
                 label: "收藏到歌单",
+                icon: IconListMusic,
                 onClick: () => openAddToSheet([item]),
             });
             if (item.albumId !== undefined) {
                 actions.push({
                     label: "查看专辑",
+                    icon: IconDisc,
                     onClick: () =>
                         navigate("albumDetail", {
                             albumItem: {
@@ -428,6 +426,7 @@ export default function MusicList({
             if (item.artistId !== undefined) {
                 actions.push({
                     label: "查看歌手",
+                    icon: IconMic,
                     onClick: () =>
                         navigate("artistDetail", {
                             artistItem: {
@@ -443,6 +442,7 @@ export default function MusicList({
             if (!hideDownload && item.platform !== "local") {
                 actions.push({
                     label: "下载",
+                    icon: IconDownload,
                     onClick: () => {
                         // 打开菜单时才查下载记录（不订阅记录版本，避免下载完成刷新整列表）；
                         // 已下载标注与播放页下载音质面板同规则：同档/更低跳过、更高覆盖升级
@@ -482,6 +482,7 @@ export default function MusicList({
             if (onRemoveItem) {
                 actions.push({
                     label: removeActionLabel,
+                    icon: IconTrash,
                     danger: true,
                     onClick: () => onRemoveItem(item),
                 });
@@ -510,10 +511,8 @@ export default function MusicList({
                             currentMusic?.platform === item.platform
                         }
                         musicState={musicState}
-                        liked={likedSet.has(`${item.platform}-${item.id}`)}
                         taskRow={taskRow}
                         onRowClick={handleRowClick}
-                        onToggleLike={handleToggleLike}
                         onMore={handleMore}
                     />
                 );

@@ -5,6 +5,7 @@ import { useThemeSetting, setTheme } from "@/core/theme";
 import { getQuality, setQuality, getAllowCoPlay, setAllowCoPlay } from "@/core/appConfig";
 import { getDownloadSaveTarget, downloadSaveTargetLabel } from "@/core/musicDownload";
 import { APP_VERSION } from "@/core/backup";
+import { manualCheckForUpdate, getLocalVersion } from "@/core/appUpdate";
 import { setDefaultQuality, applyCoPlaySessionType } from "@/core/trackPlayer";
 import { getProxyBase } from "@/core/net";
 import { isNative } from "@/core/native";
@@ -24,8 +25,8 @@ import {
     getAudioCacheStats,
     setAudioCacheLimitMB,
 } from "@/core/audioCache";
-import { showToast, openPrompt, openMusicActions, openSingleSelect, lyricTranslationAtom, setLyricTranslation } from "@/core/uiAtoms";
-import { IconBack } from "@/components/base/Icons";
+import { showToast, openMusicActions, openSingleSelect, lyricTranslationAtom, setLyricTranslation } from "@/core/uiAtoms";
+import { IconBack, IconTrash } from "@/components/base/Icons";
 
 const THEME_OPTIONS = [
     { value: "light", label: "浅色" },
@@ -52,6 +53,23 @@ const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
     );
     const [allowCoPlay, setAllowCoPlayState] = useState(getAllowCoPlay());
     const [cacheLimit, setCacheLimitState] = useState(getAudioCacheLimitMB());
+    // 检查更新：value 常驻展示版本号（原生读安装包真实版本，浏览器回退内置常量）
+    const [checkingUpdate, setCheckingUpdate] = useState(false);
+    const [appVersion, setAppVersion] = useState(APP_VERSION);
+    useEffect(() => {
+        if (!isNative()) {
+            return undefined;
+        }
+        let alive = true;
+        getLocalVersion().then((v) => {
+            if (alive) {
+                setAppVersion(v.versionName);
+            }
+        });
+        return () => {
+            alive = false;
+        };
+    }, []);
     // 缓存写入 / 清理后版本号自增，占用展示跟着刷新
     const cacheVersion = useAtomValue(audioCacheVersionAtom);
     const cacheStats = useMemo(() => getAudioCacheStats(), [cacheVersion]);
@@ -128,6 +146,7 @@ const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
             actions: [
                 {
                     label: "清理",
+                    icon: IconTrash,
                     danger: true,
                     onClick: () => {
                         if (!cacheStats.count) {
@@ -279,17 +298,24 @@ const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
                 <div className="settings-group-title">关于</div>
                 <div
                     className="settings-row"
-                    onClick={() =>
-                        openPrompt({
-                            title: "MusicFree 手机版",
-                            defaultValue: "",
-                            confirmText: "知道了",
-                            onConfirm: () => undefined,
-                        })
-                    }
+                    onClick={() => {
+                        if (checkingUpdate) {
+                            return;
+                        }
+                        if (!isNative()) {
+                            // 浏览器调试环境没有 APK 分发与安装能力
+                            showToast("请在手机应用内检查更新");
+                            return;
+                        }
+                        setCheckingUpdate(true);
+                        void manualCheckForUpdate().finally(() => setCheckingUpdate(false));
+                    }}
                 >
-                    <span className="settings-row-label">版本</span>
-                    <span className="settings-value">{APP_VERSION}</span>
+                    <span className="settings-row-label">检查更新</span>
+                    <span className="settings-value">
+                        {checkingUpdate ? "检查中…" : appVersion}
+                    </span>
+                    {!checkingUpdate && <span className="settings-value">›</span>}
                 </div>
                 <div
                     className="settings-row"

@@ -54,6 +54,11 @@ import {
     IconDownload,
     IconMore,
     IconMusic,
+    IconPlayCircle,
+    IconListMusic,
+    IconDisc,
+    IconMic,
+    IconSpeed,
 } from "@/components/base/Icons";
 
 const QUALITY_ORDER: IMusic.IQualityKey[] = ["low", "standard", "high", "super"];
@@ -518,16 +523,19 @@ function NowPlayingInner({
             actions: [
                 {
                     label: "下一首播放",
+                    icon: IconPlayCircle,
                     onClick: () => TrackPlayerSingleton.addNext(currentMusic),
                 },
                 {
                     label: "收藏到歌单",
+                    icon: IconListMusic,
                     onClick: () => openAddToSheet([currentMusic]),
                 },
                 ...(currentMusic.albumId !== undefined
                     ? [
                           {
                               label: "查看专辑",
+                              icon: IconDisc,
                               onClick: () =>
                                   navigate("albumDetail", {
                                       albumItem: {
@@ -545,6 +553,7 @@ function NowPlayingInner({
                     ? [
                           {
                               label: "查看歌手",
+                              icon: IconMic,
                               onClick: () =>
                                   navigate("artistDetail", {
                                       artistItem: {
@@ -559,6 +568,7 @@ function NowPlayingInner({
                     : []),
                 {
                     label: "倍速播放",
+                    icon: IconSpeed,
                     onClick: openRateSheet,
                 },
             ],

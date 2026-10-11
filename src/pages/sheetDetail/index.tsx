@@ -23,7 +23,7 @@ import SelectActionsBar from "@/components/base/SelectActionsBar";
 import ListSearchBar from "@/components/base/ListSearchBar";
 import { useMusicMultiSelect } from "@/hooks/useMusicMultiSelect";
 import { useListSearch } from "@/hooks/useListSearch";
-import { IconBack, IconMore, IconSearch } from "@/components/base/Icons";
+import { IconBack, IconEdit, IconMore, IconSearch, IconTrash } from "@/components/base/Icons";
 
 /**
  * 歌单详情页（网易云歌单页风格，三种来源）：
@@ -198,7 +198,7 @@ export default function SheetDetailPage() {
 
     return (
         <div
-            className="page"
+            className={multi.selectMode ? "page selecting" : "page"}
             style={{ padding: 0 }}
             onScroll={(e) => {
                 const topbar = topbarRef.current;
@@ -247,6 +247,7 @@ export default function SheetDetailPage() {
                                 actions: [
                                     {
                                         label: "重命名歌单",
+                                        icon: IconEdit,
                                         onClick: () => {
                                             openPrompt({
                                                 title: "重命名歌单",
@@ -262,6 +263,7 @@ export default function SheetDetailPage() {
                                     },
                                     {
                                         label: "删除歌单",
+                                        icon: IconTrash,
                                         danger: true,
                                         onClick: () => {
                                             deleteSheet(userSheet.id);
@@ -325,6 +327,13 @@ export default function SheetDetailPage() {
                                 : undefined
                         }
                     />
+                    <AutoLoadMore
+                        onLoadMore={loadMore}
+                        loadingMore={loadingMore}
+                        hasMore={!userSheetId && !isEnd && musicList.length > 0}
+                        itemsLength={musicList.length}
+                        showEndTip={!multi.selectMode && musicList.length > 6}
+                    />
                     {multi.selectMode && (
                         <SelectActionsBar
                             count={multi.selected.length}
@@ -336,13 +345,6 @@ export default function SheetDetailPage() {
                             }
                         />
                     )}
-                    <AutoLoadMore
-                        onLoadMore={loadMore}
-                        loadingMore={loadingMore}
-                        hasMore={!userSheetId && !isEnd && musicList.length > 0}
-                        itemsLength={musicList.length}
-                        showEndTip={musicList.length > 6}
-                    />
                     {userSheetId === LIKES_SHEET_ID && !musicList.length && (
                         <div className="empty-tip">还没有喜欢的音乐
                             <br />长按或点歌曲右侧的红心把它收进来
