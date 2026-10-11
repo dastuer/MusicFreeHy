@@ -9,7 +9,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
  *  - 点击 tab / goTab 跳转时由确认页变化的布局 effect 带补间动画滑到位；
  *  - 首尾页继续拖动有橡皮筋阻尼；切页动画半途再次拖动可无缝续接；
  *  - 末页（排行榜）继续左滑是跨页翻页：真实露出「我的」面板（onCrossSwipe），
- *    松手达标补完成后切 Tab，与「我的」页右滑切回组成一对跨 Tab 横滑。
+ *    顶部 tab 栏与轨道同步平移滑出，松手达标补完成后切 Tab，
+ *    与「我的」页右滑切回组成一对跨 Tab 横滑。
  *
  * 让位规则（原生滚动优先）：
  *  - 纵向滑动交给子页自身滚动与 PullToRefresh 下拉刷新；
@@ -52,6 +53,7 @@ export function useTabSwipe({
 }: IUseTabSwipeOptions) {
     const panesRef = useRef<HTMLDivElement | null>(null);
     const trackRef = useRef<HTMLDivElement | null>(null);
+    const topbarRef = useRef<HTMLDivElement | null>(null);
     const indicatorRef = useRef<HTMLSpanElement | null>(null);
     const tabRefs = useRef<(HTMLSpanElement | null)[]>([]);
 
@@ -118,6 +120,17 @@ export function useTabSwipe({
         track.style.transform = `translateX(calc(${-indexRef.current * 100}% + ${px}px))`;
     }, []);
 
+    /** 顶部 tab 栏平移：跨页拖动（越过末页进入「我的」面板）时与轨道同步滑出，
+     *  普通子页拖动保持不动；px=null 表示复位 */
+    const placeTopbar = useCallback((px: number | null, animate: boolean) => {
+        const bar = topbarRef.current;
+        if (!bar) {
+            return;
+        }
+        bar.style.transition = animate ? "" : "none";
+        bar.style.transform = px === null ? "" : `translateX(${px}px)`;
+    }, []);
+
     /** tab 文字高亮：拖动跨过中点时直接切类名，松手后与状态对齐 */
     const paintTabs = useCallback((active: number) => {
         tabRefs.current.forEach((el, i) => {
@@ -131,9 +144,10 @@ export function useTabSwipe({
             return;
         }
         placeTrack(0, true);
+        placeTopbar(null, true);
         placeIndicator(index, true);
         paintTabs(index);
-    }, [index, enabled, placeTrack, placeIndicator, paintTabs]);
+    }, [index, enabled, placeTrack, placeTopbar, placeIndicator, paintTabs]);
 
     // 视口尺寸变化后按确认页重新对位（页面隐藏期间不测，避免读到 0）
     useEffect(() => {
@@ -149,7 +163,8 @@ export function useTabSwipe({
     useEffect(() => {
         const area = panesRef.current;
         const track = trackRef.current;
-        if (!area || !track) {
+        const topbar = topbarRef.current;
+        if (!area || !track || !topbar) {
             return;
         }
         const g = gestureRef.current;
@@ -226,7 +241,10 @@ export function useTabSwipe({
                     : pRaw > maxP
                       ? maxP + (pRaw - maxP) * EDGE_RESIST
                       : pRaw;
-            placeTrack((g.startIndex - p) * g.paneW + g.compensate, false);
+            const px = (g.startIndex - p) * g.paneW + g.compensate;
+            placeTrack(px, false);
+            // 越过末页进入「我的」面板后，顶部 tab 栏随轨道一起平移滑出
+            placeTopbar(p > last ? px : null, false);
             placeIndicator(p, false);
             const nearest = Math.round(Math.max(0, Math.min(last, p)));
             if (nearest !== g.paintFrom) {
@@ -275,15 +293,26 @@ export function useTabSwipe({
                 if (velocity < -FLICK_VELOCITY || moved >= SNAP_RATIO) {
                     track.style.transition = "transform 0.16s ease-out";
                     track.style.transform = `translateX(${-(last + 1) * 100}%)`;
+                    topbar.style.transition = "transform 0.16s ease-out";
+                    topbar.style.transform = `translateX(${-g.paneW}px)`;
                     window.setTimeout(() => {
                         onCrossSwipeRef.current?.();
-                        // 页面已隐藏，轨道瞬时归位供下次进入
+                        // 页面已隐藏，轨道与顶栏瞬时归位供下次进入
                         placeTrack(0, false);
+                        placeTopbar(null, false);
                     }, 190);
                 } else {
                     placeTrack(0, true);
+                    // 顶栏没有样式表过渡，回弹时显式写上与轨道一致的曲线
+                    topbar.style.transition = "transform 0.28s cubic-bezier(0.22, 0.61, 0.36, 1)";
+                    topbar.style.transform = "translateX(0)";
                     placeIndicator(g.startIndex, true);
                     paintTabs(g.startIndex);
+                    // 回弹动画结束后清掉内联位移，普通子页拖动顶栏不再参与
+                    window.setTimeout(() => {
+                        topbar.style.transition = "none";
+                        topbar.style.transform = "";
+                    }, 320);
                 }
                 return;
             }
@@ -349,8 +378,14 @@ export function useTabSwipe({
             if (g.active) {
                 g.active = false;
                 placeTrack(0, true);
+                topbar.style.transition = "transform 0.28s cubic-bezier(0.22, 0.61, 0.36, 1)";
+                topbar.style.transform = "translateX(0)";
                 placeIndicator(g.startIndex, true);
                 paintTabs(g.startIndex);
+                window.setTimeout(() => {
+                    topbar.style.transition = "none";
+                    topbar.style.transform = "";
+                }, 320);
             }
         };
 
@@ -417,7 +452,7 @@ export function useTabSwipe({
             area.removeEventListener("mouseleave", onMouseEnd, capture);
             area.removeEventListener("click", onClickCapture, true);
         };
-    }, [count, placeTrack, placeIndicator, paintTabs]);
+    }, [count, placeTrack, placeTopbar, placeIndicator, paintTabs]);
 
-    return { panesRef, trackRef, indicatorRef, tabRefs };
+    return { panesRef, trackRef, topbarRef, indicatorRef, tabRefs };
 }

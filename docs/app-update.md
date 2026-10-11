@@ -8,7 +8,7 @@ App 内置检查更新功能：启动后自动静默检查（24h 一次）+ 设�
 
 | 内容 | 存放位置 | 访问方式 |
 |---|---|---|
-| 版本清单 `update.json` | 仓库根目录 | raw 直链：`https://gitee.com/{owner}/{repo}/raw/master/update.json` |
+| 版本清单 `update.json` | 仓库根目录 | raw 直链：`https://gitee.com/{owner}/{repo}/raw/main/update.json` |
 | 安装包 APK | Release 附件 | 直链：`https://gitee.com/{owner}/{repo}/releases/download/{tag}/{文件名}` |
 
 要点：

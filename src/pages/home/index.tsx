@@ -59,7 +59,7 @@ export default function HomePage() {
         TABS.findIndex((t) => t.id === tab),
     );
     // 横滑切换 + 红条跟随：手势期间直接写 DOM，确认页变化时由状态驱动补间
-    const { panesRef, trackRef, indicatorRef, tabRefs } = useTabSwipe({
+    const { panesRef, trackRef, topbarRef, indicatorRef, tabRefs } = useTabSwipe({
         count: TABS.length,
         index: tabIndex,
         onIndexChange: (i) => setTab(TABS[i].id),
@@ -71,35 +71,37 @@ export default function HomePage() {
 
     return (
         <div className="page home-page">
-            <div className="home-topbar">
-                <button className="icon-btn" onClick={() => openDrawer()}>
-                    <IconMenu size={22} />
-                </button>
-                <div className="home-tabs">
-                    {TABS.map((t, i) => (
-                        <span
-                            key={t.id}
-                            ref={(el) => {
-                                tabRefs.current[i] = el;
-                            }}
-                            className={`home-tab ${tab === t.id ? "active" : ""}`}
-                            onClick={() => setTab(t.id)}
-                        >
-                            {t.label}
-                        </span>
-                    ))}
-                    {/* 红条指示器：位置由 useTabSwipe 测量并驱动，随滑动逐帧跟随 */}
-                    <span ref={indicatorRef} className="home-tab-indicator" />
-                </div>
-                <button className="icon-btn" onClick={() => navigate("search")}>
-                    <IconSearch size={21} />
-                </button>
-            </div>
-
-            {/* 三个子页 + 「我的」跨页面板横向排布常驻，切 tab / 手势滑动平移轨道；
-                数据缓存由各自组件内的状态承担。「我的」面板只在排行榜左滑时露出，
-                与路由层的「我的」页内容一致，切换瞬间无缝接管 */}
+            {/* 顶部 tab 栏放在 .home-panes 内：排行榜左滑跨页时它与轨道同步平移滑出，
+                「我的」面板（含自己的顶栏）从右侧以同一水平线进入，两页完整交接 */}
             <div className="home-panes" ref={panesRef}>
+                <div className="home-topbar" ref={topbarRef}>
+                    <button className="icon-btn" onClick={() => openDrawer()}>
+                        <IconMenu size={22} />
+                    </button>
+                    <div className="home-tabs">
+                        {TABS.map((t, i) => (
+                            <span
+                                key={t.id}
+                                ref={(el) => {
+                                    tabRefs.current[i] = el;
+                                }}
+                                className={`home-tab ${tab === t.id ? "active" : ""}`}
+                                onClick={() => setTab(t.id)}
+                            >
+                                {t.label}
+                            </span>
+                        ))}
+                        {/* 红条指示器：位置由 useTabSwipe 测量并驱动，随滑动逐帧跟随 */}
+                        <span ref={indicatorRef} className="home-tab-indicator" />
+                    </div>
+                    <button className="icon-btn" onClick={() => navigate("search")}>
+                        <IconSearch size={21} />
+                    </button>
+                </div>
+
+                {/* 三个子页 + 「我的」跨页面板横向排布常驻，切 tab / 手势滑动平移轨道；
+                    数据缓存由各自组件内的状态承担。「我的」面板只在排行榜左滑时露出，
+                    与路由层的「我的」页内容一致，切换瞬间无缝接管 */}
                 <div className="home-panes-track" ref={trackRef}>
                     <RecommendTab
                         goTab={setTab}
@@ -108,7 +110,7 @@ export default function HomePage() {
                     />
                     <SheetsTab visible={routeActive} />
                     <TopListTab visible={routeActive} />
-                    <div className="home-pane">
+                    <div className="home-pane mine-cross-pane">
                         <MyMusicPage crossSwipe={false} />
                     </div>
                 </div>

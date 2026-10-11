@@ -472,11 +472,15 @@ img {
     min-height: 0;
     position: relative;
     overflow: hidden;
+    /* 顶栏移入此处：跨页拖动时顶栏与轨道同步平移，普通子页拖动顶栏不动 */
+    display: flex;
+    flex-direction: column;
 }
 
 .home-panes-track {
     display: flex;
-    height: 100%;
+    flex: 1;
+    min-height: 0;
     /* 补间动画只负责点击 tab / 松手后的收尾；拖动过程中由 useTabSwipe 置 none 跟手 */
     transition: transform 0.28s cubic-bezier(0.22, 0.61, 0.36, 1);
     will-change: transform;
@@ -490,10 +494,18 @@ img {
     padding-bottom: calc(16px + var(--safe-bottom));
 }
 
+/* 「我的」跨页面板：向上延伸占据顶部 tab 栏的高度，使自己的顶栏
+   与发现页顶栏处于同一水平线，跨页滑动时两页都以完整页面交接 */
+.mine-cross-pane {
+    margin-top: calc(-50px - var(--safe-top));
+    height: calc(100% + 50px + var(--safe-top));
+}
+
 .home-topbar {
-    position: sticky;
-    top: 0;
+    /* 已移入 .home-panes 内（其自身不滚动，sticky 无意义），保留层级盖住面板内容 */
+    position: relative;
     z-index: 30;
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     height: calc(50px + var(--safe-top));

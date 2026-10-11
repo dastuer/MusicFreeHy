@@ -24,7 +24,7 @@ import {
 import { closeUpdateSheet, openUpdateSheet, showToast } from "./uiAtoms";
 
 /** 版本清单地址：Gitee 公开仓库 raw 直链（发版只改仓库里的 update.json，代码不变） */
-const UPDATE_MANIFEST_URL = "https://gitee.com/huaihui/MusicFreeHy/raw/master/update.json";
+const UPDATE_MANIFEST_URL = "https://gitee.com/huaihui/MusicFreeHy/raw/main/update.json";
 
 export interface IUpdateManifest {
     versionCode: number;
