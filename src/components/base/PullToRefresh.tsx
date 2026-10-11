@@ -6,8 +6,10 @@ import { IconChevronDown } from "./Icons";
 /**
  * 下拉刷新容器：根节点自身即滚动容器，内容整体随下拉位移。
  *  - 顶部下拉超过阈值后松手触发 onRefresh，刷新期间指示器保持展开，完成自动收起；
- *  - visible=false 时整体 display:none（配合发现页三个子页常驻缓存），
- *    隐藏期间持续记录滚动位置，重新显示时恢复，避免浏览器清零 scrollTop；
+ *  - 自身不做显隐：发现页整页由外层 keepalive 负责显隐，面板常驻布局，
+ *    「我的」右滑跨页时内容才能带滚动位置实时露出；
+ *  - 滚动位置在 scroll 中持续记录，重新获得布局（如整页从 display:none 恢复）
+ *    时经 IntersectionObserver 自动回填，避免浏览器清零 scrollTop；
  *  - 桌面浏览器里可用鼠标按住拖动模拟下拉，便于开发调试。
  */
 
@@ -20,8 +22,6 @@ type PtrPhase = "idle" | "pulling" | "ready" | "refreshing";
 
 interface IPullToRefreshProps {
     onRefresh?: () => Promise<void> | void;
-    /** false 时隐藏并记住滚动位置，重新显示时恢复（配合页面缓存） */
-    visible?: boolean;
     className?: string;
     style?: CSSProperties;
     children: ReactNode;
@@ -29,7 +29,6 @@ interface IPullToRefreshProps {
 
 export default function PullToRefresh({
     onRefresh,
-    visible = true,
     className,
     style,
     children,
@@ -50,7 +49,7 @@ export default function PullToRefresh({
             return;
         }
 
-        // display:none 期间读取/清零 scrollTop 都不可信，只在可见时记录
+        // 只在真正参与布局时记录 scrollTop（display:none 期间读到的一律是 0）
         const isLaidOut = () => el.offsetParent !== null;
         const onScroll = () => {
             if (isLaidOut()) {
@@ -58,6 +57,14 @@ export default function PullToRefresh({
             }
         };
         el.addEventListener("scroll", onScroll);
+
+        // 整页从 display:none 恢复布局时回填滚动位置（祖先 keepalive 的显隐切换）
+        const io = new IntersectionObserver(() => {
+            if (isLaidOut()) {
+                el.scrollTop = savedScrollRef.current;
+            }
+        });
+        io.observe(el);
 
         let startY = 0;
         let startX = 0;
@@ -187,6 +194,7 @@ export default function PullToRefresh({
         el.addEventListener("mouseleave", onGestureEnd);
         return () => {
             el.removeEventListener("scroll", onScroll);
+            io.disconnect();
             el.removeEventListener("touchstart", onTouchStart);
             el.removeEventListener("touchmove", onTouchMove);
             el.removeEventListener("touchend", onGestureEnd);
@@ -198,22 +206,8 @@ export default function PullToRefresh({
         };
     }, []);
 
-    // 重新可见时恢复滚动位置（Tab 切换 / 从其他页面返回）
-    useEffect(() => {
-        if (visible) {
-            const el = rootRef.current;
-            if (el) {
-                el.scrollTop = savedScrollRef.current;
-            }
-        }
-    }, [visible]);
-
     return (
-        <div
-            ref={rootRef}
-            className={`ptr${className ? ` ${className}` : ""}`}
-            style={visible ? style : { ...style, display: "none" }}
-        >
+        <div ref={rootRef} className={`ptr${className ? ` ${className}` : ""}`} style={style}>
             <div ref={innerRef} className="ptr-inner">
                 <div className="ptr-indicator">
                     {phase === "refreshing" ? (

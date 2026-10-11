@@ -71,6 +71,17 @@ public class UpdatePlugin extends Plugin {
         call.resolve(res);
     }
 
+    /** 是否已获「安装未知应用」授权（前端在授权页返回后预检，决定要不要自动续装） */
+    @PluginMethod
+    public void canInstall(PluginCall call) {
+        boolean granted = Build.VERSION.SDK_INT >= 26
+            ? getContext().getPackageManager().canRequestPackageInstalls()
+            : true;
+        JSObject res = new JSObject();
+        res.put("granted", granted);
+        call.resolve(res);
+    }
+
     /**
      * 拉起系统安装器。Android 8+ 先要「允许安装未知应用」授权：没有时跳系统授权页并
      * resolve { needPermission: true }，用户授权返回后再点一次「立即安装」即走安装分支。

@@ -230,7 +230,7 @@ export default function App() {
             );
         };
         TrackPlayerSingleton.on(TrackPlayerEvents.PlayFailed, onPlayFailed);
-        // 检查更新（仅原生环境）：延后 4s 避开启动初始化高峰；24h 节流与静默失败在 core 内处理
+        // 检查更新（仅原生环境）：延后 4s 避开启动初始化高峰；每次启动都检查，「忽略此版本」仍生效
         let updateTimer: ReturnType<typeof setTimeout> | undefined;
         if (isNative()) {
             updateTimer = setTimeout(() => {

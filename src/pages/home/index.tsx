@@ -108,8 +108,8 @@ export default function HomePage() {
                         visible={routeActive}
                         active={tab === "recommend"}
                     />
-                    <SheetsTab visible={routeActive} />
-                    <TopListTab visible={routeActive} />
+                    <SheetsTab />
+                    <TopListTab />
                     <div className="home-pane mine-cross-pane">
                         <MyMusicPage crossSwipe={false} />
                     </div>
@@ -158,7 +158,7 @@ function RecommendTab({
     }, [loadHistory]);
 
     return (
-        <PullToRefresh className="home-pane" visible={visible} onRefresh={handleRefresh}>
+        <PullToRefresh className="home-pane" onRefresh={handleRefresh}>
             <div className="quick-row">
                 <div className="quick-item" onClick={() => navigate("topList")}>
                     <span className="q-icon">
@@ -352,7 +352,7 @@ function RecommendSheetsRow({
 }
 
 /** 推荐歌单（标签 + 网格） */
-function SheetsTab({ visible }: { visible: boolean }) {
+function SheetsTab() {
     const [plugins, setPlugins] = useState<SerializedPlugin[] | null>(null);
     const sourceHash = useGlobalSource();
     const [allTags, setAllTags] = useState<any[]>([]);
@@ -559,7 +559,7 @@ function SheetsTab({ visible }: { visible: boolean }) {
     }, [loadTags]);
 
     return (
-        <PullToRefresh className="home-pane" visible={visible} onRefresh={handleRefresh}>
+        <PullToRefresh className="home-pane" onRefresh={handleRefresh}>
             <div className="section-title" style={{ paddingBottom: 4 }}>
                 推荐歌单
             </div>
@@ -635,7 +635,7 @@ function SheetGridCard({ item }: { item: IMusic.IMusicSheetItemBase }) {
 }
 
 /** 排行榜 */
-function TopListTab({ visible }: { visible: boolean }) {
+function TopListTab() {
     const [plugins, setPlugins] = useState<SerializedPlugin[] | null>(null);
     const sourceHash = useGlobalSource();
     const [groups, setGroups] = useState<{ title: string; data: IMusic.IMusicSheetItemBase[] }[]>(
@@ -699,7 +699,7 @@ function TopListTab({ visible }: { visible: boolean }) {
     }, [load]);
 
     return (
-        <PullToRefresh className="home-pane" visible={visible} onRefresh={load}>
+        <PullToRefresh className="home-pane" onRefresh={load}>
             <div className="section-title" style={{ paddingBottom: 4 }}>
                 排行榜
             </div>
