@@ -17,9 +17,11 @@ import { APP_VERSION } from "./backup";
 import { netFetchText } from "./net";
 import {
     callNativeMethod,
+    hasNativeHttp,
     isNative,
     nativeCancelDownload,
     nativeDownloadFile,
+    nativeHttpRequest,
 } from "./native";
 import { closeUpdateSheet, openUpdateSheet, showToast } from "./uiAtoms";
 
@@ -99,6 +101,19 @@ export function parseManifest(raw: string): IUpdateManifest {
     };
 }
 
+/** 拉清单：原生环境必须走 nativeHttpRequest —— CapacitorHttp 劫持的 fetch 原生侧
+ *  不跟随 302（gitee raw 会 302 到 raw.giteeusercontent.com），直接拿 302 会误报失败 */
+async function fetchManifestText(url: string): Promise<string> {
+    if (isNative() && hasNativeHttp()) {
+        const res = await nativeHttpRequest({ url, method: "GET", timeoutMs: 15000 });
+        if (res.status < 200 || res.status >= 300) {
+            throw new Error(`请求失败 (${res.status})`);
+        }
+        return res.text;
+    }
+    return netFetchText(url, 15000);
+}
+
 export interface ICheckUpdateResult {
     /** null = 无新版本（或静默模式下被忽略） */
     manifest: IUpdateManifest | null;
@@ -121,7 +136,7 @@ export async function checkForUpdate(
             return { manifest: null, local };
         }
     }
-    const raw = await netFetchText(UPDATE_MANIFEST_URL, 15000);
+    const raw = await fetchManifestText(UPDATE_MANIFEST_URL);
     const manifest = parseManifest(raw);
     setConfig(LAST_AUTO_CHECK_KEY, now);
     const isNewer =
