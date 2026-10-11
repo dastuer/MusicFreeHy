@@ -1,7 +1,7 @@
 {
-  "versionCode": 3,
-  "versionName": "1.0.2",
-  "changelog": "- 修复应用内检查更新失败的问题\n- 检查更新功能随本版本首次可用",
-  "apkUrl": "https://gitee.com/huaihui/MusicFreeHy/releases/download/v1.0.2/MusicFreeHy-1.0.2.apk",
+  "versionCode": 4,
+  "versionName": "1.0.3",
+  "changelog": "- 每次启动应用都检查更新（去掉 24 小时节流）\n- 「允许安装未知应用」授权返回后自动继续安装，无需再手动点击",
+  "apkUrl": "https://gitee.com/huaihui/MusicFreeHy/releases/download/v1.0.3/MusicFreeHy-1.0.3.apk",
   "publishedAt": "2026-10-11"
 }
