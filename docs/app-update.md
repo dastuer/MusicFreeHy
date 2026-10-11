@@ -17,7 +17,7 @@ App 内置检查更新功能：启动后自动静默检查（24h 一次）+ 设�
 - raw 匿名访问会 302 到 `raw.giteeusercontent.com`，客户端两条网络通道都手动跟随重定向，无需处理
 - raw 有服务端缓存（60~300 秒）：发版改完 update.json 后**最多约 5 分钟**全网生效，无缓存可刷
 - Release 附件限制：**单文件 ≤ 100MB**、单仓库附件总量 1GB —— APK 在 100MB 内没问题；附件总量满了记得删旧版本附件
-- 附件只能**在网页上创建 Release 时上传**（Gitee API 不支持传附件）
+- 附件可脚本上传：`POST /api/v5/repos/{owner}/{repo}/releases/{release_id}/attach_files`（multipart），发版脚本已封装
 - 清单地址写死在 `src/core/appUpdate.ts` 顶部 `UPDATE_MANIFEST_URL` 常量，换仓库时改这一行
 
 ## 版本清单 update.json
@@ -44,23 +44,26 @@ App 内置检查更新功能：启动后自动静默检查（24h 一次）+ 设�
 | `publishedAt` | 可选，发布日期，面板展示 |
 | `minVersionCode` | 可选，强制更新门槛：低于它的本机版本面板不可关闭、无「忽略/稍后」 |
 
-## 首次部署
+## 首次部署（已完成，留档）
 
-1. Gitee 建公开仓库（如 `musicfree-hy`，默认分支 master）
-2. 提交 `update.json` 到仓库根目录，内容与**当前已分发安装包**一致（`versionCode: 1`、`versionName: "1.0.0"`）——这样部署完即可在旧包里验证「已是最新版本」链路
-3. 网页上创建 Release（tag 如 `v1.0.0`），上传当前 APK，附件命名为 `MusicFreeHy-1.0.0.apk`
-4. 把 raw 地址填进 `src/core/appUpdate.ts` 的 `UPDATE_MANIFEST_URL`，重新出包
-5. 验证：浏览器打开 raw 直链能看到 JSON；App 里点「检查更新」提示「已是最新版本」
+1. Gitee 建公开仓库 `huaihui/MusicFreeHy`（main 分支），提交代码与 `update.json`（内容与已分发安装包一致）
+2. 网页创建 Release（tag `v1.0.0`）上传对应 APK；或直接跑一次发版脚本
+3. `src/core/appUpdate.ts` 的 `UPDATE_MANIFEST_URL` 指向 raw 直链
+4. 验证：浏览器打开 raw 直链能看到 JSON；App 里点「检查更新」提示「已是最新版本」
 
-## 日常发版
+## 日常发版（一键脚本，零手动）
 
-1. 改三处版本号：
-   - `android/app/build.gradle`：`versionCode` +1、`versionName` 对应更新
-   - `package.json` 与 `src/core/backup.ts` 的 `APP_VERSION`：同步 versionName（展示与备份载荷用）
-2. `cd android && ./gradlew assembleRelease` 出签名包（`android/app/build/outputs/apk/release/app-release.apk`；必须同密钥签名，否则用户无法覆盖安装）
-3. Gitee 网页创建 Release（tag `v1.0.1`），上传 `MusicFreeHy-1.0.1.apk` 附件
-4. 更新仓库里的 `update.json`（网页编辑或 git push）：versionCode +1、changelog、apkUrl 指向新附件直链
-5. 旧版用户启动 4s 后收到提示（raw 缓存过期后，最多等约 5 分钟）
+```bash
+export GITEE_TOKEN=<私人令牌，权限勾 projects>     # 只在当前终端有效即可
+node scripts/release.mjs 1.0.2                     # 传新版本号；更新说明自动取最近 10 条提交
+node scripts/release.mjs 1.0.2 --notes "- 新增xx\n- 修复yy"   # 或自定义说明
+```
+
+脚本自动完成：三处版本号联动（build.gradle versionCode +1 / versionName、package.json、APP_VERSION）→ 前端构建 + WebView 资源同步 → `assembleRelease` 签名包 → Gitee 建发行版 + 上传 APK 附件 → 用附件直链更新 `update.json` → 提交推送 gitee main。中断重跑安全（版本号步骤幂等、无变化跳过提交）。
+
+发版后清单经 Gitee raw 缓存（60~300s）生效，旧包启动 4s 后收到更新提示。
+
+手动备选（脚本不可用时）：改三处版本号 → `npm run build && npx cap copy android && ./gradlew assembleRelease` → 网页创建 Release 传附件 → 手改 `update.json` → 推送。
 
 ## 行为细节
 
