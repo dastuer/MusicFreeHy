@@ -4,7 +4,7 @@ import { buildPlayableMediaUrl } from "./net";
 import { getPluginByMedia, getPlugins, pluginCall } from "./ipc";
 import { setMusicHistory } from "./musicHistory";
 import { getQuality, setQuality, getConfig, getAllowCoPlay } from "./appConfig";
-import { localFileUrl } from "./native";
+import { isNative, localFileUrl } from "./native";
 import { lookupCachedSrc, requestAudioCacheStore } from "./audioCache";
 import {
     createAudioElement,
@@ -413,6 +413,10 @@ class TrackPlayer extends EventEmitter {
     /** 最近一次预加载失败的曲键与时间：同曲一段时间内不再撞同一个坏音源 */
     private preloadFailedKey = "";
     private preloadFailedAt = 0;
+    /** WebView 静音保活音源（仅 Android WebView 后端用，防 renderer 冻结，见 keepAliveAudio） */
+    private keepAlive: HTMLAudioElement | null = null;
+    /** 保活音源的回前台补拉起监听器（停保活时解绑用） */
+    private keepAliveKick: (() => void) | null = null;
 
     setup() {
         if (this.audio) {
@@ -443,6 +447,10 @@ class TrackPlayer extends EventEmitter {
             this.destroyAudioElement(previous);
             this.syncLoopFlag();
             this.applyNativeFocusMode();
+            // 原生后端接管后，WebView 里没有任何媒体活动了——安卓的省电策略会把
+            // 整个 renderer 冻结（JS 停摆），后台切歌解析、通知栏操作全失灵。
+            // 维持一个静音循环的极短 WAV 让 WebView 保持「有活跃媒体」状态。
+            this.startWebViewKeepAlive();
             if (wasPlaying && this._currentMusic) {
                 backend.src = resumeSrc;
                 this.applyStartPosition(backend, resumePosition);
@@ -463,6 +471,84 @@ class TrackPlayer extends EventEmitter {
 
         this.restoreSession();
         this.syncLoopFlag();
+    }
+
+    /**
+     * WebView 静音保活音源（仅 Android 原生后端时启用）：
+     * 音频本体搬去 ExoPlayer 后，WebView 里没有任何媒体活动，安卓省电策略
+     * 会冻结 renderer——JS 定时器停摆，后台切歌的音源解析（插件在 WebView
+     * 的 Worker 里跑）永远完不成，通知栏 / 耳机操作也无法转发。维持一个
+     * 静音、循环的极短无声 WAV 让 WebView 始终处于「有活跃媒体」状态，
+     * renderer 不进冻结名单。只在「有歌可播」时跑：空队列/彻底停止后停掉。
+     */
+    private startWebViewKeepAlive() {
+        if (!isNative() || this.keepAlive) {
+            return;
+        }
+        // 0.1s 8kHz 单声道 16bit 全零 PCM：data URL 常驻内存，循环播放不出声。
+        // 头部必须逐字段小端写入（String.fromCharCode 超过 255 的字节数值会让
+        // btoa 抛 InvalidCharacterError）
+        const SAMPLES = 800;
+        const buffer = new ArrayBuffer(44 + SAMPLES * 2);
+        const view = new DataView(buffer);
+        const writeStr = (offset: number, s: string) => {
+            for (let i = 0; i < s.length; i += 1) {
+                view.setUint8(offset + i, s.charCodeAt(i));
+            }
+        };
+        writeStr(0, "RIFF");
+        view.setUint32(4, 36 + SAMPLES * 2, true);
+        writeStr(8, "WAVE");
+        writeStr(12, "fmt ");
+        view.setUint32(16, 16, true); // fmt 段长度
+        view.setUint16(20, 1, true); // PCM
+        view.setUint16(22, 1, true); // 单声道
+        view.setUint32(24, 8000, true); // 采样率
+        view.setUint32(28, 16000, true); // 字节率
+        view.setUint16(32, 2, true); // 块对齐
+        view.setUint16(34, 16, true); // 位深
+        writeStr(36, "data");
+        view.setUint32(40, SAMPLES * 2, true); // 数据长度（PCM 全零不用写）
+        let bin = "";
+        const bytes = new Uint8Array(buffer);
+        for (let i = 0; i < bytes.length; i += 4096) {
+            bin += String.fromCharCode(...bytes.subarray(i, i + 4096));
+        }
+        const el = new Audio();
+        el.loop = true;
+        el.muted = true;
+        el.volume = 0;
+        el.preload = "auto";
+        el.src = `data:audio/wav;base64,${btoa(bin)}`;
+        const kick = () => {
+            el.play().catch(() => {
+                // 被省电暂停 / 竞态打断：页面回前台时再拉起
+            });
+        };
+        document.addEventListener("visibilitychange", kick);
+        kick();
+        this.keepAlive = el;
+        this.keepAliveKick = kick;
+    }
+
+    /** 停掉 WebView 保活音源（彻底停止播放时） */
+    private stopWebViewKeepAlive() {
+        const el = this.keepAlive;
+        if (!el) {
+            return;
+        }
+        this.keepAlive = null;
+        if (this.keepAliveKick) {
+            document.removeEventListener("visibilitychange", this.keepAliveKick);
+            this.keepAliveKick = null;
+        }
+        el.pause();
+        el.removeAttribute("src");
+        try {
+            el.load();
+        } catch {
+            // ignore
+        }
     }
 
     private attachAudioListeners(audio: AudioBackend) {
@@ -839,6 +925,13 @@ class TrackPlayer extends EventEmitter {
         this.autoSkipCount = 0;
         this.qualityRetryCount = 0;
         this.reconnectCount = 0;
+        // 换歌路上 detachAudio 的内部暂停事件会把 userPaused 置回 true（与用户
+        // 主动暂停共用同一条 pause 通道），真正出声即视为用户要播，共播回抢恢复
+        this.userPaused = false;
+        // 原生后端在播：确保 WebView 静音保活也在跑（防 renderer 冻结掐断 JS）
+        if (this.audio instanceof NativeAudioElement) {
+            this.startWebViewKeepAlive();
+        }
         setAtom(musicStateAtom, "playing");
         this.syncMediaSessionState();
     };
@@ -1089,6 +1182,7 @@ class TrackPlayer extends EventEmitter {
             this.emit(TrackPlayerEvents.PlayEnd);
             setAtom(musicStateAtom, "stopped");
             this.clearMediaSession();
+            this.stopWebViewKeepAlive();
             return;
         }
         const index = this.getMusicIndexInPlayList(this._currentMusic);
@@ -1100,6 +1194,7 @@ class TrackPlayer extends EventEmitter {
             this.emit(TrackPlayerEvents.PlayEnd);
             setAtom(musicStateAtom, "stopped");
             this.clearMediaSession();
+            this.stopWebViewKeepAlive();
             return;
         }
         await this.skipToNext();
@@ -1645,6 +1740,8 @@ class TrackPlayer extends EventEmitter {
         this.clearMediaSession();
         this.clearPlayList();
         this._history = [];
+        // 队列彻底清空：WebView 静音保活一并停掉，不留无声媒体占着后台
+        this.stopWebViewKeepAlive();
         try {
             localStorage.removeItem("playProgress");
         } catch {
@@ -1885,6 +1982,8 @@ class TrackPlayer extends EventEmitter {
             this.beginLoading();
         }
 
+        /** 本次起播用的播放器实例（catch 里判断它是否已被换掉） */
+        let playAudio: AudioBackend | null = null;
         try {
             const resolved = await this.resolveMediaUrl(
                 target,
@@ -1905,6 +2004,7 @@ class TrackPlayer extends EventEmitter {
             this.playedFromLocalDownload = !!resolved.localDownload;
             setAtom(playingQualityAtom, resolved.quality);
             const audio = this.audio;
+            playAudio = audio;
             if (!audio) {
                 return;
             }
@@ -1933,11 +2033,25 @@ class TrackPlayer extends EventEmitter {
             }
             this.isLoading = false;
             await audio.play();
-            if (this.pendingPlayId === playId) {
+            // 原生后端的 play() promise 在 pause/ended 事件下也会以成功落定
+            // （换歌的滞后 pause、起播瞬间用户暂停等），是否真的在播以 paused 为准，
+            // 别把被暂停的起播翻成假「播放中」。
+            if (this.pendingPlayId === playId && !audio.paused) {
                 setAtom(musicStateAtom, "playing");
             }
         } catch (e: any) {
-            if (this.pendingPlayId !== playId) {
+            // 播放器实例已被换掉（后端接管 / 预载交接 / 切音质）：旧实例上滞后的
+            // 失败与新歌无关，不进失败链。playAudio 为空说明还没走到取实例那步，
+            // 失败来自解析阶段，照常处理。
+            if (
+                this.pendingPlayId !== playId ||
+                (playAudio && this.audio !== playAudio)
+            ) {
+                return;
+            }
+            // 起播缓冲期间用户主动暂停（WebView 后端的 play() 会以 AbortError 拒绝）：
+            // 是用户意图不是播放失败，暂停态已由 pause 事件维护
+            if (e?.name === "AbortError" && this.userPaused) {
                 return;
             }
             await this.handlePlayFailure(target, describePlayError(e));

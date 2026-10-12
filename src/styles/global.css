@@ -499,6 +499,9 @@ img {
 .mine-cross-pane {
     margin-top: calc(-50px - var(--safe-top));
     height: calc(100% + 50px + var(--safe-top));
+    /* 内容底部多补一段被上移借走的高度：跨页滑动经过时最后一行歌单
+       不被底部播放条 / Tab 栏盖住（确认后由 .home-pane 的 padding 接管） */
+    padding-bottom: calc(16px + var(--safe-bottom));
 }
 
 .home-topbar {

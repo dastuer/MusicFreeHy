@@ -71,7 +71,21 @@ export default function PullToRefresh({
         let pressed = false; // 按下中才可能进入下拉，防止悬停 mousemove 误触发
         let gesture = false; // 本次按下已被下拉刷新接管
         let lastTouchAt = 0; // 触摸后短暂忽略鼠标事件，避免移动端双触发
+        let touchId = -1; // 手势开始时按下的触点 id；其他手指按下/抬起不参与
         const atTop = () => el.scrollTop <= 0;
+
+        /** 从 touches 里找手势正在跟踪的那个触点（多指时取 e.touches[0] 会跳到别的手指） */
+        const trackedTouch = (e: TouchEvent): Touch | null => {
+            if (touchId === -1) {
+                return e.touches[0] ?? null;
+            }
+            for (let i = 0; i < e.touches.length; i += 1) {
+                if (e.touches[i].identifier === touchId) {
+                    return e.touches[i];
+                }
+            }
+            return null;
+        };
 
         const applyPull = (dist: number) => {
             inner.style.transition = "none";
@@ -129,16 +143,24 @@ export default function PullToRefresh({
 
         const onTouchStart = (e: TouchEvent) => {
             lastTouchAt = Date.now();
+            // 下拉进行中另一根手指按下：不重置手势现场，继续跟原手指
+            if (gesture) {
+                return;
+            }
             pressed = true;
-            gesture = false;
-            startY = e.touches[0].clientY;
-            startX = e.touches[0].clientX;
+            const t = e.touches[0];
+            touchId = t ? t.identifier : -1;
+            startY = t ? t.clientY : 0;
+            startX = t ? t.clientX : 0;
         };
         const onTouchMove = (e: TouchEvent) => {
             if (!pressed) {
                 return;
             }
-            const t = e.touches[0];
+            const t = trackedTouch(e);
+            if (!t) {
+                return;
+            }
             if (!gesture) {
                 if (!shouldTakeOver(t.clientX, t.clientY)) {
                     return;
@@ -148,6 +170,7 @@ export default function PullToRefresh({
             e.preventDefault();
             track((t.clientY - startY) * DAMPING);
         };
+        /** 松手收尾：下拉到位触发刷新，否则回弹 */
         const onGestureEnd = () => {
             pressed = false;
             if (!gesture) {
@@ -159,6 +182,23 @@ export default function PullToRefresh({
             } else {
                 collapse(true);
             }
+        };
+
+        const onTouchEnd = (e: TouchEvent) => {
+            // 跟踪的触点还在屏上（另一根手指先抬了）：手势继续
+            if (trackedTouch(e)) {
+                return;
+            }
+            touchId = -1;
+            onGestureEnd();
+        };
+
+        const onTouchCancel = (e: TouchEvent) => {
+            if (trackedTouch(e)) {
+                return;
+            }
+            touchId = -1;
+            onGestureEnd();
         };
 
         const onMouseDown = (e: MouseEvent) => {
@@ -186,8 +226,8 @@ export default function PullToRefresh({
 
         el.addEventListener("touchstart", onTouchStart, { passive: true });
         el.addEventListener("touchmove", onTouchMove, { passive: false });
-        el.addEventListener("touchend", onGestureEnd);
-        el.addEventListener("touchcancel", onGestureEnd);
+        el.addEventListener("touchend", onTouchEnd);
+        el.addEventListener("touchcancel", onTouchCancel);
         el.addEventListener("mousedown", onMouseDown);
         el.addEventListener("mousemove", onMouseMove);
         el.addEventListener("mouseup", onGestureEnd);
@@ -197,8 +237,8 @@ export default function PullToRefresh({
             io.disconnect();
             el.removeEventListener("touchstart", onTouchStart);
             el.removeEventListener("touchmove", onTouchMove);
-            el.removeEventListener("touchend", onGestureEnd);
-            el.removeEventListener("touchcancel", onGestureEnd);
+            el.removeEventListener("touchend", onTouchEnd);
+            el.removeEventListener("touchcancel", onTouchCancel);
             el.removeEventListener("mousedown", onMouseDown);
             el.removeEventListener("mousemove", onMouseMove);
             el.removeEventListener("mouseup", onGestureEnd);

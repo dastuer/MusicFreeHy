@@ -58,6 +58,8 @@ export function useSwipeToDiscover(onSwipe: () => void, enabled = true) {
             paneW: 1,
             samples: [] as ISample[],
             suppressClick: false,
+            /** 手势开始时按下的触点 id；拖动中其他手指按下/抬起不参与（多指不打断） */
+            touchId: -1,
         };
         let mousePressed = false;
         let lastTouchAt = 0;
@@ -134,6 +136,9 @@ export function useSwipeToDiscover(onSwipe: () => void, enabled = true) {
         /** 松手：按位移与速度决定补完切换或回弹 */
         const settle = (byMouse: boolean) => {
             mousePressed = false;
+            // 本次按压收尾：无论有没有形成拖动都复位判定标记，否则下一次
+            // 按下会被 touchstart 的「手势进行中」守卫挡掉，手势现场滞留旧数据
+            g.settled = true;
             if (!g.active || finishing) {
                 return;
             }
@@ -173,16 +178,34 @@ export function useSwipeToDiscover(onSwipe: () => void, enabled = true) {
             }
         };
 
+        /** 从 touches 里找手势正在跟踪的那个触点（多指时取 e.touches[0] 会跳到别的手指） */
+        const trackedTouch = (e: TouchEvent): Touch | null => {
+            if (g.touchId === -1) {
+                return e.touches[0] ?? null;
+            }
+            for (let i = 0; i < e.touches.length; i += 1) {
+                if (e.touches[i].identifier === g.touchId) {
+                    return e.touches[i];
+                }
+            }
+            return null;
+        };
+
         const onTouchStart = (e: TouchEvent) => {
             lastTouchAt = Date.now();
+            // 拖动中另一根手指按下：不重置手势现场，滑动继续跟原手指
+            if (g.active || !g.settled || finishing) {
+                return;
+            }
             const t = e.touches[0];
             if (t) {
+                g.touchId = t.identifier;
                 begin(t.clientX, t.clientY);
             }
         };
 
         const onTouchMove = (e: TouchEvent) => {
-            const t = e.touches[0];
+            const t = trackedTouch(e);
             if (!t || g.settled || finishing) {
                 return;
             }
@@ -205,11 +228,21 @@ export function useSwipeToDiscover(onSwipe: () => void, enabled = true) {
             applyDrag(t.clientX, dx);
         };
 
-        const onTouchEnd = () => {
+        const onTouchEnd = (e: TouchEvent) => {
+            // 跟踪的触点还在屏上（另一根手指先抬了）：滑动继续，不算松手
+            if (trackedTouch(e)) {
+                return;
+            }
+            g.touchId = -1;
             settle(false);
         };
 
-        const onTouchCancel = () => {
+        const onTouchCancel = (e: TouchEvent) => {
+            if (trackedTouch(e)) {
+                return;
+            }
+            g.touchId = -1;
+            g.settled = true; // 本次按压作废：复位判定标记，下次按下重新开始
             // 系统打断：按未达标处理
             if (g.active) {
                 g.active = false;

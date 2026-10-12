@@ -402,13 +402,19 @@ export class NativeAudioElement {
             case "pause": {
                 this.lastReport.paused = true;
                 this._pausedOptimistic = null;
-                this.settlePlay(false);
+                // 不能以 AbortError 拒绝挂起中的 play()：换歌时 detachAudio 对旧歌发的
+                // pause 事件经桥回到 JS 有延迟，本地文件 / 已下载歌曲的音源解析是瞬时
+                // 的，新歌的 play() 往往已先注册，会被这条「滞后 pause」误杀成
+                // 「播放被新的请求中断」→ 弹失败提示 + 自动跳歌。起播瞬间的用户暂停、
+                // 开播时被抢音频焦点同理，都只是暂停不是失败：以成功落定，调用方
+                // 按 paused 状态决定是否翻播放态。
+                this.settlePlay(true);
                 break;
             }
             case "ended": {
                 this._ended = true;
                 this.lastReport.paused = true;
-                this.settlePlay(false);
+                this.settlePlay(true);
                 break;
             }
             case "itemtransition": {
@@ -436,7 +442,11 @@ export class NativeAudioElement {
         this.fire(type, payload);
     }
 
-    /** play() promise 的落定（playing/ended/error） */
+    /**
+     * play() promise 的落定：success=true 统一 resolve（播放已开始，或本次起播
+     * 已被暂停 / 播完接管——暂停不是失败）；success=false 仅用于真正的失败
+     * （error 事件、destroy），以 AbortError / 媒体错误拒绝。
+     */
     private settlePlay(success: boolean) {
         if (success) {
             this.playRejecters.clear();

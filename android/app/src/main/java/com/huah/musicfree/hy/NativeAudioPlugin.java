@@ -190,6 +190,9 @@ public class NativeAudioPlugin extends Plugin {
         ExoPlayer p = new ExoPlayer.Builder(ctx)
             .setMediaSourceFactory(new DefaultMediaSourceFactory(dataSourceFactory))
             .setLoadControl(loadControl)
+            // 播放级优先级（高于下载/后台处理）：抢带宽时 ExoPlayer 的取流
+            // 优先得到带宽，后台续播不被 WebView 页面加载 / 缓存任务挤到断流
+            .setPriority(C.PRIORITY_PLAYBACK)
             .build();
         p.setWakeMode(C.WAKE_MODE_LOCAL);
         p.setHandleAudioBecomingNoisy(true);

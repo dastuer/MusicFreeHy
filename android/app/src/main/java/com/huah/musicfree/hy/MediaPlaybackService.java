@@ -87,6 +87,12 @@ public class MediaPlaybackService extends Service {
     private static final long WAKELOCK_TIMEOUT_MS = 2 * 60 * 60 * 1000L;
     /** 前台心跳间隔：唤醒锁 + WiFi 锁被系统悄悄释放时重新按住 */
     private static final long KEEPALIVE_INTERVAL_MS = 30 * 1000L;
+    /** 切歌宽限期：播放态翻 false（换歌解析中）后仍保持唤醒锁一段时间——
+     *  音源解析在 WebView 里跑，熄屏后台下立刻掉锁会让 CPU 休眠、解析停摆，
+     *  表现为后台无法加载下一首；宽限期内重新开播即无缝续上 */
+    private static final long KEEPALIVE_GRACE_MS = 60 * 1000L;
+    /** 上次播放中上报的时间戳：宽限期判断依据 */
+    private static volatile long sLastPlayingAt = 0L;
 
     private static MediaPlaybackService instance;
 
@@ -282,6 +288,10 @@ public class MediaPlaybackService extends Service {
         sPlaying = playing;
         sPositionMs = (long) (positionSec * 1000);
         sPositionWall = SystemClock.elapsedRealtime();
+        if (playing) {
+            // 切歌宽限期的锚点：每次「仍在播」的上报都续期
+            sLastPlayingAt = sPositionWall;
+        }
         if (rate > 0) {
             sRate = (float) rate;
         }
@@ -335,9 +345,10 @@ public class MediaPlaybackService extends Service {
         updateKeepAliveTick();
     }
 
-    /** 播放中持有唤醒锁与 WiFi 锁，暂停/停止即释放 */
+    /** 播放中持有唤醒锁与 WiFi 锁；停止（非切歌）即释放 */
     private void updateKeepAlive() {
-        if (sPlaying) {
+        boolean keep = sPlaying || isWithinGrace();
+        if (keep) {
             try {
                 PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
                 if (pm != null) {
@@ -377,9 +388,16 @@ public class MediaPlaybackService extends Service {
         }
     }
 
-    /** 播放中起前台心跳：校验唤醒锁 / WiFi 锁仍被持有，掉了就重新按住 */
+    /** 是否处于切歌宽限期内（最近 60s 内仍在播过） */
+    private static boolean isWithinGrace() {
+        return sLastPlayingAt > 0
+            && SystemClock.elapsedRealtime() - sLastPlayingAt < KEEPALIVE_GRACE_MS;
+    }
+
+    /** 播放中起前台心跳：校验唤醒锁 / WiFi 锁仍被持有，掉了就重新按住；
+     *  切歌宽限期内继续跑，宽限期过后补一次释放 */
     private void updateKeepAliveTick() {
-        if (sPlaying) {
+        if (sPlaying || isWithinGrace()) {
             if (!keepAliveTicking) {
                 keepAliveTicking = true;
                 main.postDelayed(keepAliveTick, KEEPALIVE_INTERVAL_MS);
