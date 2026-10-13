@@ -1,5 +1,14 @@
 import { atom, getDefaultStore } from "jotai";
-import { callNativeMethod, nativePlatform, localFileUrl, writeAndroidFile, writeIosFile } from "./native";
+import {
+    callNativeMethod,
+    nativeCancelDownload,
+    nativeDownloadFile,
+    nativeHttpRequest,
+    nativePlatform,
+    localFileUrl,
+    writeAndroidFile,
+    writeIosFile,
+} from "./native";
 import { getProxyBase } from "./net";
 import { b64urlEncode } from "./ipc";
 
@@ -406,6 +415,38 @@ async function doStore(request: IStoreRequest) {
         ) {
             headers["User-Agent"] = source.userAgent;
         }
+        // Android 优先走原生直落磁盘（HTTP 拉流 + 写盘整体在原生线程，字节不过
+        // JS 桥）——后台播放时 WebView 里不再有 base64 编码/GC/桥往返的 CPU
+        // 风暴，这是「后台开其他应用卡顿」的主治。失败再回退 blob 过桥路径。
+        const direct = nativePlatform() === "android" && androidCacheDirCached
+            ? await directAndroidCacheStore(key, musicItem, source!.url!, headers, abort.signal)
+            : null;
+        if (direct) {
+            if (abort.signal.aborted) {
+                return;
+            }
+            // 试听片段不入缓存（与 blob 路径同规则）
+            if (looksLikeTrialFragment(direct.size, musicItem.duration)) {
+                console.warn(
+                    `[audioCache] 「${musicItem.title}」解析到试听片段（${formatAudioCacheSize(
+                        direct.size,
+                    )}/${musicItem.duration}s），跳过缓存`,
+                );
+                return;
+            }
+            const index = readIndex();
+            index[key] = {
+                size: direct.size,
+                lastUsed: Date.now(),
+                path: direct.path,
+                title: musicItem.title,
+                artist: musicItem.artist,
+                quality,
+            };
+            writeIndex(index);
+            await enforceAudioCacheLimit();
+            return;
+        }
         const blob = await fetchAudioBlob(source!.url!, headers, abort.signal);
         if (abort.signal.aborted) {
             return;
@@ -443,6 +484,64 @@ async function doStore(request: IStoreRequest) {
             activeAbort = null;
         }
         pendingKeys.delete(key);
+    }
+}
+
+/* ---------- Android 原生直落磁盘（播放缓存主通道） ---------- */
+
+/**
+ * 经 Storage.downloadFile（原生 OkHttp 级拉流 + 磁盘直写）缓存一首歌：
+ * 字节完全不过 JS 桥——没有 base64 编码、没有 Blob 全量驻留、没有 JNI 往返，
+ * WebView 主线程在整个下载期间零参与。后台播放时的 CPU/内存成本与
+ * 网易云等纯原生播放器同量级。
+ *
+ * 返回 null 表示原生通道不可用/失败（调用方回退 blob 过桥路径）。
+ */
+async function directAndroidCacheStore(
+    key: string,
+    musicItem: IMusic.IMusicItem,
+    url: string,
+    headers: Record<string, string>,
+    signal: AbortSignal,
+): Promise<{ path: string; size: number } | null> {
+    // 扩展名先于下载确定（destPath 要完整文件名）：直链带后缀直接用；
+    // 没有就用一次 HEAD 探测 content-type（与 musicDownload 直落路径同规则）
+    let ext = inferExt(url, "");
+    if (ext === "mp3" && !/\.\w{2,5}(\?|$)/.test(url)) {
+        try {
+            const head = await nativeHttpRequest({ url, method: "HEAD", headers });
+            ext = inferExt(url, head.headers?.["content-type"] ?? "");
+        } catch {
+            // 探测失败用兜底扩展名
+        }
+    }
+    const path = `${androidCacheDirCached}/${safeKey(key)}.${ext}`;
+    const onAbort = () => {
+        void nativeCancelDownload(`cache-${key}`);
+    };
+    signal.addEventListener("abort", onAbort);
+    try {
+        const saved = await nativeDownloadFile(
+            `cache-${key}`,
+            url,
+            headers,
+            path,
+            () => {}, // 播放缓存不需要进度 UI
+        );
+        if (!saved?.size) {
+            // size=0：落盘异常（文件实际不在），清掉产物按失败处理
+            callNativeMethod("Storage", "deleteFile", { path }).catch(() => {});
+            return null;
+        }
+        return { path, size: saved.size };
+    } catch (e: any) {
+        if (signal.aborted) {
+            return null;
+        }
+        console.warn(`[audioCache] 原生直落缓存「${musicItem.title}」失败，回退过桥路径`, e?.message ?? e);
+        return null;
+    } finally {
+        signal.removeEventListener("abort", onAbort);
     }
 }
 
