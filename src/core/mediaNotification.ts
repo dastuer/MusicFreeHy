@@ -18,6 +18,7 @@ import {
     musicStateAtom,
     progressAtom,
     rateAtom,
+    setNextTrackMetaCache,
     TrackPlayerSingleton,
 } from "./trackPlayer";
 import type { MusicState } from "./trackPlayer";
@@ -76,6 +77,34 @@ function currentSnapshot() {
         duration: progress.duration || music?.duration || 0,
         rate: store.get(rateAtom) || 1,
     };
+}
+
+/** 歌曲 → 通知元数据载荷。超大内联封面不进通知（原生兜底用应用图标）。 */
+function metadataPayload(music: IMusic.IMusicItem) {
+    let artwork = typeof music.artwork === "string" ? music.artwork : "";
+    if (artwork.length > 64 * 1024) {
+        artwork = "";
+    }
+    return {
+        title: music.title ?? "",
+        artist: music.artist ?? "",
+        album: music.album ?? "",
+        artwork,
+        duration: music.duration || 0,
+        // 原生侧按它认「现在播的是哪一首」：页面冻结期间自行续播后通知才能切对
+        mediaId: `${music.platform}-${music.id}`,
+    };
+}
+
+/**
+ * 预登记下一首的元数据（不改当前通知）。播放器预载下一首时调用：
+ * 页面后台被系统冻结、ExoPlayer 自行续播时，原生侧才有新歌的标题/封面可切换。
+ */
+function cacheNextTrackMetadata(music: IMusic.IMusicItem) {
+    if (!onAndroid()) {
+        return;
+    }
+    callNative("cacheMetadata", metadataPayload(music));
 }
 
 /** 是否已加入电池优化白名单（非安卓原生环境返回 undefined） */
@@ -153,6 +182,10 @@ export function setupMediaNotification() {
     started = true;
     const store = getDefaultStore();
 
+    // 播放器预载下一首时把它的元数据提前送进原生侧（循环依赖在 trackPlayer 侧
+    // 用 setter 注入解开，见 setNextTrackMetaCache）
+    setNextTrackMetaCache(cacheNextTrackMetadata);
+
     // 换歌 → 推元数据；清空队列 → 收通知
     store.sub(currentMusicAtom, () => {
         const music = store.get(currentMusicAtom);
@@ -161,17 +194,7 @@ export function setupMediaNotification() {
             callNative("stop");
             return;
         }
-        let artwork = typeof music.artwork === "string" ? music.artwork : "";
-        if (artwork.length > 64 * 1024) {
-            artwork = ""; // 超大内联封面不进通知（原生兜底用应用图标）
-        }
-        callNative("updateMetadata", {
-            title: music.title ?? "",
-            artist: music.artist ?? "",
-            album: music.album ?? "",
-            artwork,
-            duration: music.duration || 0,
-        });
+        callNative("updateMetadata", metadataPayload(music));
     });
 
     // 播放状态变化 → 推播放状态；停止 → 收通知

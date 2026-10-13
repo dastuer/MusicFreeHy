@@ -5,6 +5,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.webkit.WebView;
 
+import com.getcapacitor.Bridge;
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
@@ -19,30 +20,34 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(UpdatePlugin.class);
         super.onCreate(savedInstanceState);
 
-        setupWebViewRendererPriority();
+        // WebView 就绪后再钉渲染进程策略（getBridge 在 super.onCreate 后才有值）
+        pinWebViewRenderer();
     }
 
     /**
-     * 音频本体在原生 ExoPlayer，但换歌预加载 / 播完簿记 / 断流自救都靠 WebView 里的
-     * JS 驱动。WebView 默认 renderer 策略是 RENDERER_PRIORITY_IMPORTANT +
-     * waivedWhenNotVisible=true——页面一退后台渲染进程就进系统「可冻结」名单，
-     * 内存吃紧或后台时间一长就被冻结，JS 整体停摆：结尾 30 秒的 appendNextSource
-     * 预加载没发生，ExoPlayer 播完当前曲进 STATE_ENDED 就静音了，表现为
-     * 「后台播着播着自己停，重进 app 才继续」。关掉 waive 让渲染进程保持
-     * IMPORTANT 优先级，前台服务 + 唤醒锁继续负责不让进程被杀。
+     * 后台 JS 保活（根治「切后台无法加载下一首 / 通知栏切歌失灵」）：
+     *
+     * WebView 不可见时，默认的渲染进程优先级策略（IMPORTANT + 不可见即 waive）
+     * 会把渲染进程降级，Chromium 随之冻结/回收它——整个播放控制面都在页面 JS 里：
+     * 曲终换歌的预加载、音源解析 Worker、通知栏与耳机动作的转发，全部随之停摆。
+     *
+     * 显式改成 IMPORTANT 且不可见也不 waive，配合 Capacitor 默认的 KeepRunning
+     * （不退后台就 pauseTimers）与播放前台服务，页面 JS 在后台持续运行。
+     * 音频本体在 ExoPlayer（原生）里，本条只关「JS 是否还能跑」。
      */
-    private void setupWebViewRendererPriority() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+    private void pinWebViewRenderer() {
+        // setRendererPriorityPolicy 是 API 26+；minSdk 24 的老机器没有它，跳过即可
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             return;
         }
         try {
-            WebView webView = getBridge() != null ? getBridge().getWebView() : null;
+            Bridge bridge = getBridge();
+            WebView webView = bridge == null ? null : bridge.getWebView();
             if (webView != null) {
-                // RENDERER_PRIORITY_IMPORTANT = 1（android.webkit.RendererPriority
-                // 在部分 compileSdk 下不可见，直接用文档常量值）
-                webView.setRendererPriorityPolicy(1, false);
+                webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
             }
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            // 个别 ROM 的 WebView 实现不认这个策略：退化为默认行为，不影响播放
             e.printStackTrace();
         }
     }
