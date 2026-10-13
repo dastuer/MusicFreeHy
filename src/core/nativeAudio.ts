@@ -155,6 +155,10 @@ export class NativeAudioElement {
         }
         const startMs = this._pendingSeekMs && this._pendingSeekMs > 0 ? this._pendingSeekMs : undefined;
         this._pendingSeekMs = null;
+        // 焦点模式随装载同步：服务被系统杀掉重建后原生侧回到默认（不入仲裁），
+        // JS 侧设置页改过独占模式的话，这里把用户选择重新声明一遍
+        callNativeMethod(PLUGIN, "setAudioFocusMode", { focusEnabled: this._focusRequested })
+            .catch(() => {});
         // 装载元数据随行：通知栏/锁屏直接显示（不再走 metadata 上报通道）
         callNativeMethod(PLUGIN, "loadTrack", {
             src: this._src,
@@ -239,6 +243,9 @@ export class NativeAudioElement {
     set autoplay(a: boolean) {
         this._autoplay = !!a;
     }
+
+    /** 最近一次设置给原生的焦点模式（装载时随行重发，服务重建后恢复用户选择） */
+    private _focusRequested = false;
 
     /** 装载当前曲时随行的元数据（通知栏/锁屏显示；由 trackPlayer 在赋 src 前设置） */
     private _meta: { title: string; artist: string; album: string; artworkUri: string } | null =
@@ -416,6 +423,7 @@ export class NativeAudioElement {
 
     /** 共播开关切换：true=参与系统焦点仲裁，false=完全不响应焦点 */
     setAudioFocusMode(focusEnabled: boolean) {
+        this._focusRequested = focusEnabled;
         callNativeMethod(PLUGIN, "setAudioFocusMode", { focusEnabled }).catch(() => {});
     }
 

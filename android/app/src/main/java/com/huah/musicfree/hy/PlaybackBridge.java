@@ -218,8 +218,9 @@ public class PlaybackBridge extends Plugin {
             call.reject("service unavailable");
             return;
         }
-        Boolean focus = call.getBoolean("focusEnabled", Boolean.TRUE);
-        svc.setAudioFocusMode(focus == null || focus);
+        Boolean focus = call.getBoolean("focusEnabled");
+        // 缺省 false：与服务的默认一致（不入仲裁，抖音抢焦点不影响播放）
+        svc.setAudioFocusMode(focus != null && focus);
         call.resolve();
     }
 

@@ -872,19 +872,26 @@ class TrackPlayer extends EventEmitter {
     };
 
     /**
-     * 共播模式下被抢了音频焦点（其他应用开播把 WebView 的播放暂停了）：
-     * 先同步回抢一次，抢不回来就进「续播巡逻」——短暂停表后按指数退避重试，
-     * 直到续播成功 / 用户暂停 / 换歌 / 巡逻时间耗尽。
+     * 把共播开关同步给原生后端的焦点策略：
+     * 共播开（allowCoPlay=true）→ ExoPlayer 不参与音频焦点仲裁（抖音随便抢，
+     * 我们不动）；共播关 → 正常仲裁（别人开播我们让位暂停）。
+     * 原生侧默认即不入仲裁（focusEnabled=false），这里只在用户显式选独占时下发 true。
+     * WebView 回退路径没有这个能力，靠 handleFocusLossSilently 的一次回抢兜底。
+     */
+    applyNativeFocusMode() {
+        const audio = this.audio;
+        if (audio instanceof NativeAudioElement) {
+            audio.setAudioFocusMode(!getAllowCoPlay());
+        }
+    }
+
+    /**
+     * WebView 后端被抢了音频焦点（其他应用开播把播放暂停了）：静默回抢一次。
      *
-     * 为什么单次回抢不够（刷抖音卡顿暂停的实测根因）：抖音这种「声明 TRANSIENT
-     * 焦点再立即放弃」的高频抢焦点应用，会在 pause 事件同帧再次抢走焦点，此时
-     * 同步 play() 常抛 AbortError；而页面在后台时定时器被内核强节流，旧实现
-     * 又没有重试，让位一次就永久停了（已暂停的页面没有任何事件能再触发续播）。
-     * 音频焦点只是建议性的，系统本来就允许两个流混音：巡逻期每次 play() 成功后
-     * 音频与对方同时出声（参考网易云的做法：抢不过就等它松手再续，而不是让位）。
-     *
-     * 原生后端（ExoPlayer）下这个方法不会被触发：共播开时根本不参与焦点仲裁，
-     * 没有任何外部应用能让我们暂停 —— 这正是把播放搬出 WebView 的意义。
+     * 只回抢一次、不巡逻：抖音这类「声明 TRANSIENT 焦点再立即放弃」的高频抢焦点
+     * 应用会与 play() 形成拉锯，反复暂停↔启动比让位更吵。抢不回来就保持暂停
+     * （用户按播放继续）；原生后端不走这条路径——ExoPlayer 默认不入焦点仲裁，
+     * 没有任何外部应用能让我们暂停。
      *
      * 全程静默：不翻 UI 播放态、不刷媒体通知，避免焦点拉锯时界面抖动。
      * 用户主动暂停（暂停键/通知栏/换歌）走 internalPausePending，不进这里。
@@ -905,88 +912,17 @@ class TrackPlayer extends EventEmitter {
             return;
         }
         const seq = ++this.coPlayResumeSeq;
-        audio.play().catch((e) => {
-            if (seq !== this.coPlayResumeSeq || audio !== this.audio || this.userPaused) {
-                return;
-            }
-            console.warn("[trackPlayer] 共播回抢被拦截，转入续播巡逻", e?.name ?? e);
-            this.startCoPlayResumeWatch(seq);
+        audio.play().catch(() => {
+            // 被焦点占用：保持暂停，不进入重试拉锯
         });
     }
 
-    /**
-     * 把共播开关同步给原生后端的焦点策略：
-     * 共播开 → ExoPlayer 不参与音频焦点仲裁（抖音随便抢，我们不动）；
-     * 共播关 → 正常仲裁（别人开播我们让位暂停）。
-     * WebView 回退路径没有这个能力，靠上面的巡逻兜底。
-     */
-    applyNativeFocusMode() {
-        const audio = this.audio;
-        if (audio instanceof NativeAudioElement) {
-            audio.setAudioFocusMode(!getAllowCoPlay());
-        }
-    }
-
-    /**
-     * 续播巡逻：play() 被拒后按 300ms→600ms→…（上限 2s）退避重试，总巡逻 45s。
-     * 后台页面 setInterval 可能被节流到 1 次/分钟，所以另挂 visibilitychange
-     * 兜底：抖音退后台 / 用户切回来时立刻补一次，不让「页面不可见」拖死巡逻。
-     */
-    private startCoPlayResumeWatch(seq: number) {
-        this.stopCoPlayResumeWatch();
-        let delay = 300;
-        const startedAt = Date.now();
-        const attempt = () => {
-            this.coPlayResumeTimer = null;
-            const audio = this.audio;
-            if (
-                seq !== this.coPlayResumeSeq
-                || !audio
-                || !audio.src
-                || this.userPaused
-                || !getAllowCoPlay()
-            ) {
-                this.stopCoPlayResumeWatch();
-                return;
-            }
-            if (!audio.paused) {
-                // 已续上（可能是回抢成功 / 用户点了播放）
-                this.stopCoPlayResumeWatch();
-                return;
-            }
-            if (Date.now() - startedAt > 45000) {
-                this.stopCoPlayResumeWatch();
-                console.warn("[trackPlayer] 共播续播巡逻超时，保持暂停");
-                return;
-            }
-            audio.play().catch(() => {
-                // 仍被焦点占用 / 自动播放拦截：等下一轮
-            });
-            delay = Math.min(delay * 2, 2000);
-            this.coPlayResumeTimer = setTimeout(attempt, delay);
-        };
-        this.coPlayResumeTimer = setTimeout(attempt, delay);
-        document.addEventListener("visibilitychange", this.coPlayResumeOnVisible);
-    }
-
-    private coPlayResumeOnVisible = () => {
-        if (document.visibilityState === "visible" && this.coPlayResumeTimer) {
-            // 回前台立刻补一次，别干等被节流的 interval
-            const audio = this.audio;
-            if (audio?.paused && audio.src && !this.userPaused && getAllowCoPlay()) {
-            audio.play().catch(() => {
-                // 失败无妨，定时器还在巡逻
-            });
-            }
-        }
-    };
-
+    /** 巡逻机制已随拉锯一并移除：只清计时器（保险，避免遗留句柄） */
     private stopCoPlayResumeWatch() {
         if (this.coPlayResumeTimer) {
             clearTimeout(this.coPlayResumeTimer);
             this.coPlayResumeTimer = null;
         }
-        document.removeEventListener("visibilitychange", this.coPlayResumeOnVisible);
     }
 
     private onAudioPlay = () => {

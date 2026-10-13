@@ -90,8 +90,13 @@ public class MediaPlaybackService extends MediaSessionService {
 
     private MediaSession mediaSession;
     private ExoPlayer player;
-    /** 共播开关：false=完全不参与音频焦点仲裁（其他应用随便抢） */
-    private volatile boolean focusEnabled = true;
+    /**
+     * 音频焦点仲裁开关，默认 false（不入仲裁）。音乐应用与短视频/视频应用
+     * 天然共场景：入仲裁则对方每次抢焦点我们都暂停（抖音高频抢焦点时表现为
+     * 「反复暂停和启动」的拉锯），Android 音频焦点本就是建议性的、允许混音。
+     * 设置页「允许与其他应用同时播放」可显式切回独占模式（true）。
+     */
+    private volatile boolean focusEnabled = false;
     /** 进度心跳：播放中每秒向 JS 推 timeupdate（对齐 HTMLAudioElement 节奏） */
     private static final long PROGRESS_INTERVAL_MS = 1000L;
     private final Runnable progressTick = new Runnable() {
