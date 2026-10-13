@@ -873,21 +873,27 @@ class TrackPlayer extends EventEmitter {
     }
 
     private onAudioPause = () => {
-        // 先消费「主动暂停」标记：没标记的 pause 事件就是系统抢音频焦点导致的
+        // 先消费「主动暂停」标记：没标记的 pause 事件来自外部
         const internal = this.internalPausePending;
         this.internalPausePending = false;
         this.clearStallWatch();
         if (this.isLoading) {
             return;
         }
-        if (internal) {
+        // 原生后端：非 JS 发起的 pause 只可能来自用户（通知栏/耳机/锁屏按键经
+        // Media3 直达播放器，不经过这里）或拔耳机（becoming noisy）——全是用户
+        // 意图，按主动暂停对待；共播开时系统无法经焦点暂停我们，不存在
+        // 「外部抢焦点」来源。此前缺这层判断：通知栏暂停被当成外部暂停，
+        // 共播开时被 handleFocusLossSilently 立即回抢 → 表现为「无法暂停」。
+        if (internal || this.audio instanceof NativeAudioElement) {
             this.userPaused = true;
         }
         if (this._currentMusic) {
             setAtom(musicStateAtom, "paused");
         }
         this.syncMediaSessionState();
-        if (!internal) {
+        // 仅 WebView 后端有「被抢焦点」这回事：静默回抢一次
+        if (!internal && !(this.audio instanceof NativeAudioElement)) {
             this.handleFocusLossSilently();
         }
     };
