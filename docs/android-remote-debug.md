@@ -1,5 +1,9 @@
 # Android 真机无线调试指南（Windows）
 
+> **适用场景**：Windows 环境下的真机连接与验证。日常调试请**优先使用本地安卓模拟器**
+> （macOS 环境配置与流程见 [android-emulator-debug.md](android-emulator-debug.md)），
+> 真机用于最终验证后台保活、厂商省电策略、音频焦点等模拟器覆盖不到的行为。
+
 本项目在 Windows 上的 Android 真机调试环境为**精简安装**（无模拟器、无 Android Studio），
 全部组件位于 `D:\Android`，通过无线 ADB 连接手机构建、安装与调试。
 

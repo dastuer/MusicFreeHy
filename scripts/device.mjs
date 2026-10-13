@@ -1,6 +1,9 @@
 /**
  * 编译 + 局域网调试快捷脚本（Windows / macOS 通用）
  *
+ * 调试目标优先本地安卓模拟器（见 docs/android-emulator-debug.md）：
+ * 同时连着模拟器与真机时，一律选择 emulator-*；真机仅用于最终验证。
+ *
  * 用法：
  *   npm run android:connect            # 连接局域网设备（mDNS 自动发现，或 --host ip:port 指定）
  *   npm run android:run                # 编译 Web + 同步 + Gradle 打包 + 安装启动 + 开调试端口
@@ -103,7 +106,7 @@ function adb(args, { quiet = false } = {}) {
     return out;
 }
 
-/** 当前已授权连接的设备序列号；无设备返回 null */
+/** 当前已授权连接的设备序列号（模拟器优先）；无设备返回 null */
 function connectedDevice() {
     try {
         const out = adb(["devices"], { quiet: true });
@@ -112,9 +115,10 @@ function connectedDevice() {
             .slice(1)
             .map((l) => l.trim())
             .filter(Boolean);
-        const ready = rows.filter((l) => /\tdevice$/.test(l));
+        const ready = rows.filter((l) => /\tdevice$/.test(l)).map((l) => l.split("\t")[0]);
         if (ready.length) {
-            return ready[0].split("\t")[0];
+            // 调试优先使用本地模拟器：emulator-* 排在真机前
+            return ready.find((s) => s.startsWith("emulator-")) ?? ready[0];
         }
         if (rows.some((l) => /unauthorized|offline/.test(l))) {
             console.warn("! 设备已连接但未授权/离线，请在手机上确认授权弹窗");
@@ -156,7 +160,9 @@ async function ensureDevice(hostArg) {
         }
     }
     die(
-        "未发现设备。手机开启「开发者选项 → 无线调试」，" +
+        "未发现设备。优先启动本地模拟器（macOS：Android Studio → Device Manager，" +
+            "或 ~/Library/Android/sdk/emulator/emulator -avd <AVD名>，见 docs/android-emulator-debug.md）；" +
+            "用真机则开「开发者选项 → 无线调试」，" +
             "用其页面显示的 IP:端口 执行：npm run android:connect -- --host 192.168.x.x:port",
     );
 }

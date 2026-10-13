@@ -58,6 +58,8 @@ dependencies {
     // 原生音频后端：共播时完全不入音频焦点仲裁 + 30~60s 大缓冲（WebView <audio> 做不到）
     implementation "androidx.media3:media3-exoplayer:1.8.0"
     implementation "androidx.media3:media3-datasource-okhttp:1.8.0"
+    // 媒体会话服务：队列/通知/媒体按键全部原生接管（后台播放不依赖 WebView JS 存活）
+    implementation "androidx.media3:media3-session:1.8.0"
     implementation "com.squareup.okhttp3:okhttp:4.12.0"
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"

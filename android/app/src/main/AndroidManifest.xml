@@ -31,11 +31,15 @@
             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
         </provider>
 
-        <!-- 播放通知前台服务：系统下拉栏媒体卡片（见 MediaPlaybackService） -->
+        <!-- 原生播放内核：Media3 MediaSessionService（队列/通知/媒体按键全原生，见 MediaPlaybackService） -->
         <service
             android:name=".MediaPlaybackService"
-            android:exported="false"
-            android:foregroundServiceType="mediaPlayback" />
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
+        </service>
     </application>
 
     <!-- Permissions -->
