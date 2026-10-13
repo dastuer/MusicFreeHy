@@ -325,6 +325,25 @@ let storeChain: Promise<void> = Promise.resolve();
 let activeAbort: AbortController | null = null;
 
 /**
+ * 开播静默窗（毫秒）：开播后这段时间内不启动整首缓存下载。
+ * 下载与播放取流抢同一条带宽，而起播/开播初期的取流最关键（缓冲水位还没
+ * 建起来，欠载直接等于可听的卡顿）；水位铺满后（30~60s 缓冲）再让路也不迟。
+ */
+const STARTUP_QUIET_MS = 20000;
+/** 最近一次「开播完成」的时间戳（playbackStartedAt 告知） */
+let playbackStartedAt = 0;
+
+/** 由播放器在每次真正出声时调用：重置开播静默窗 */
+export function notifyPlaybackStarted() {
+    playbackStartedAt = Date.now();
+}
+
+/** 当前是否处于开播静默窗内（时间基准缺失时视为不在窗内，不阻塞） */
+function inStartupQuietWindow(): boolean {
+    return playbackStartedAt > 0 && Date.now() - playbackStartedAt < STARTUP_QUIET_MS;
+}
+
+/**
  * 请求后台缓存一首歌（播放 / 切音质解析出直链后调用，fire-and-forget）。
  * 已缓存、已在队列、本地歌曲、浏览器无 Cache API 时跳过；
  * 有在途下载时中止它——刚点开的歌优先，被中止的那首下次播放再试。
@@ -359,6 +378,11 @@ export function requestAudioCacheStore(
 
 async function doStore(request: IStoreRequest) {
     const { key, musicItem, quality, source } = request;
+    // 开播静默窗：等窗口过了再下（等待期间来了新请求会按序接上，不丢任务）。
+    // 分段等待以便长等待中窗口被重置（切歌重新开播）时续等。
+    while (inStartupQuietWindow()) {
+        await new Promise((r) => setTimeout(r, 2000));
+    }
     const abort = new AbortController();
     activeAbort = abort;
     try {
@@ -409,9 +433,43 @@ async function doStore(request: IStoreRequest) {
     }
 }
 
+/* ---------- 共播让路 ---------- */
+
+/** 共播节流：每个数据块之间的停顿（ms）。实测能显著压低下载占用的瞬时带宽，
+ *  播放取流（ExoPlayer，原生自有连接）即可优先拿到带宽。 */
+const COPLAY_CHUNK_PAUSE_MS = 120;
+/** 每块拉取的octets：与停顿配合约等于把下载速率压到 ~1MB/s 上下（视网络） */
+const COPLAY_CHUNK_BYTES = 256 * 1024;
+/** 共播状态缓存时长：轮询原生有成本，10s 内直接用上次结果 */
+const COPLAY_STATE_TTL = 10000;
+
+let coplayStateAt = 0;
+let coplayCount = -1;
+
+/** 当前共播中的其他媒体数量（-1 = 查询失败，按无共播处理） */
+async function queryCoplayCount(): Promise<number> {
+    if (Date.now() - coplayStateAt < COPLAY_STATE_TTL) {
+        return coplayCount;
+    }
+    try {
+        const res = await callNativeMethod("PlaybackBridge", "otherMediaPlaying");
+        coplayCount = Number(res?.count) || 0;
+    } catch {
+        // 浏览器 / 老包没有这个方法：无从判断，按无共播
+        coplayCount = 0;
+    }
+    coplayStateAt = Date.now();
+    return coplayCount;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 /**
  * 拉取音频整包：直连优先（原生端 CapacitorHttp 接管 fetch，可带自定义请求头），
  * 带请求头的直链在浏览器被 CORS 拦截时走伴生代理 /media 转发。
+ *
+ * 下载按块进行（Range 请求），共播时块间插入停顿为播放取流让路；
+ * 音源服务器不支持 Range 时自动退化为整包一次拉取（不让路，保功能）。
  */
 async function fetchAudioBlob(
     url: string,
@@ -432,6 +490,27 @@ async function fetchAudioBlob(
         }
         return blob;
     };
+    // 先按 HEAD 探测（音源直链大多不支持 Range 或伪装成整包）；确认支持分段
+    // 且长度已知时改走分块下载 + 共播让路，否则走整包（与旧行为一致）
+    try {
+        const withHeaders = Object.keys(headers).length > 0;
+        const head = await fetch(url, {
+            method: "HEAD",
+            signal,
+            ...(withHeaders ? { headers } : {}),
+        });
+        const acceptsRanges = String(head.headers?.get?.("accept-ranges") ?? "").includes("bytes");
+        const totalLen = Number(head.headers?.get?.("content-length") ?? 0);
+        try { head.body?.cancel(); } catch { /* ignore */ }
+        if (acceptsRanges && totalLen > COPLAY_CHUNK_BYTES) {
+            const chunked = await attemptChunked(url, withHeaders, headers, totalLen, signal);
+            if (chunked) {
+                return chunked;
+            }
+        }
+    } catch {
+        // HEAD 探测失败：直连整包，与旧行为一致
+    }
     try {
         return await attempt(url, true);
     } catch (e) {
@@ -447,6 +526,47 @@ async function fetchAudioBlob(
             false,
         );
     }
+}
+
+/**
+ * 分块下载（Range 请求依次拼接）。任一块失败返回 null，由调用方回退整包。
+ * 共播时（otherMediaPlaying > 0）块间停顿 COPLAY_CHUNK_PAUSE_MS 让出带宽。
+ */
+async function attemptChunked(
+    target: string,
+    withHeaders: boolean,
+    headers: Record<string, string>,
+    totalLen: number,
+    signal: AbortSignal,
+): Promise<Blob | null> {
+    const chunks: BlobPart[] = [];
+    let pos = 0;
+    while (pos < totalLen) {
+        if (signal.aborted) {
+            return null;
+        }
+        const end = Math.min(pos + COPLAY_CHUNK_BYTES, totalLen) - 1;
+        let chunk: ArrayBuffer;
+        try {
+            const resp = await fetch(target, {
+                ...(withHeaders && Object.keys(headers).length ? { headers } : undefined),
+                signal,
+                headers: { Range: `bytes=${pos}-${end}` },
+            });
+            if (!resp.ok && resp.status !== 206) {
+                return null;
+            }
+            chunk = await resp.arrayBuffer();
+        } catch {
+            return null;
+        }
+        chunks.push(chunk);
+        pos = end + 1;
+        if (pos < totalLen && (await queryCoplayCount()) > 0) {
+            await sleep(COPLAY_CHUNK_PAUSE_MS);
+        }
+    }
+    return new Blob(chunks);
 }
 
 /** 写入缓存目录 / Cache API，返回要进索引的位置信息；失败返回 null */

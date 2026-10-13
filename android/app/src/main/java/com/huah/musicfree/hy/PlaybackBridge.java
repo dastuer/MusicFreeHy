@@ -278,6 +278,39 @@ public class PlaybackBridge extends Plugin {
         }
     }
 
+    /**
+     * 除本应用外还有几个媒体会话在活跃播放（共播检测）。
+     * 共播时缓存下载要做带宽让路（分段节流），播放取流优先。
+     */
+    @PluginMethod
+    public void otherMediaPlaying(PluginCall call) {
+        try {
+            android.media.AudioManager am = (android.media.AudioManager)
+                getContext().getSystemService(Context.AUDIO_SERVICE);
+            int count = 0;
+            if (am != null) {
+                for (android.media.AudioPlaybackConfiguration cfg :
+                    am.getActivePlaybackConfigurations()) {
+                    // 只认真正的媒体用途（USAGE_MEDIA 1 / GAME 2），通话、提示音不算
+                    int usage = cfg.getAudioAttributes().getUsage();
+                    if (usage == android.media.AudioAttributes.USAGE_MEDIA
+                        || usage == android.media.AudioAttributes.USAGE_GAME) {
+                        count++;
+                    }
+                }
+            }
+            JSObject ret = new JSObject();
+            // 减 1：我们自己（ExoPlayer 的 AudioTrack）也在这份列表里；
+            // 服务没起时没有自家会话，不做减法也只会多算一次，宁多让不少让
+            ret.put("count", Math.max(count - (activeService != null ? 1 : 0), 0));
+            call.resolve(ret);
+        } catch (Exception e) {
+            JSObject ret = new JSObject();
+            ret.put("count", 0);
+            call.resolve(ret);
+        }
+    }
+
     // ---------- 电池优化（原 MediaNotificationPlugin 迁入） ----------
 
     @PluginMethod

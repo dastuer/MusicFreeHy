@@ -5,7 +5,7 @@ import { getPluginByMedia, getPlugins, pluginCall } from "./ipc";
 import { setMusicHistory } from "./musicHistory";
 import { getQuality, setQuality, getConfig, getAllowCoPlay } from "./appConfig";
 import { isNative, localFileUrl } from "./native";
-import { lookupCachedSrc, requestAudioCacheStore } from "./audioCache";
+import { lookupCachedSrc, notifyPlaybackStarted, requestAudioCacheStore } from "./audioCache";
 import {
     createAudioElement,
     destroyAudioBackend,
@@ -1015,6 +1015,9 @@ class TrackPlayer extends EventEmitter {
         this.autoSkipCount = 0;
         this.qualityRetryCount = 0;
         this.reconnectCount = 0;
+        // 真正出声：重置缓存下载的开播静默窗（开播初期缓冲水位未建立，
+        // 取流优先于后台整首下载，见 audioCache.notifyPlaybackStarted）
+        notifyPlaybackStarted();
         // 换歌路上 detachAudio 的内部暂停事件会把 userPaused 置回 true（与用户
         // 主动暂停共用同一条 pause 通道），真正出声即视为用户要播，共播回抢恢复
         this.userPaused = false;
@@ -1755,7 +1758,8 @@ class TrackPlayer extends EventEmitter {
         if (audio instanceof NativeAudioElement) {
             // 原生后端：ExoPlayer 已经在出声，簿记完成即无缝换歌成功。
             // 过渡不产生 playing 事件，重试计数器在这里手工清零（WebView 路径由
-            // onAudioPlaying 统一清）
+            // onAudioPlaying 统一清）；顺带重置缓存下载静默窗
+            notifyPlaybackStarted();
             this.isLoading = false;
             this.autoSkipCount = 0;
             this.qualityRetryCount = 0;

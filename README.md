@@ -69,6 +69,30 @@ cd android && ./gradlew assembleRelease  # 签名正式包 app-release.apk
 （`storeFile / storePassword / keyAlias / keyPassword`），密钥文件为 `android/app/musicfree-hy.keystore`。
 **两者均已 gitignore、不入库**——签名密码与密钥文件只在本地，注意备份；换密钥后无法覆盖安装旧版本。
 
+## Android 调试（模拟器优先）
+
+日常调试**优先用本地安卓模拟器**（macOS 上 Pixel 7 / API 36 arm64 镜像已配好），
+随叫随到、不怕手机息屏断连；真机只用于最终验证后台保活、厂商省电策略等模拟器
+覆盖不到的行为。完整步骤见 [docs/android-emulator-debug.md](docs/android-emulator-debug.md)。
+
+```bash
+# 1. 启动模拟器（或 Android Studio → Device Manager 点 ▶）
+~/Library/Android/sdk/emulator/emulator -avd MusicFree-Pixel7 -gpu host &
+
+# 2. 编译安装启动（device.mjs 同时连着模拟器与真机时自动选模拟器）
+npm run android:run
+
+# 3. 改前端代码免打包热重载
+npm run android:live
+```
+
+- 前端调试：Mac Chrome 打开 `chrome://inspect`（脚本已自动转发 devtools 端口）
+- 原生日志：`npm run android:log`；原生断点：`npm run cap:android` 用 Android Studio 调试
+- 真机无线调试（Windows 精简环境 / 最终验证）：[docs/android-remote-debug.md](docs/android-remote-debug.md)
+- ⚠️ 多设备时别用 `./gradlew installDebug`：它会装到所有设备，真机上 release 签名
+  与 debug 包冲突会报 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`，用 `assembleDebug` +
+  `adb -s emulator-5554 install -r` 精确投递
+
 原生工程（`android/`、`ios/`）已生成并配置好：
 
 - 竖屏锁定、品牌图标与启动图（与 Pad 版同一只「戴耳机的猫」；`npm run gen:icons` 可从
