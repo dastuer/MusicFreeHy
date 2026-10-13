@@ -141,6 +141,25 @@ MediaPlaybackService（Media3 MediaSessionService 前台服务）
   让给播放取流；
 - 服务器不支持 Range（HEAD 探测失败 / 无 `Accept-Ranges`）自动退化整包，功能不变。
 
+### 4.3 原生直落磁盘（Android 主通道，`626fd0f`）
+
+blob 过桥路径（`fetch → WebView 内存 Blob → FileReader base64 → JNI 逐块过桥 →
+原生 decode → 磁盘`）是「后台打开其他应用明显卡顿」的根因：每首歌几十次
+base64 编解码 + JSON 桥往返 + GC，WebView 主线程持续满载，新应用冷启动抢 CPU
+时把调度尖峰放大成音频线程饥饿（纯原生播放器是 OkHttp 流式直写，成本差一个
+量级且完全不碰 WebView）。
+
+Android 播放缓存改走 `Storage.downloadFile`（歌曲下载已有的原生流式落盘通道：
+HttpURLConnection 手动跟随跨协议重定向、.part 续传、5 路并发线程池）：
+
+- 字节全程不过 JS 桥，WebView 在下载期间零参与；
+- 扩展名先于下载确定（直链后缀 → HEAD 探测 content-type → 兜底 mp3）；
+- 原生通道失败回退 blob 过桥路径（浏览器/iOS 语义不变）；
+- 开播静默窗 / 切后台静默 / 共播节流语义照旧（节流只作用于回退路径）。
+
+iOS 仍走 blob 路径（沙盒目录由 Filesystem 写入，量级可接受；后续可接入
+`Download.downloadFile` 直落通道，`musicDownload.ts` 已有现成封装）。
+
 ## 五、共播与音频焦点策略
 
 ### 5.1 默认不入仲裁
