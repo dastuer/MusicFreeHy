@@ -5,7 +5,12 @@ import { getPluginByMedia, getPlugins, pluginCall } from "./ipc";
 import { setMusicHistory } from "./musicHistory";
 import { getQuality, setQuality, getConfig, getAllowCoPlay } from "./appConfig";
 import { isNative, localFileUrl } from "./native";
-import { lookupCachedSrc, notifyPlaybackStarted, requestAudioCacheStore } from "./audioCache";
+import {
+    lookupCachedSrc,
+    notifyPageHidden,
+    notifyPlaybackStarted,
+    requestAudioCacheStore,
+} from "./audioCache";
 import {
     createAudioElement,
     destroyAudioBackend,
@@ -437,6 +442,8 @@ class TrackPlayer extends EventEmitter {
     private mirrorSeq = 0;
     /** isLoading 的进入时间：回前台对账时识别「解析卡死」用 */
     private loadingSince = 0;
+    /** 切后台兜底镜像的延后定时器（避开新应用冷启动窗口，见 visibilitychange 监听） */
+    private hiddenMirrorTimer: ReturnType<typeof setTimeout> | null = null;
 
     setup() {
         if (this.audio) {
@@ -484,12 +491,26 @@ class TrackPlayer extends EventEmitter {
         document.addEventListener("visibilitychange", () => {
             if (document.visibilityState === "hidden") {
                 persist();
-                // 冻结前的最后动作：确认原生队列窗口已就位。窗口镜像平时由
-                // 「开播完成 / transition 簿记后」触发，这里兜住「开播后队列刚被
-                // 改动过」的情况——冻结再快，窗口已经在原生手里了。
-                this.maybeMirrorQueueWindow();
+                // 缓存下载静默 8s：切后台常伴随打开另一个应用（冷启动抢资源）
+                notifyPageHidden();
+                // 冻结前的兜底镜像：延后 5s 再做。切后台的瞬间往往正是用户打开
+                // 另一个应用、对方冷启动抢 CPU/IO 的时刻——镜像（解析 + 下载）
+                // 撞上去会挤占音频线程造成可听卡顿。真被冻结的话定时器不会执行，
+                // 也无妨：主镜像在开播出声时已经就位，这里只是兜底。
+                if (this.hiddenMirrorTimer) {
+                    clearTimeout(this.hiddenMirrorTimer);
+                }
+                this.hiddenMirrorTimer = setTimeout(() => {
+                    this.hiddenMirrorTimer = null;
+                    this.maybeMirrorQueueWindow();
+                }, 5000);
             } else {
-                // 回前台：页面被冻结期间原生可能已自行续播，先把 JS 状态对齐播放器的现实
+                // 回前台：取消延后的镜像（马上会由对账流程补），并对齐状态
+                if (this.hiddenMirrorTimer) {
+                    clearTimeout(this.hiddenMirrorTimer);
+                    this.hiddenMirrorTimer = null;
+                }
+                // 页面被冻结期间原生可能已自行续播，先把 JS 状态对齐播放器的现实
                 void this.reconcileWithNative();
             }
             this.reconcileAfterForeground();

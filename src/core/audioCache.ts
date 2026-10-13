@@ -330,17 +330,30 @@ let activeAbort: AbortController | null = null;
  * 建起来，欠载直接等于可听的卡顿）；水位铺满后（30~60s 缓冲）再让路也不迟。
  */
 const STARTUP_QUIET_MS = 20000;
+/** 切后台静默（毫秒）：切后台往往正是用户打开另一个应用、对方冷启动抢
+ *  CPU/IO/带宽的时刻，下载撞上去会挤占音频造成卡顿；错开这段时间再继续。 */
+const HIDDEN_QUIET_MS = 8000;
 /** 最近一次「开播完成」的时间戳（playbackStartedAt 告知） */
 let playbackStartedAt = 0;
+/** 最近一次切后台的时间戳（页面 hidden 告知） */
+let pageHiddenAt = 0;
 
 /** 由播放器在每次真正出声时调用：重置开播静默窗 */
 export function notifyPlaybackStarted() {
     playbackStartedAt = Date.now();
 }
 
+/** 由页面在 visibilitychange → hidden 时调用：重置切后台静默窗 */
+export function notifyPageHidden() {
+    pageHiddenAt = Date.now();
+}
+
 /** 当前是否处于开播静默窗内（时间基准缺失时视为不在窗内，不阻塞） */
 function inStartupQuietWindow(): boolean {
-    return playbackStartedAt > 0 && Date.now() - playbackStartedAt < STARTUP_QUIET_MS;
+    if (playbackStartedAt > 0 && Date.now() - playbackStartedAt < STARTUP_QUIET_MS) {
+        return true;
+    }
+    return pageHiddenAt > 0 && Date.now() - pageHiddenAt < HIDDEN_QUIET_MS;
 }
 
 /**

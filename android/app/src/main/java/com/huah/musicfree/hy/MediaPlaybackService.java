@@ -2,6 +2,7 @@ package com.huah.musicfree.hy;
 
 import android.app.Notification;
 import android.app.PendingIntent;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.net.Uri;
@@ -20,7 +21,11 @@ import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.HttpDataSource;
 import androidx.media3.datasource.okhttp.OkHttpDataSource;
 import androidx.media3.exoplayer.DefaultLoadControl;
+import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.audio.AudioSink;
+import androidx.media3.exoplayer.audio.DefaultAudioSink;
+import androidx.media3.exoplayer.audio.DefaultAudioTrackBufferSizeProvider;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.session.MediaSession;
 import androidx.media3.session.MediaSessionService;
@@ -209,7 +214,30 @@ public class MediaPlaybackService extends MediaSessionService {
             )
             .build();
 
+        // 音频输出缓冲下限 500ms（平台默认约 20~100ms）：其他应用冷启动的调度
+        // 尖峰（CPU/IO 被抢占、音频线程短暂饿死）只要不超过这个余量，AudioTrack
+        // 靠存量数据顶着继续出声，听感上就是「无感平滑」。这是「启动其他应用
+        // 瞬间卡一下」的直接对策——调度尖峰无法消除，但可以被输出缓冲吸收。
+        // Media3 的 ExoPlayer.Builder 没有直接的 setAudioSink，经 RenderersFactory
+        // 覆写 buildAudioSink 注入。
+        DefaultRenderersFactory renderersFactory =
+            new DefaultRenderersFactory(this) {
+                @Override
+                protected AudioSink buildAudioSink(
+                    Context context,
+                    boolean enableFloatOutput,
+                    boolean enableAudioTrackPlaybackParams) {
+                    return new DefaultAudioSink.Builder(context)
+                        .setAudioTrackBufferSizeProvider(
+                            new DefaultAudioTrackBufferSizeProvider.Builder()
+                                .setMinPcmBufferDurationUs(500_000) // 500ms（单位：微秒）
+                                .build())
+                        .build();
+                }
+            };
+
         ExoPlayer p = new ExoPlayer.Builder(this)
+            .setRenderersFactory(renderersFactory)
             .setMediaSourceFactory(new DefaultMediaSourceFactory(dataSourceFactory))
             .setLoadControl(loadControl)
             .setPriority(C.PRIORITY_PLAYBACK)
