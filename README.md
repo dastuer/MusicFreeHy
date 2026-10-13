@@ -21,7 +21,7 @@
 - **插件管理**：链接/本地文件安装、聚合订阅集导入、启用禁用、排序、用户变量、默认音源
 - **设置**：主题（浅/深/跟随系统）、默认音质、记忆进度、伴生代理、备份与恢复（本地/WebDAV）
 - **系统返回**：Android 返回键 / 全面屏返回手势、iOS 侧滑返回统一接管（`core/systemBack.ts`）——先收起浮层（播放页 / 播放队列 / 操作面板 / 对话框），再回退页面；已经在最外层则把应用退到后台（音乐继续播放），不会直接退出应用
-- **系统媒体通知**：Android 下拉栏媒体卡片（封面/歌名/上一首·播放·下一首，参考网易云），前台服务保活后台播放，耳机线控、蓝牙与系统媒体键可控（原生 `MediaPlaybackService` + `core/mediaNotification.ts`）；iOS 锁屏/控制中心走 WKWebView 的 MediaSession（进度已同步）
+- **系统媒体通知**：Android 下拉栏媒体卡片（封面/歌名/上一首·播放·下一首，参考网易云）由 Media3 MediaSessionService 从播放队列直接渲染，前台服务保活后台播放，耳机线控、蓝牙与系统媒体键由原生直达播放器（`MediaPlaybackService` + `PlaybackBridge` + `core/nativeAudio.ts`）；iOS 锁屏/控制中心走 WKWebView 的 MediaSession（进度已同步）
 - **其他**：迷你播放条、iOS 后台音频、锁屏/状态栏适配、Android 15+ edge-to-edge 沉浸式系统栏
 
 ## 开发
@@ -76,11 +76,13 @@ cd android && ./gradlew assembleRelease  # 签名正式包 app-release.apk
 - iOS `UIBackgroundModes: audio`（后台播放）
 - `CapacitorHttp` 已启用（原生网络直连，插件请求无跨域问题）
 
-> Android 后台播放说明：音频本体在 ExoPlayer（原生）里，切后台不会被冻结；
-> 播放控制面（曲终换歌、通知栏/耳机动作）在 WebView 的 JS 里，`MainActivity`
-> 已把渲染进程钉为 `RENDERER_PRIORITY_IMPORTANT` 且不可见不 waive，配合播放前台
-> 服务让 JS 在后台继续跑。若某个 ROM 仍强行冻结，通知栏的上一首/下一首会退化成
-> 原生直切（已预载时不经 JS）。
+> Android 后台播放说明（原生播放内核架构）：ExoPlayer 住在 `MediaPlaybackService`
+> （Media3 `MediaSessionService` 前台服务）里，持有整条已解析队列——JS 在前台把
+> 接下来几首的音源解析好经 `PlaybackBridge.pushQueueWindow` 推进原生播放列表，
+> 之后曲终自动续播、预缓冲、通知栏/耳机/锁屏操作全部原生完成，不依赖 WebView
+> JS 存活（音源解析只能在 JS 里跑，但全部发生在前台期）。窗口内歌曲播完且 JS
+> 仍冻结时才会停止；回前台由对账逻辑（`reconcileWithNative`）以播放器现实校准
+> JS 状态并补齐窗口。通知卡片由 Media3 从 MediaItem 元数据直接渲染。
 
 ## 目录结构
 

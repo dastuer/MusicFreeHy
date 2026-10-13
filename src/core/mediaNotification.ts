@@ -1,34 +1,22 @@
 /**
- * 系统媒体通知（Android 下拉通知栏的媒体卡片）
+ * 媒体通知权限与后台保活引导（瘦身版）。
  *
- * Android WebView 不认 Web MediaSession，系统下拉栏里出不来网易云那种
- * 「封面 + 歌名 + 上/下一首」的播放通知。这里在原生环境把播放状态经
- * MediaNotificationPlugin 推给原生（MediaPlaybackService 挂 MediaStyle 通知），
- * 通知按钮 / 耳机线控的动作再以事件回传，转调 TrackPlayer。
- *
- * 状态推送是单向尽力而为：通知显示失败（如未授予通知权限）不影响播放本身。
- * 进度条不需要逐帧同步 —— Android 会按「上报位置 + 倍速」自行外推，这里只
- * 每秒对一次表，纠正缓冲卡顿造成的漂移。
+ * 播放内核重构后，下拉通知栏的媒体卡片由 Media3 MediaSessionService 直接
+ * 从播放队列渲染（元数据随 pushQueueWindow/loadTrack 携带），通知按钮、
+ * 耳机线控、蓝牙按键也由 Media3 直达播放器——本模块不再承担状态推送与
+ * 动作转发，只保留两件事：
+ *  1. Android 13+ 的通知权限申请（通知卡片显示的前提）；
+ *  2. 电池优化白名单的查询 / 请求 / 首播引导（Doze 限网是熄屏断流的根因）。
  */
 
 import { getDefaultStore } from "jotai";
-import { addNativeListener, callNativeMethod, isNative } from "./native";
-import {
-    currentMusicAtom,
-    musicStateAtom,
-    progressAtom,
-    rateAtom,
-    setNextTrackMetaCache,
-    TrackPlayerSingleton,
-} from "./trackPlayer";
-import type { MusicState } from "./trackPlayer";
+import { callNativeMethod, isNative } from "./native";
+import { musicStateAtom } from "./trackPlayer";
 
-const PLUGIN = "MediaNotification";
+const PLUGIN = "PlaybackBridge";
 
 let started = false;
 let permissionChecked = false;
-/** 播放中的秒级对表定时器 */
-let syncTimer: ReturnType<typeof setInterval> | null = null;
 
 function onAndroid(): boolean {
     if (!isNative()) {
@@ -66,47 +54,6 @@ function ensurePermissionOnce() {
     });
 }
 
-function currentSnapshot() {
-    const store = getDefaultStore();
-    const music = store.get(currentMusicAtom);
-    const progress = store.get(progressAtom);
-    return {
-        music,
-        position: progress.position || 0,
-        // 有些音源给的 music.duration 元数据不准，音频元素解析出的真实时长优先
-        duration: progress.duration || music?.duration || 0,
-        rate: store.get(rateAtom) || 1,
-    };
-}
-
-/** 歌曲 → 通知元数据载荷。超大内联封面不进通知（原生兜底用应用图标）。 */
-function metadataPayload(music: IMusic.IMusicItem) {
-    let artwork = typeof music.artwork === "string" ? music.artwork : "";
-    if (artwork.length > 64 * 1024) {
-        artwork = "";
-    }
-    return {
-        title: music.title ?? "",
-        artist: music.artist ?? "",
-        album: music.album ?? "",
-        artwork,
-        duration: music.duration || 0,
-        // 原生侧按它认「现在播的是哪一首」：页面冻结期间自行续播后通知才能切对
-        mediaId: `${music.platform}-${music.id}`,
-    };
-}
-
-/**
- * 预登记下一首的元数据（不改当前通知）。播放器预载下一首时调用：
- * 页面后台被系统冻结、ExoPlayer 自行续播时，原生侧才有新歌的标题/封面可切换。
- */
-function cacheNextTrackMetadata(music: IMusic.IMusicItem) {
-    if (!onAndroid()) {
-        return;
-    }
-    callNative("cacheMetadata", metadataPayload(music));
-}
-
 /** 是否已加入电池优化白名单（非安卓原生环境返回 undefined） */
 export async function isBatteryOptimizationIgnored(): Promise<boolean | undefined> {
     if (!onAndroid()) {
@@ -139,41 +86,8 @@ function maybePromptBatteryKeepAlive() {
     });
 }
 
-function pushPlayback(state: MusicState) {
-    const { music, position, duration, rate } = currentSnapshot();
-    if (!music) {
-        return;
-    }
-    callNative("updatePlayback", {
-        playing: state === "playing",
-        position,
-        rate,
-        duration,
-    });
-}
-
-function stopPositionSync() {
-    if (syncTimer) {
-        clearInterval(syncTimer);
-        syncTimer = null;
-    }
-}
-
-function startPositionSync() {
-    if (syncTimer) {
-        return;
-    }
-    syncTimer = setInterval(() => {
-        if (getDefaultStore().get(musicStateAtom) !== "playing") {
-            stopPositionSync();
-            return;
-        }
-        pushPlayback("playing");
-    }, 1000);
-}
-
 /**
- * 挂接播放器 ↔ 原生通知（仅 Android 原生环境，App 启动时调用一次）。
+ * 挂接权限申请与保活引导（仅 Android 原生环境，App 启动时调用一次）。
  */
 export function setupMediaNotification() {
     if (started || !onAndroid()) {
@@ -181,73 +95,10 @@ export function setupMediaNotification() {
     }
     started = true;
     const store = getDefaultStore();
-
-    // 播放器预载下一首时把它的元数据提前送进原生侧（循环依赖在 trackPlayer 侧
-    // 用 setter 注入解开，见 setNextTrackMetaCache）
-    setNextTrackMetaCache(cacheNextTrackMetadata);
-
-    // 换歌 → 推元数据；清空队列 → 收通知
-    store.sub(currentMusicAtom, () => {
-        const music = store.get(currentMusicAtom);
-        if (!music) {
-            stopPositionSync();
-            callNative("stop");
-            return;
-        }
-        callNative("updateMetadata", metadataPayload(music));
-    });
-
-    // 播放状态变化 → 推播放状态；停止 → 收通知
     store.sub(musicStateAtom, () => {
-        const state = store.get(musicStateAtom);
-        if (!store.get(currentMusicAtom)) {
-            return;
-        }
-        if (state === "stopped") {
-            stopPositionSync();
-            callNative("stop");
-            return;
-        }
-        if (state === "playing") {
+        if (store.get(musicStateAtom) === "playing") {
             ensurePermissionOnce();
             maybePromptBatteryKeepAlive();
-            startPositionSync();
-        } else {
-            stopPositionSync();
-        }
-        pushPlayback(state);
-    });
-
-    // 原生控制动作回传（通知按钮 / 耳机线控 / 蓝牙）
-    addNativeListener(PLUGIN, "action", (data: any) => {
-        const action = data?.action as string | undefined;
-        switch (action) {
-            case "play":
-            case "toggle":
-                TrackPlayerSingleton.togglePlay();
-                break;
-            case "pause":
-                TrackPlayerSingleton.pause();
-                break;
-            case "previous":
-                TrackPlayerSingleton.skipToPrevious();
-                break;
-            case "next":
-                TrackPlayerSingleton.skipToNext();
-                break;
-            case "seek":
-                if (typeof data.position === "number" && Number.isFinite(data.position)) {
-                    TrackPlayerSingleton.seekTo(data.position);
-                }
-                break;
-            case "close":
-                // 划掉通知 / 耳机停止键：暂停播放并彻底收掉原生通知与服务。
-                // 必须显式 stop——暂停态推送会把通知再挂回来，划掉就永远刷不掉了
-                TrackPlayerSingleton.pause();
-                callNative("stop");
-                break;
-            default:
-                break;
         }
     });
 }

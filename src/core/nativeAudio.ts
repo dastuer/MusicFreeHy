@@ -1,21 +1,33 @@
 /**
- * 原生音频后端（Android）：把 ExoPlayer 伪装成 HTMLAudioElement。
+ * 原生音频后端（Android）：把 MediaPlaybackService 里的 ExoPlayer 伪装成
+ * HTMLAudioElement。
  *
- * 为什么需要它：WebView 的 <audio> 必须参与系统音频焦点仲裁，抖音等前台
- * 应用高频抢焦点时每次拉锯都是一次可听的暂停。ExoPlayer 可以完全不入
- * 焦点仲裁（共播开时），并把缓冲拉大到 30~60s——两件事 WebView 都做不到。
+ * 播放内核（ExoPlayer + MediaSession）住在前台服务里、持有整条已解析队列：
+ * 前台 JS 把接下来几首经 pushQueueWindow 推进去后，预缓冲/自动续播/通知栏
+ * 切歌全部原生完成，后台连播不依赖 JS 存活——这是后台播放根治的核心。
+ * JS 侧只做三件事：装载当前曲、镜像队列窗口、做换歌簿记（itemtransition）。
  *
  * 对 trackPlayer 呈现与 <audio> 相同的接口（属性 + 事件 + play() 返回
- * promise），播放主流程、无缝切音质、共播巡逻全部不用改。
- * 老 APK 没有原生插件时 probe 失败，createAudio() 回退 WebView <audio>。
+ * promise），播放主流程不用感知后端差异。插件缺失时 createAudioElement()
+ * 回退 WebView <audio>（浏览器 dev 模式）。
  */
 
 import { addNativeListener, callNativeMethod, isNative } from "./native";
 
-const PLUGIN = "NativeAudio";
+const PLUGIN = "PlaybackBridge";
 
 /** 是否已确认原生音频后端可用（缓存探测结果） */
 let backendReady: boolean | null = null;
+
+/** 队列窗口条目：推给原生预载的下一批歌（mediaId = platform-id） */
+export interface IQueueWindowItem {
+    mediaId: string;
+    src: string;
+    title: string;
+    artist: string;
+    album: string;
+    artworkUri: string;
+}
 
 /** 探测原生音频插件是否可用；浏览器 / 老包回退 WebView <audio> */
 export async function probeNativeAudio(): Promise<boolean> {
@@ -44,20 +56,20 @@ export function isNativeAudioBackend(): boolean {
     return backendReady === true;
 }
 
-interface NativeAudioOptions {
-    /** setSource 后立即播放 */
-    autoplay?: boolean;
-}
-
 type ListenerEntry = { fn: (ev: any) => void; once: boolean };
 
 /** 原生播放器的真实状态快照（trackPlayer 回前台对账用） */
 export interface INativeAudioState {
     /** 播放器当前曲目的 mediaId（platform-id；空串表示未知） */
     currentMediaId: string;
+    /** 当前曲目的 JS 侧地址（收养对账用；空串未知） */
+    currentSrc: string;
     position: number;
     duration: number;
     paused: boolean;
+    ended: boolean;
+    /** 原生队列里「当前曲之后」还有没有预载条目 */
+    hasNext: boolean;
 }
 
 /** MediaError 形状（对齐 HTMLMediaElement.error） */
@@ -108,22 +120,21 @@ export class NativeAudioElement {
     private _error: NativeMediaError | null = null;
     private _ended = false;
     private _preload = "auto";
-    /** append 进原生播放列表的预载下一首地址：自动过渡发生时接替 _src */
-    private _nextSrc = "";
-    /** 预载曲目的 mediaId（对齐 ExoPlayer 播放列表条目，回前台对账用） */
-    private _nextMediaId = "";
     /**
-     * 当前曲目的 mediaId（platform-id）。播放器把它写进 ExoPlayer 的 MediaItem，
-     * 页面被冻结期间原生自行换歌后，回前台靠 mediaId 与 JS 队列对齐。
+     * 当前曲目的 mediaId（platform-id）。装载时写进 ExoPlayer 的 MediaItem，
+     * 页面被冻结期间原生自动续播后，回前台靠 mediaId 与 JS 队列对齐。
      */
     private _mediaId = "";
+    /** 最近一次推给原生的窗口条目（mediaId → item）：transition 簿记对账用 */
+    private windowItems: Map<string, IQueueWindowItem> = new Map();
 
-    constructor(options?: NativeAudioOptions) {
+    constructor(options?: { autoplay?: boolean }) {
         this._autoplay = !!options?.autoplay;
         this.detach = addNativeListener(PLUGIN, "audioEvent", (data: any) => {
             this.onNativeEvent(data);
         });
-        callNativeMethod(PLUGIN, "startProgressTicker").catch(() => {});
+        // 前台服务是播放内核的宿主：没起来时所有桥接调用都会失败
+        callNativeMethod(PLUGIN, "ensureService").catch(() => {});
     }
 
     // ---------- 属性（getter/setter 映射原生） ----------
@@ -135,21 +146,25 @@ export class NativeAudioElement {
     set src(value: string) {
         this._error = null;
         this._ended = false;
-        this._nextSrc = "";
-        this._nextMediaId = "";
         this._src = value ?? "";
         this._hasSource = !!this._src;
+        this.windowItems.clear();
         if (!this._src) {
-            callNativeMethod(PLUGIN, "reset").catch(() => {});
+            callNativeMethod(PLUGIN, "stop").catch(() => {});
             return;
         }
         const startMs = this._pendingSeekMs && this._pendingSeekMs > 0 ? this._pendingSeekMs : undefined;
         this._pendingSeekMs = null;
-        callNativeMethod(PLUGIN, "setSource", {
+        // 装载元数据随行：通知栏/锁屏直接显示（不再走 metadata 上报通道）
+        callNativeMethod(PLUGIN, "loadTrack", {
             src: this._src,
             mediaId: this._mediaId,
             startMs,
             autoplay: this._autoplay,
+            title: this._meta?.title ?? "",
+            artist: this._meta?.artist ?? "",
+            album: this._meta?.album ?? "",
+            artworkUri: this._meta?.artworkUri ?? "",
         }).catch((e: any) => {
             this._error = new NativeMediaError(4, String(e?.message ?? e));
             this.fire("error");
@@ -214,7 +229,7 @@ export class NativeAudioElement {
 
     set loop(l: boolean) {
         this._loop = !!l;
-        callNativeMethod(PLUGIN, "setLoop", { loop: this._loop }).catch(() => {});
+        callNativeMethod(PLUGIN, "setRepeatMode", { repeatOne: this._loop }).catch(() => {});
     }
 
     get autoplay(): boolean {
@@ -223,6 +238,20 @@ export class NativeAudioElement {
 
     set autoplay(a: boolean) {
         this._autoplay = !!a;
+    }
+
+    /** 装载当前曲时随行的元数据（通知栏/锁屏显示；由 trackPlayer 在赋 src 前设置） */
+    private _meta: { title: string; artist: string; album: string; artworkUri: string } | null =
+        null;
+
+    /** 当前曲目的展示元数据：随 loadTrack 下发，通知栏由 Media3 直接渲染 */
+    setTrackMeta(meta: {
+        title: string;
+        artist: string;
+        album: string;
+        artworkUri: string;
+    }) {
+        this._meta = meta;
     }
 
     /**
@@ -300,7 +329,7 @@ export class NativeAudioElement {
     load(): void {
         // src 设置时已 prepare，这里对齐「重置到无源」的用法（removeAttribute 后）
         if (!this._src) {
-            callNativeMethod(PLUGIN, "reset").catch(() => {});
+            callNativeMethod(PLUGIN, "stop").catch(() => {});
         }
     }
 
@@ -312,7 +341,8 @@ export class NativeAudioElement {
             this._pendingSeekMs = null;
             this._error = null;
             this._ended = false;
-            callNativeMethod(PLUGIN, "reset").catch(() => {});
+            this.windowItems.clear();
+            callNativeMethod(PLUGIN, "stop").catch(() => {});
         }
     }
 
@@ -359,14 +389,29 @@ export class NativeAudioElement {
         );
         this.playRejecters.clear();
         this.playResolvers.clear();
-        callNativeMethod(PLUGIN, "stopProgressTicker").catch(() => {});
     }
 
-    // ---------- 内部 ----------
+    // ---------- 原生播放内核专属 ----------
 
-    private applyVolume() {
-        const effective = this._muted ? 0 : this._volume;
-        callNativeMethod(PLUGIN, "setVolume", { volume: effective }).catch(() => {});
+    /**
+     * 队列窗口镜像：把接下来几首的已解析音源（连同元数据）推给原生，
+     * 替换「当前曲之后」的预载位。之后当前曲播完由 ExoPlayer 自动无缝续播，
+     * 不经过 JS——后台连播的根基。
+     */
+    async pushQueueWindow(items: IQueueWindowItem[]): Promise<void> {
+        this.windowItems = new Map(items.map((it) => [it.mediaId, it]));
+        await callNativeMethod(PLUGIN, "pushQueueWindow", { items });
+    }
+
+    /** 原生队列直切（通知栏同款通路）：切到返回 mediaId，切不了返回 null */
+    async skipNative(direction: "next" | "previous"): Promise<string | null> {
+        try {
+            const res = await callNativeMethod(PLUGIN, "skip", { direction });
+            const mediaId = String(res?.mediaId ?? "");
+            return mediaId || null;
+        } catch {
+            return null;
+        }
     }
 
     /** 共播开关切换：true=参与系统焦点仲裁，false=完全不响应焦点 */
@@ -375,10 +420,8 @@ export class NativeAudioElement {
     }
 
     /**
-     * 回前台对账：从原生拉一次真实播放状态。后台 WebView 被冻结期间原生的
-     * ended / pause 事件可能丢失（桥回不来），恢复后以此对齐——
-     * ExoPlayer 已把当前曲播完（STATE_ENDED）就补发 ended 走换歌链路，
-     * 只是被静默暂停了就更新快照交给调用方决定要不要补播。
+     * 回前台对账：从原生拉一次真实播放状态，更新本地快照。
+     * ExoPlayer 已把当前曲播完（STATE_ENDED）就补发 ended 走换歌链路。
      */
     async refreshState(): Promise<void> {
         try {
@@ -400,31 +443,8 @@ export class NativeAudioElement {
                 this.fire("ended");
             }
         } catch {
-            // 探测失败保持现状（老包没有 ended 字段时也无害）
+            // 探测失败保持现状
         }
-    }
-
-    /**
-     * 无缝换歌预载：把下一首追加进 ExoPlayer 播放列表。当前曲目播完时
-     * 原生自动预缓冲并零间隙续播，不经过 JS（JS 侧收 itemtransition 做簿记）。
-     */
-    appendNextSource(src: string, mediaId?: string): Promise<void> {
-        this._nextSrc = src ?? "";
-        this._nextMediaId = mediaId ?? "";
-        return callNativeMethod(PLUGIN, "appendNextSource", { src, mediaId: this._nextMediaId })
-            .then(() => undefined)
-            .catch((e: any) => {
-                this._nextSrc = "";
-                this._nextMediaId = "";
-                throw e;
-            });
-    }
-
-    /** 撤下预载曲目（队列变动 / 换歌时由 trackPlayer 调用） */
-    clearNextSources(): void {
-        this._nextSrc = "";
-        this._nextMediaId = "";
-        callNativeMethod(PLUGIN, "clearNextSources", {}).catch(() => {});
     }
 
     /**
@@ -439,13 +459,40 @@ export class NativeAudioElement {
             }
             return {
                 currentMediaId: String(res.currentMediaId ?? ""),
+                currentSrc: String(res.currentSrc ?? ""),
                 position: (Number(res.positionMs) || 0) / 1000,
                 duration: (Number(res.durationMs) || 0) / 1000,
                 paused: !!res.paused,
+                ended: !!res.ended,
+                hasNext: !!res.hasNext,
             };
         } catch {
             return null;
         }
+    }
+
+    /**
+     * 收养原生现状（极端对账：JS 侧代理与播放器完全脱节，如页面重建后）：
+     * 不触碰原生播放器，只把代理内部状态对齐到原生现实。
+     */
+    adoptNativeState(state: INativeAudioState): void {
+        this._src = state.currentSrc;
+        this._hasSource = !!state.currentSrc;
+        this._mediaId = state.currentMediaId;
+        this._pendingSeekMs = null;
+        this._error = null;
+        this._ended = state.ended;
+        this.lastReport.positionMs = state.position * 1000;
+        if (state.duration > 0) {
+            this.lastReport.durationMs = state.duration * 1000;
+        }
+        this.lastReport.paused = state.paused;
+        this._pausedOptimistic = null;
+    }
+
+    private applyVolume() {
+        const effective = this._muted ? 0 : this._volume;
+        callNativeMethod(PLUGIN, "setVolume", { volume: effective }).catch(() => {});
     }
 
     private onNativeEvent(data: any) {
@@ -456,21 +503,30 @@ export class NativeAudioElement {
         let payload: Record<string, any> | undefined;
         switch (type) {
             case "timeupdate": {
+                // 原生每秒推一次进度：数值在载荷里（positionMs/bufferedMs/durationMs/paused）
                 this._pendingSeekMs = null;
-                this.lastReport.positionMs = Number(data.positionMs) || 0;
-                this.lastReport.bufferedMs = Number(data.bufferedMs) || 0;
+                const posMs = Number(data.positionMs);
+                if (Number.isFinite(posMs)) {
+                    this.lastReport.positionMs = posMs;
+                }
+                const bufMs = Number(data.bufferedMs);
+                if (Number.isFinite(bufMs)) {
+                    this.lastReport.bufferedMs = bufMs;
+                }
                 const durMs = Number(data.durationMs);
-                this.lastReport.durationMs = Number.isFinite(durMs) && durMs > 0 ? durMs : this.lastReport.durationMs;
-                this.lastReport.paused = !!data.paused;
-                this._pausedOptimistic = null;
+                if (Number.isFinite(durMs) && durMs > 0) {
+                    this.lastReport.durationMs = durMs;
+                }
+                if (data.paused !== undefined) {
+                    this.lastReport.paused = !!data.paused;
+                }
                 break;
             }
             case "durationchange": {
                 const ms = Number(data.durationMs);
                 this.lastReport.durationMs = Number.isFinite(ms) && ms > 0 ? ms : this.lastReport.durationMs;
                 break;
-            }
-            case "play": {
+            }            case "play": {
                 this.lastReport.paused = false;
                 this._pausedOptimistic = null;
                 this._pendingSeekMs = null;
@@ -503,22 +559,24 @@ export class NativeAudioElement {
                 break;
             }
             case "itemtransition": {
-                // 播完自动续播了预载的下一首（index >= 1）：src 属性跟上播放器的现实
-                const transitionIndex = Number(data.index) || 0;
-                if (transitionIndex >= 1 && this._nextSrc) {
-                    this._src = this._nextSrc;
-                    this._mediaId = this._nextMediaId;
-                    this._nextSrc = "";
-                    this._nextMediaId = "";
+                // 原生自动续播了窗口里的下一首：src/mediaId 跟上播放器的现实
+                const mediaId = String(data.mediaId ?? "");
+                if (mediaId && this.windowItems.has(mediaId)) {
+                    this._src = this.windowItems.get(mediaId)!.src;
+                    this._mediaId = mediaId;
+                } else if (mediaId) {
+                    this._mediaId = mediaId;
                 }
                 this._ended = false;
-                payload = { index: transitionIndex };
+                payload = { mediaId, index: Number(data.index) || 0 };
                 break;
             }
             case "error": {
+                // detail 是原生错误码（PlaybackException.errorCode），粗映射成 HTML 同形
+                const code = Number(data.detail);
                 this._error = new NativeMediaError(
-                    Number(data.code) || 2,
-                    String(data.message ?? "原生播放失败"),
+                    Number.isFinite(code) && code > 0 ? mapNativeErrorCode(code) : 2,
+                    `原生播放失败（code=${data.detail ?? "?"}）`,
                 );
                 this.settlePlay(false);
                 break;
@@ -561,6 +619,20 @@ export class NativeAudioElement {
             }
         }
     }
+}
+
+/** PlaybackException.errorCode → HTMLMediaError.code 粗映射（与旧 NativeAudioPlugin.mapErrorCode 同规则） */
+function mapNativeErrorCode(nativeCode: number): number {
+    if (nativeCode >= 2000 && nativeCode < 3000) {
+        return 2; // IO 类 → 网络
+    }
+    if (nativeCode >= 3000 && nativeCode < 4000) {
+        return 4; // 解析/格式 → 不支持
+    }
+    if (nativeCode >= 1000 && nativeCode < 2000) {
+        return 3; // 解码错误
+    }
+    return 2;
 }
 
 /**
