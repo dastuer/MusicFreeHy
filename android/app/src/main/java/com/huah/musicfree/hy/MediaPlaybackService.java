@@ -331,7 +331,10 @@ public class MediaPlaybackService extends MediaSessionService {
         });
     }
 
-    /** 移除当前曲目之后的全部条目（预载位） */
+    /** 移除当前曲目之后的全部条目（预载位）。
+     *  removeMediaItems(from, to) 的第二个参数是排他结束下标，不是个数：
+     *  删 [from, count) 要传 count——传 count-from 会在 from > count-from 时
+     *  触发断言崩溃（列表里有已播条目后必然发生）。 */
     private void dropNextSources() {
         if (player == null) {
             return;
@@ -339,7 +342,7 @@ public class MediaPlaybackService extends MediaSessionService {
         int from = Math.max(player.getCurrentMediaItemIndex() + 1, 1);
         int count = player.getMediaItemCount();
         if (count > from) {
-            player.removeMediaItems(from, count - from);
+            player.removeMediaItems(from, count);
         }
     }
 
