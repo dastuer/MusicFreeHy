@@ -1,7 +1,7 @@
 {
-  "versionCode": 6,
-  "versionName": "1.0.5",
-  "changelog": "- 修复安卓后台播放无法加载下一首：切歌解析期间保持唤醒锁（60s 宽限期）、WebView 静音保活防 renderer 冻结、ExoPlayer 取流优先级提升\n- 修复滑动中另一根手指点击导致滑动卡在半途；修复首次滑动后手势失灵（触点跟踪 + 状态机复位）\n- 修复排行榜→我的跨页滑动中底部歌单被播放条/Tab栏遮挡截断\n- 修复原生后端滞后 pause/ended 事件误判播放失败导致跳歌",
-  "apkUrl": "https://gitee.com/huaihui/MusicFreeHy/releases/download/v1.0.5/MusicFreeHy-1.0.5.apk",
-  "publishedAt": "2026-10-12"
+  "versionCode": 7,
+  "versionName": "1.0.6",
+  "changelog": "- 修复后台播放自动停止：退后台一段时间后音乐自己停了，要重新打开 App 才继续\n  - WebView 渲染器退后台不再被系统冻结，后台换歌预加载得以继续\n  - 回前台自动对账：已播完自动续下一首、被系统静默暂停自动恢复",
+  "apkUrl": "https://gitee.com/huaihui/MusicFreeHy/releases/download/v1.0.6/MusicFreeHy-1.0.6.apk",
+  "publishedAt": "2026-10-13"
 }
