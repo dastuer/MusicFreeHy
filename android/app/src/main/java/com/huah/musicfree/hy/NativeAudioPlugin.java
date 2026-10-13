@@ -78,6 +78,30 @@ public class NativeAudioPlugin extends Plugin {
     @Override
     public void load() {
         onMain(this::ensurePlayer);
+        // 通知栏 / 耳机切歌的原生通路：服务直调播放器，页面 JS 冻结也能换歌
+        MediaPlaybackService.setNativeTransport(direction -> {
+            // ExoPlayer 只允许在创建线程（主线程）访问：万一调用方不在主线程，
+            // 宁可不接管、交回 JS 走常规链路，也不冒炸进程的风险
+            if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
+                return null;
+            }
+            if (player == null || player.getMediaItemCount() < 2) {
+                return null;
+            }
+            int index = player.getCurrentMediaItemIndex();
+            boolean forward = !"previous".equals(direction);
+            int target = forward ? index + 1 : index - 1;
+            if (target < 0 || target >= player.getMediaItemCount()) {
+                return null;
+            }
+            player.seekTo(target, 0L);
+            player.setPlayWhenReady(true);
+            String mediaId = currentMediaId();
+            if (mediaId.isEmpty()) {
+                return null;
+            }
+            return new MediaPlaybackService.SkipResult(mediaId, true);
+        });
     }
 
     private synchronized void ensurePlayer() {
@@ -123,11 +147,17 @@ public class NativeAudioPlugin extends Plugin {
                     // 播完当前曲自动续播预载的下一首（无缝换歌）：JS 侧靠 index >= 1
                     // 区分「自动续播」与 setSource 引起的过渡（后者 index 恒为 0）
                     int index = player.getCurrentMediaItemIndex();
-                    if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO && index > 0) {
-                        // 清掉身后的旧条目，列表保持「当前 + 至多一首预载」，不让它无限增长；
-                        // 摘除的是已播完的条目，不影响正在续播的这首
+                    if (index > 0) {
+                        // 清掉身后的旧条目，列表保持「当前 + 至多一首预载」，不让它无限增长。
+                        // 自动续播与通知栏原生「下一首」都会走到这；摘除的是已放过的条目，
+                        // 不影响正在播的这首（「上一首」由 JS 侧播放历史负责，不依赖这里）
                         player.removeMediaItems(0, index);
                     }
+                    // 通知栏跟上正在播的这首：页面 JS 被系统冻结时它接不到 itemtransition，
+                    // 由这里直接按缓存的元数据刷新（取不到就只更新播放态）。
+                    // 以播放器的真实播放态为准：setSource 引起的过渡常发生在暂停态下，
+                    // 不能据此把通知翻成「播放中」
+                    MediaPlaybackService.onNativeTrackChanged(currentMediaId(), player.isPlaying());
                     JSObject data = new JSObject();
                     data.put("index", index);
                     data.put("reason", reason);
@@ -234,7 +264,11 @@ public class NativeAudioPlugin extends Plugin {
         });
     }
 
-    /** 换源：src 为 JS 侧地址（https 直链 / capacitor 文件地址）；startMs 起播位置 */
+    /**
+     * 换源：src 为 JS 侧地址（https 直链 / capacitor 文件地址）；startMs 起播位置。
+     * mediaId 是 JS 侧认歌用的键（platform-id）：页面被系统冻结期间播放器可能
+     * 已自行续播，回前台后 JS 靠 getState 里的 currentMediaId 与它对齐状态。
+     */
     @PluginMethod
     public void setSource(PluginCall call) {
         onMain(() -> {
@@ -244,6 +278,7 @@ public class NativeAudioPlugin extends Plugin {
                 return;
             }
             String src = call.getString("src", "");
+            String mediaId = call.getString("mediaId", "");
             Double startMs = call.getDouble("startMs");
             boolean autoplay = Boolean.TRUE.equals(call.getBoolean("autoplay", Boolean.FALSE));
             try {
@@ -253,8 +288,7 @@ public class NativeAudioPlugin extends Plugin {
                     call.resolve();
                     return;
                 }
-                String uri = resolveSrc(src);
-                MediaItem item = MediaItem.fromUri(uri);
+                MediaItem item = buildItem(src, mediaId);
                 if (startMs != null && startMs > 0) {
                     player.setMediaItem(item, startMs.longValue());
                 } else {
@@ -321,13 +355,14 @@ public class NativeAudioPlugin extends Plugin {
                 return;
             }
             String src = call.getString("src", "");
+            String mediaId = call.getString("mediaId", "");
             if (src == null || src.isEmpty()) {
                 call.resolve();
                 return;
             }
             try {
                 dropNextSources();
-                player.addMediaItem(MediaItem.fromUri(resolveSrc(src)));
+                player.addMediaItem(buildItem(src, mediaId));
                 call.resolve();
             } catch (Exception e) {
                 call.reject("appendNextSource failed: " + e.getMessage());
@@ -410,8 +445,32 @@ public class NativeAudioPlugin extends Plugin {
             ret.put("volume", player.getVolume());
             ret.put("loop", player.getRepeatMode() == Player.REPEAT_MODE_ONE);
             ret.put("readyState", mapReadyState(player.getPlaybackState()));
+            // 供 JS 回前台对账：页面被冻结期间播放器可能已自行播到了另一首
+            ret.put("currentMediaId", currentMediaId());
+            ret.put("playing", player.isPlaying());
             call.resolve(ret);
         });
+    }
+
+    /** 当前曲目的 mediaId（setMediaItem 时写在 MediaItem 上；取不到返回空串） */
+    private String currentMediaId() {
+        if (player == null) {
+            return "";
+        }
+        MediaItem item = player.getCurrentMediaItem();
+        if (item == null || item.mediaId == null) {
+            return "";
+        }
+        return item.mediaId;
+    }
+
+    /** 统一的 MediaItem 构造：把 JS 侧认歌的键挂到 mediaId 上 */
+    private MediaItem buildItem(String src, String mediaId) {
+        MediaItem item = MediaItem.fromUri(resolveSrc(src));
+        if (mediaId != null && !mediaId.isEmpty()) {
+            return item.buildUpon().setMediaId(mediaId).build();
+        }
+        return item;
     }
 
     @PluginMethod

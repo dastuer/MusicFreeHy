@@ -351,6 +351,17 @@ export function setDownloadedSourceResolver(
     downloadedSourceResolver = fn;
 }
 
+/**
+ * 「预载曲目元数据预登记」回调（由 mediaNotification 模块注册，避免循环依赖）：
+ * 播放器预载下一首时把它的标题/封面提前送进原生通知服务，页面被系统冻结、
+ * ExoPlayer 自行续播时通知才有新歌可显示。
+ */
+let nextTrackMetaCache: ((musicItem: IMusic.IMusicItem) => void) | null = null;
+
+export function setNextTrackMetaCache(fn: (musicItem: IMusic.IMusicItem) => void) {
+    nextTrackMetaCache = fn;
+}
+
 /** ---------- 播放器 ---------- */
 
 /**
@@ -452,6 +463,9 @@ class TrackPlayer extends EventEmitter {
             // 维持一个静音循环的极短 WAV 让 WebView 保持「有活跃媒体」状态。
             this.startWebViewKeepAlive();
             if (wasPlaying && this._currentMusic) {
+                if (backend instanceof NativeAudioElement) {
+                    backend.mediaId = playListKey(this._currentMusic);
+                }
                 backend.src = resumeSrc;
                 this.applyStartPosition(backend, resumePosition);
                 backend.play().catch((e: any) => {
@@ -465,12 +479,77 @@ class TrackPlayer extends EventEmitter {
         document.addEventListener("visibilitychange", () => {
             if (document.visibilityState === "hidden") {
                 persist();
+            } else {
+                // 回前台：页面被冻结期间原生可能已自行续播，先把 JS 状态对齐播放器的现实
+                void this.reconcileWithNative();
             }
         });
         window.addEventListener("pagehide", persist);
 
         this.restoreSession();
         this.syncLoopFlag();
+    }
+
+    /**
+     * 用原生播放器的真实状态校准 JS 侧。
+     *
+     * 熄屏后台时页面 JS 可能被冻结、甚至整个渲染进程被回收重建：期间曲目播完
+     * 由 ExoPlayer 自动续播（预载生效），用户在通知栏按了暂停/切歌也只落在原生。
+     * 回前台若不校准，界面会停在上一首、播放态与真实相反。
+     * 以原生状态为事实来源补齐；JS 正忙（换歌解析中 / 重连中）时不动，避免打断在途操作。
+     */
+    async reconcileWithNative() {
+        const audio = this.audio;
+        if (!(audio instanceof NativeAudioElement) || this.isLoading || this.reconnecting) {
+            return;
+        }
+        const state = await audio.queryNativeState();
+        if (!state) {
+            return;
+        }
+        // 期间用户已手动换了歌 / 有新播放请求在途：以用户意图为准
+        if (audio !== this.audio || this.isLoading) {
+            return;
+        }
+        const currentKey = this._currentMusic ? playListKey(this._currentMusic) : "";
+        const trackChanged = !!state.currentMediaId && state.currentMediaId !== currentKey;
+        if (trackChanged && !state.paused) {
+            const nativeMusic = this._playList.find(
+                (it) => playListKey(it) === state.currentMediaId,
+            );
+            if (nativeMusic) {
+                console.info(
+                    `[trackPlayer] 后台续播对账：播放器已在放《${nativeMusic.title}》，同步 JS 状态`,
+                );
+                // 播放器自行推进过了：预载记录已过期，作废后按新位置重预
+                this.nextPreload = null;
+                this.nextPreloadSeq += 1;
+                this._currentMusic = nativeMusic;
+                this.consumePendingNext(nativeMusic);
+                this.pushHistory(nativeMusic);
+                setAtom(currentMusicAtom, nativeMusic);
+                this.emit(TrackPlayerEvents.CurrentMusicChanged, nativeMusic);
+                setMusicHistory(nativeMusic);
+                this.persistPlayList();
+                void this.updateMediaSession(nativeMusic);
+            }
+        }
+        // 播放态对齐：原生在出声就翻「播放中」，否则按暂停（进度交给 timeupdate 续报）
+        if (!state.paused && store.get(musicStateAtom) !== "playing") {
+            setAtom(musicStateAtom, "playing");
+        } else if (state.paused && store.get(musicStateAtom) === "playing") {
+            setAtom(musicStateAtom, "paused");
+        }
+        if (trackChanged) {
+            setAtom(progressAtom, {
+                position: state.position,
+                duration: state.duration || this._currentMusic?.duration || 0,
+            });
+        }
+        this.syncMediaSessionState();
+        if (!state.paused) {
+            this.startWebViewKeepAlive();
+        }
     }
 
     /**
@@ -1242,7 +1321,6 @@ class TrackPlayer extends EventEmitter {
         this.preloadStarting = true;
         void this.startNextTrackPreload();
     }
-
     /** 预加载流程：解析下一首音源 → 判缓存 → 按后端决定 append 播放列表或开预缓冲元素 */
     private async startNextTrackPreload() {
         const seq = ++this.nextPreloadSeq;
@@ -1305,7 +1383,10 @@ class TrackPlayer extends EventEmitter {
             if (audio instanceof NativeAudioElement) {
                 // ExoPlayer 播放列表：当前曲目播完自动无缝续播，无需 JS 干预
                 try {
-                    await audio.appendNextSource(playSrc);
+                    await audio.appendNextSource(playSrc, playListKey(next));
+                    // 提前把元数据送进原生通知服务：页面冻结期间 ExoPlayer 自行
+                    // 续播时，通知才有新歌的标题/封面可显示
+                    nextTrackMetaCache?.(next);
                 } catch (e: any) {
                     console.warn("[trackPlayer] 追加预载曲目失败", e?.message ?? e);
                     this.nextPreload = null;
@@ -1424,10 +1505,24 @@ class TrackPlayer extends EventEmitter {
         }
         const preload = this.nextPreload;
         if (!preload?.appended) {
-            // 理论不达（append 与作废配对管理）：兜底按 ended 处理，重新对齐状态
-            console.warn("[trackPlayer] 收到非预期的曲目过渡，按换歌兜底处理");
-            await this.onEnded();
+            // 兜底：预载记录已不在（页面冻结期间事件迟到，回前台时已由对账流程
+            // 补给；或队列被换过）。以原生播放器的现实为准对齐状态——已经对齐
+            // 过就什么都不做，避免误当成「播完」把队列又往后跳一首。
+            await this.reconcileWithNative();
             return;
+        }
+        // 页面冻结期间可能已经播过不止一首：播放器的现实与预载目标对不上时，
+        // 走对账流程，别把状态按过期的预载记录往回改
+        const audio = this.audio;
+        if (audio instanceof NativeAudioElement) {
+            const state = await audio.queryNativeState();
+            if (
+                state?.currentMediaId &&
+                state.currentMediaId !== playListKey(preload.musicItem)
+            ) {
+                await this.reconcileWithNative();
+                return;
+            }
         }
         await this.commitPreloadedNext(preload);
     };
@@ -2021,6 +2116,12 @@ class TrackPlayer extends EventEmitter {
                 } else {
                     requestAudioCacheStore(target, resolved.quality, resolved.source);
                 }
+            }
+            // 原生后端：把曲目标识写进 ExoPlayer 条目——页面被系统冻结期间播放器
+            // 自行换歌后，JS 回前台靠它核对「现在放的到底是队列里的哪一首」。
+            // 必须在赋 src 之前：src 的 setter 会把 mediaId 一并发给原生
+            if (audio instanceof NativeAudioElement) {
+                audio.mediaId = playListKey(target);
             }
             audio.src = playSrc;
             audio.playbackRate = this._rate;

@@ -51,6 +51,15 @@ interface NativeAudioOptions {
 
 type ListenerEntry = { fn: (ev: any) => void; once: boolean };
 
+/** 原生播放器的真实状态快照（trackPlayer 回前台对账用） */
+export interface INativeAudioState {
+    /** 播放器当前曲目的 mediaId（platform-id；空串表示未知） */
+    currentMediaId: string;
+    position: number;
+    duration: number;
+    paused: boolean;
+}
+
 /** MediaError 形状（对齐 HTMLMediaElement.error） */
 class NativeMediaError {
     readonly code: number;
@@ -101,6 +110,13 @@ export class NativeAudioElement {
     private _preload = "auto";
     /** append 进原生播放列表的预载下一首地址：自动过渡发生时接替 _src */
     private _nextSrc = "";
+    /** 预载曲目的 mediaId（对齐 ExoPlayer 播放列表条目，回前台对账用） */
+    private _nextMediaId = "";
+    /**
+     * 当前曲目的 mediaId（platform-id）。播放器把它写进 ExoPlayer 的 MediaItem，
+     * 页面被冻结期间原生自行换歌后，回前台靠 mediaId 与 JS 队列对齐。
+     */
+    private _mediaId = "";
 
     constructor(options?: NativeAudioOptions) {
         this._autoplay = !!options?.autoplay;
@@ -120,6 +136,7 @@ export class NativeAudioElement {
         this._error = null;
         this._ended = false;
         this._nextSrc = "";
+        this._nextMediaId = "";
         this._src = value ?? "";
         this._hasSource = !!this._src;
         if (!this._src) {
@@ -130,6 +147,7 @@ export class NativeAudioElement {
         this._pendingSeekMs = null;
         callNativeMethod(PLUGIN, "setSource", {
             src: this._src,
+            mediaId: this._mediaId,
             startMs,
             autoplay: this._autoplay,
         }).catch((e: any) => {
@@ -205,6 +223,19 @@ export class NativeAudioElement {
 
     set autoplay(a: boolean) {
         this._autoplay = !!a;
+    }
+
+    /**
+     * 当前曲目的标识（platform-id）。与 src 配合：src 决定播什么，
+     * mediaId 让原生侧认得出「现在播的是队列里的哪一首」，页面冻结期间
+     * 原生自动续播后 JS 才能对上号。
+     */
+    get mediaId(): string {
+        return this._mediaId;
+    }
+
+    set mediaId(id: string) {
+        this._mediaId = id ?? "";
     }
 
     get preload(): string {
@@ -347,12 +378,14 @@ export class NativeAudioElement {
      * 无缝换歌预载：把下一首追加进 ExoPlayer 播放列表。当前曲目播完时
      * 原生自动预缓冲并零间隙续播，不经过 JS（JS 侧收 itemtransition 做簿记）。
      */
-    appendNextSource(src: string): Promise<void> {
+    appendNextSource(src: string, mediaId?: string): Promise<void> {
         this._nextSrc = src ?? "";
-        return callNativeMethod(PLUGIN, "appendNextSource", { src })
+        this._nextMediaId = mediaId ?? "";
+        return callNativeMethod(PLUGIN, "appendNextSource", { src, mediaId: this._nextMediaId })
             .then(() => undefined)
             .catch((e: any) => {
                 this._nextSrc = "";
+                this._nextMediaId = "";
                 throw e;
             });
     }
@@ -360,7 +393,29 @@ export class NativeAudioElement {
     /** 撤下预载曲目（队列变动 / 换歌时由 trackPlayer 调用） */
     clearNextSources(): void {
         this._nextSrc = "";
+        this._nextMediaId = "";
         callNativeMethod(PLUGIN, "clearNextSources", {}).catch(() => {});
+    }
+
+    /**
+     * 查询原生播放器的真实状态（回前台对账用）。
+     * 页面被系统冻结期间播放器可能已自行换了歌，JS 侧的对齐以这份状态为准。
+     */
+    async queryNativeState(): Promise<INativeAudioState | null> {
+        try {
+            const res = await callNativeMethod(PLUGIN, "getState");
+            if (!res?.available) {
+                return null;
+            }
+            return {
+                currentMediaId: String(res.currentMediaId ?? ""),
+                position: (Number(res.positionMs) || 0) / 1000,
+                duration: (Number(res.durationMs) || 0) / 1000,
+                paused: !!res.paused,
+            };
+        } catch {
+            return null;
+        }
     }
 
     private onNativeEvent(data: any) {
@@ -422,7 +477,9 @@ export class NativeAudioElement {
                 const transitionIndex = Number(data.index) || 0;
                 if (transitionIndex >= 1 && this._nextSrc) {
                     this._src = this._nextSrc;
+                    this._mediaId = this._nextMediaId;
                     this._nextSrc = "";
+                    this._nextMediaId = "";
                 }
                 this._ended = false;
                 payload = { index: transitionIndex };

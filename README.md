@@ -76,8 +76,11 @@ cd android && ./gradlew assembleRelease  # 签名正式包 app-release.apk
 - iOS `UIBackgroundModes: audio`（后台播放）
 - `CapacitorHttp` 已启用（原生网络直连，插件请求无跨域问题）
 
-> Android 后台播放说明：WebView 音频在退到后台后可能被系统冻结，如需长期后台播放，
-> 可在后续版本接入 `@capacitor-community/background-mode`（保持前台服务）。
+> Android 后台播放说明：音频本体在 ExoPlayer（原生）里，切后台不会被冻结；
+> 播放控制面（曲终换歌、通知栏/耳机动作）在 WebView 的 JS 里，`MainActivity`
+> 已把渲染进程钉为 `RENDERER_PRIORITY_IMPORTANT` 且不可见不 waive，配合播放前台
+> 服务让 JS 在后台继续跑。若某个 ROM 仍强行冻结，通知栏的上一首/下一首会退化成
+> 原生直切（已预载时不经 JS）。
 
 ## 目录结构
 

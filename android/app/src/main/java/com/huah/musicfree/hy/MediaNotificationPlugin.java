@@ -60,7 +60,25 @@ public class MediaNotificationPlugin extends Plugin {
             call.getString("artist", ""),
             call.getString("album", ""),
             call.getString("artwork", ""),
-            call.getDouble("duration", 0d)
+            call.getDouble("duration", 0d),
+            call.getString("mediaId", "")
+        );
+        call.resolve();
+    }
+
+    /**
+     * 预登记一首歌的元数据（不改当前通知）：播放器预载下一首时提前送入，
+     * 后台被系统冻结、ExoPlayer 自行续播时原生侧才有它的标题/封面可切换。
+     */
+    @PluginMethod
+    public void cacheMetadata(PluginCall call) {
+        MediaPlaybackService.cacheTrackMeta(
+            call.getString("title", ""),
+            call.getString("artist", ""),
+            call.getString("album", ""),
+            call.getString("artwork", ""),
+            call.getDouble("duration", 0d),
+            call.getString("mediaId", "")
         );
         call.resolve();
     }

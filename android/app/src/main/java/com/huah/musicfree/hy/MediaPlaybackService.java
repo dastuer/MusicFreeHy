@@ -72,6 +72,62 @@ public class MediaPlaybackService extends Service {
         actionListener = listener;
     }
 
+    /**
+     * 原生直切（通知栏 / 耳机 / 锁屏的上一首·下一首）。
+     *
+     * 页面 JS 熄屏后台被冻结时，「转发回 JS 再解析音源」这条路走不通，切歌就是
+     * 死键。已预载下一首时由 ExoPlayer 直接切，不经 JS；没预载则返回 null，
+     * 由服务照常把动作转发回 JS 走常规换歌链路。
+     */
+    public interface NativeTransport {
+        /** 方向 next / previous；未接管返回 null（动作会照常转发回 JS） */
+        SkipResult skip(String direction);
+    }
+
+    /** 原生直切的结果：切到了哪首、是否仍在播 */
+    public static final class SkipResult {
+        public final String mediaId;
+        public final boolean playing;
+
+        public SkipResult(String mediaId, boolean playing) {
+            this.mediaId = mediaId;
+            this.playing = playing;
+        }
+    }
+
+    private static volatile NativeTransport nativeTransport;
+
+    public static void setNativeTransport(NativeTransport transport) {
+        nativeTransport = transport;
+    }
+
+    /** 每首曲目上报过的元数据快照：原生直切后靠它立刻刷新通知，不等 JS 回前台 */
+    private static final class TrackMeta {
+        final String title;
+        final String artist;
+        final String album;
+        final String artwork;
+        final long durationMs;
+
+        TrackMeta(String title, String artist, String album, String artwork, long durationMs) {
+            this.title = title == null ? "" : title;
+            this.artist = artist == null ? "" : artist;
+            this.album = album == null ? "" : album;
+            this.artwork = artwork == null ? "" : artwork;
+            this.durationMs = durationMs;
+        }
+    }
+
+    /** mediaId → 元数据；播放队列不长，上限防极端情况下无限增长 */
+    private static final int META_CACHE_MAX = 64;
+    private static final java.util.LinkedHashMap<String, TrackMeta> sMetaById =
+        new java.util.LinkedHashMap<>(16, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(java.util.Map.Entry<String, TrackMeta> eldest) {
+                return size() > META_CACHE_MAX;
+            }
+        };
+
     // ---------- 播放状态快照（插件线程写、主线程读，字段访问都走 volatile） ----------
     private static volatile String sTitle = "";
     private static volatile String sArtist = "";
@@ -263,7 +319,8 @@ public class MediaPlaybackService extends Service {
         String artist,
         String album,
         String artwork,
-        double durationSec
+        double durationSec,
+        String mediaId
     ) {
         sTitle = title == null ? "" : title;
         sArtist = artist == null ? "" : artist;
@@ -272,10 +329,89 @@ public class MediaPlaybackService extends Service {
         if (durationSec > 0) {
             sDurationMs = (long) (durationSec * 1000);
         }
+        if (mediaId != null && !mediaId.isEmpty()) {
+            synchronized (sMetaById) {
+                sMetaById.put(mediaId, new TrackMeta(title, artist, album, artwork, sDurationMs));
+            }
+        }
         MediaPlaybackService service = instance;
         if (service != null) {
             service.main.post(service::refreshMetadata);
         }
+    }
+
+    /**
+     * 只登记元数据、不改变当前通知显示。
+     * 播放器预载下一首时由 JS 提前送入：页面后台被冻结、ExoPlayer 自行续播时，
+     * 原生侧才有这首歌的标题/封面可以把通知切对。
+     */
+    static void cacheTrackMeta(
+        String title,
+        String artist,
+        String album,
+        String artwork,
+        double durationSec,
+        String mediaId
+    ) {
+        if (mediaId == null || mediaId.isEmpty()) {
+            return;
+        }
+        synchronized (sMetaById) {
+            sMetaById.put(
+                mediaId,
+                new TrackMeta(title, artist, album, artwork, (long) (Math.max(durationSec, 0) * 1000))
+            );
+        }
+    }
+
+    /** 原生直切后把通知切到新曲目：能从缓存取到元数据就立刻刷新，取不到退化为旧标题 */
+    private void applyTrackMeta(String mediaId) {
+        if (mediaId == null || mediaId.isEmpty()) {
+            return;
+        }
+        TrackMeta meta;
+        synchronized (sMetaById) {
+            meta = sMetaById.get(mediaId);
+        }
+        if (meta == null) {
+            return;
+        }
+        sTitle = meta.title;
+        sArtist = meta.artist;
+        sAlbum = meta.album;
+        sArtworkUrl = meta.artwork;
+        if (meta.durationMs > 0) {
+            sDurationMs = meta.durationMs;
+        }
+        sPositionMs = 0;
+        sPositionWall = SystemClock.elapsedRealtime();
+    }
+
+    /**
+     * 播放器换了曲目（后台预载自动续播 / 通知栏原生切歌）：把通知切过去。
+     * 页面 JS 冻结时接不到 itemtransition，通知否则会一直停在上首的歌名。
+     * playing 以播放器的真实状态为准，别把「已暂停的换曲」显示成播放中。
+     */
+    static void onNativeTrackChanged(String mediaId, boolean playing) {
+        MediaPlaybackService service = instance;
+        if (service == null || mediaId == null || mediaId.isEmpty()) {
+            return;
+        }
+        service.main.post(() -> {
+            service.applyTrackMeta(mediaId);
+            sPlaying = playing;
+            if (playing) {
+                sLastPlayingAt = SystemClock.elapsedRealtime();
+            }
+            if (service.session != null) {
+                service.session.setPlaybackState(service.buildPlaybackState());
+            }
+            service.postNotification();
+            if (playing) {
+                service.updateKeepAlive();
+            }
+            service.updateKeepAliveTick();
+        });
     }
 
     static void updatePlayback(
@@ -611,6 +747,41 @@ public class MediaPlaybackService extends Service {
     }
 
     private void dispatch(String action, double position) {
+        // 切歌优先走原生：页面 JS 冻结时这是唯一还活着的通路；
+        // 原生没接管（没有预载曲目）再转发回 JS 走常规解析换歌
+        if (ACTION_NEXT.equals(action) || ACTION_PREVIOUS.equals(action)) {
+            NativeTransport transport = nativeTransport;
+            if (transport != null) {
+                String direction = ACTION_NEXT.equals(action) ? "next" : "previous";
+                SkipResult result;
+                try {
+                    result = transport.skip(direction);
+                } catch (Exception e) {
+                    result = null;
+                }
+                if (result != null && result.mediaId != null && !result.mediaId.isEmpty()) {
+                    final String resolvedId = result.mediaId;
+                    final boolean stillPlaying = result.playing;
+                    // 统一切主线程再落通知：不依赖「调用方碰巧在主线程」这个假设
+                    main.post(() -> {
+                        applyTrackMeta(resolvedId);
+                        sPlaying = stillPlaying;
+                        if (stillPlaying) {
+                            sLastPlayingAt = SystemClock.elapsedRealtime();
+                        }
+                        if (session != null) {
+                            session.setPlaybackState(buildPlaybackState());
+                        }
+                        postNotification();
+                        if (stillPlaying) {
+                            updateKeepAlive();
+                        }
+                        updateKeepAliveTick();
+                    });
+                    return;
+                }
+            }
+        }
         ActionListener listener = actionListener;
         if (listener != null) {
             listener.onAction(action, position);
