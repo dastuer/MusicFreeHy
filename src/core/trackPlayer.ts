@@ -465,7 +465,9 @@ class TrackPlayer extends EventEmitter {
         document.addEventListener("visibilitychange", () => {
             if (document.visibilityState === "hidden") {
                 persist();
+                return;
             }
+            this.reconcileAfterForeground();
         });
         window.addEventListener("pagehide", persist);
 
@@ -548,6 +550,41 @@ class TrackPlayer extends EventEmitter {
             el.load();
         } catch {
             // ignore
+        }
+    }
+
+    /**
+     * 回前台对账（后台自动停止的双保险）：冻结期间原生 ExoPlayer 的
+     * ended / pause 事件可能到不了 JS。回前台时向原生后端问一次真实状态——
+     * 已播完就补发 ended 走换歌链路（refreshState 内处理）；仍在播则
+     * 续上被冻结吞掉的下一首预加载；只是被暂停（Doze 断流自救失败等）
+     * 且非用户主动暂停就补播。WebView <audio> 后端不需要：元素在页面里，
+     * 事件不会丢。
+     */
+    private async reconcileAfterForeground() {
+        if (document.visibilityState !== "visible") {
+            return;
+        }
+        const audio = this.audio;
+        if (!(audio instanceof NativeAudioElement)) {
+            return;
+        }
+        // 冻结后保活音源常被一并暂停：回前台先拉起来
+        this.keepAliveKick?.();
+        if (!this._currentMusic || !audio.src || this.isLoading || this.reconnecting) {
+            return;
+        }
+        await audio.refreshState();
+        const music = this._currentMusic;
+        if (audio.paused && !audio.ended && !audio.error && !this.userPaused && !this.coPlayResumeTimer) {
+            // 熄屏断流等场景里被系统静默暂停：非用户意图，补播回来
+            this.resume();
+        } else if (!audio.paused && music) {
+            const progress = store.get(progressAtom);
+            const remaining = Number.isFinite(progress.duration) && progress.duration > 0
+                ? progress.duration - (audio.currentTime || 0)
+                : Infinity;
+            this.maybeStartNextTrackPreload(remaining);
         }
     }
 

@@ -344,6 +344,36 @@ export class NativeAudioElement {
     }
 
     /**
+     * 回前台对账：从原生拉一次真实播放状态。后台 WebView 被冻结期间原生的
+     * ended / pause 事件可能丢失（桥回不来），恢复后以此对齐——
+     * ExoPlayer 已把当前曲播完（STATE_ENDED）就补发 ended 走换歌链路，
+     * 只是被静默暂停了就更新快照交给调用方决定要不要补播。
+     */
+    async refreshState(): Promise<void> {
+        try {
+            const res = await callNativeMethod(PLUGIN, "getState");
+            if (!res?.available) {
+                return;
+            }
+            this.lastReport.positionMs = Number(res.positionMs) || 0;
+            this.lastReport.bufferedMs = Number(res.bufferedMs) || 0;
+            const durMs = Number(res.durationMs);
+            if (Number.isFinite(durMs) && durMs > 0) {
+                this.lastReport.durationMs = durMs;
+            }
+            this.lastReport.paused = !!res.paused;
+            this._pausedOptimistic = null;
+            if (res.ended && !this._ended) {
+                this._ended = true;
+                this.lastReport.paused = true;
+                this.fire("ended");
+            }
+        } catch {
+            // 探测失败保持现状（老包没有 ended 字段时也无害）
+        }
+    }
+
+    /**
      * 无缝换歌预载：把下一首追加进 ExoPlayer 播放列表。当前曲目播完时
      * 原生自动预缓冲并零间隙续播，不经过 JS（JS 侧收 itemtransition 做簿记）。
      */

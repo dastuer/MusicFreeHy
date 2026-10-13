@@ -403,6 +403,7 @@ public class NativeAudioPlugin extends Plugin {
             }
             ret.put("available", true);
             ret.put("paused", !player.getPlayWhenReady());
+            ret.put("ended", player.getPlaybackState() == Player.STATE_ENDED);
             ret.put("positionMs", player.getCurrentPosition());
             ret.put("bufferedMs", player.getBufferedPosition());
             ret.put("durationMs", player.getDuration());
