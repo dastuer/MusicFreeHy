@@ -2,7 +2,7 @@
  * 媒体通知权限与后台保活引导（瘦身版）。
  *
  * 播放内核重构后，下拉通知栏的媒体卡片由 Media3 MediaSessionService 直接
- * 从播放队列渲染（元数据随 pushQueueWindow/loadTrack 携带），通知按钮、
+ * 从播放队列渲染（元数据随 pushQueuePlan/loadTrack 携带），通知按钮、
  * 耳机线控、蓝牙按键也由 Media3 直达播放器——本模块不再承担状态推送与
  * 动作转发，只保留两件事：
  *  1. Android 13+ 的通知权限申请（通知卡片显示的前提）；

@@ -61,6 +61,8 @@ dependencies {
     // 媒体会话服务：队列/通知/媒体按键全部原生接管（后台播放不依赖 WebView JS 存活）
     implementation "androidx.media3:media3-session:1.8.0"
     implementation "com.squareup.okhttp3:okhttp:4.12.0"
+    // 原生音源插件运行时（QuickJS）：getMediaSource 在原生跑，不依赖 WebView JS 存活
+    implementation "wang.harlon.quickjs:wrapper-android:3.2.0"
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
     implementation project(':capacitor-android')

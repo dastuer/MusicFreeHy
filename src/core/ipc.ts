@@ -1,6 +1,6 @@
 /** 渲染层与插件宿主的桥（对齐桌面端 src/core/ipc.ts 的对外 API） */
 
-import { pluginHost } from "./pluginHost";
+import { pluginHost, notifyNativePluginSync } from "./pluginHost";
 import type { SerializedPlugin } from "./pluginHost";
 
 export { pluginHost };
@@ -64,6 +64,8 @@ export function invalidatePluginCache() {
     // 插件集合可能已变：广播给订阅方（音源设置面板等常驻组件）重新拉取
     pluginsVersion += 1;
     notifyPluginsChanged();
+    // 原生 QuickJS 运行时用的是另一份插件副本，也要跟着刷新
+    notifyNativePluginSync();
 }
 
 export async function getPluginByMedia(

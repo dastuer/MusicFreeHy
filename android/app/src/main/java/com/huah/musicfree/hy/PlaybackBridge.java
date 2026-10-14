@@ -8,12 +8,18 @@ import android.provider.Settings;
 
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
+import com.getcapacitor.PermissionState;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
 
 import org.json.JSONObject;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * 播放桥：WebView JS ↔ MediaPlaybackService（原生播放内核）。
@@ -22,10 +28,16 @@ import org.json.JSONObject;
  * 服务的事件经 setPlaybackListener 回到这里 notifyListeners("audioEvent")，
  * JS 侧 src/core/nativeAudio.ts 的 NativeAudioElement 代理接收。
  *
- * 播放主链路（装载/窗口/播放/seek/音量/倍速/循环/焦点模式）都直达服务，
- * 通知栏与耳机按键由 Media3 MediaSession 处理，不经过这个桥。
+ * 队列归属：JS 把整条播放计划（元数据 + 可空 src）推给 pushQueuePlan，
+ * 队列推进状态机在原生；原生缺源时经 needsource 事件索要，JS supplySource
+ * 补源——JS 只是遥控器，后台连播不依赖 JS 存活。
  */
-@CapacitorPlugin(name = "PlaybackBridge")
+@CapacitorPlugin(
+    name = "PlaybackBridge",
+    permissions = {
+        @Permission(strings = { android.Manifest.permission.POST_NOTIFICATIONS }, alias = "notifications")
+    }
+)
 public class PlaybackBridge extends Plugin {
 
     private static final String TAG_SUPPORT = "1";
@@ -68,23 +80,24 @@ public class PlaybackBridge extends Plugin {
     }
 
     /**
-     * 队列窗口镜像：items = [{ mediaId, src, title, artist, album, artworkUri }]，
-     * 替换「当前曲之后」的预载位。之后当前曲播完由原生自动续播，不经 JS。
+     * 整条播放计划入档：items = [{ mediaId, src, title, artist, album, artworkUri,
+     * payload, quality }]，按 JS 计算好的播放顺序排列（src 可为空串 = 顺序已定、
+     * 音源未解析）。payload 是曲目快照、quality 是请求音质：JS 冻结/被杀之后
+     * 原生引擎靠它俩自己跑 getMediaSource，把队列续下去。
+     * 替换当前可播窗之后的原生 shadow 队列；窗内条目不动（通知栏不闪）。
      */
     @PluginMethod
-    public void pushQueueWindow(PluginCall call) {
+    public void pushQueuePlan(PluginCall call) {
         MediaPlaybackService svc = activeService;
         if (svc == null) {
             call.reject("service unavailable");
             return;
         }
         JSArray items = call.getArray("items");
-        androidx.collection.ArrayMap<String, String[]> map = new androidx.collection.ArrayMap<>();
+        List<MediaPlaybackService.Planned> plan = new ArrayList<>();
         if (items != null) {
             try {
-                int len = items.length();
-                int cap = Math.min(len, MediaPlaybackService.QUEUE_WINDOW_MAX);
-                for (int i = 0; i < len && map.size() < cap; i++) {
+                for (int i = 0; i < items.length(); i++) {
                     JSONObject o = items.getJSONObject(i);
                     if (o == null) {
                         continue;
@@ -93,20 +106,64 @@ public class PlaybackBridge extends Plugin {
                     if (mediaId.isEmpty()) {
                         continue;
                     }
-                    map.put(mediaId, new String[]{
+                    plan.add(new MediaPlaybackService.Planned(
+                        mediaId,
                         o.optString("src", ""),
                         o.optString("title", ""),
                         o.optString("artist", ""),
                         o.optString("album", ""),
                         o.optString("artworkUri", ""),
-                    });
+                        payloadJson(o),
+                        o.optString("quality", "")
+                    ));
                 }
             } catch (Exception e) {
-                call.reject("pushQueueWindow failed: " + e.getMessage());
+                call.reject("pushQueuePlan failed: " + e.getMessage());
                 return;
             }
         }
-        svc.pushQueueWindow(map);
+        svc.pushQueuePlan(plan);
+        call.resolve();
+    }
+
+    /** payload 上限：超过就不进 shadow（原生解析用不到这么大快照，防内存膨胀） */
+    private static final int MAX_PAYLOAD_JSON = 64 * 1024;
+
+    /** 取条目里的曲目快照 JSON（缺失/超限/异常一律给空串 = 放弃原生解析该条） */
+    private static String payloadJson(JSONObject o) {
+        try {
+            JSONObject payload = o.optJSONObject("payload");
+            if (payload == null) {
+                return "";
+            }
+            String json = payload.toString();
+            return json.length() <= MAX_PAYLOAD_JSON ? json : "";
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** 补一条已解析音源（needsource 往返 / 缓存落盘本地化升级）；等源态补上即自动续播 */
+    @PluginMethod
+    public void supplySource(PluginCall call) {
+        MediaPlaybackService svc = activeService;
+        if (svc == null) {
+            call.reject("service unavailable");
+            return;
+        }
+        svc.supplySource(call.getString("mediaId", ""), call.getString("src", ""));
+        call.resolve();
+    }
+
+    /** 撤下一条计划（JS 解析失败/冷却跳过）：shadow 或窗内命中都移除 */
+    @PluginMethod
+    public void dropPlanned(PluginCall call) {
+        MediaPlaybackService svc = activeService;
+        if (svc == null) {
+            call.reject("service unavailable");
+            return;
+        }
+        svc.dropPlanned(call.getString("mediaId", ""));
         call.resolve();
     }
 
@@ -172,6 +229,24 @@ public class PlaybackBridge extends Plugin {
             String mediaId = svc.skip(forward ? 1 : -1);
             JSObject ret = new JSObject();
             ret.put("mediaId", mediaId == null ? "" : mediaId);
+            pending.resolve(ret);
+        });
+    }
+
+    /** 跳到队列里的指定条目（JS 手动点播窗口内已有的歌）：命中返回 mediaId，未命中空串 */
+    @PluginMethod
+    public void jumpToItem(PluginCall call) {
+        MediaPlaybackService svc = activeService;
+        if (svc == null) {
+            call.reject("service unavailable");
+            return;
+        }
+        String mediaId = call.getString("mediaId", "");
+        final PluginCall pending = call;
+        svc.runOnMain(() -> {
+            String jumped = svc.jumpToMediaItem(mediaId);
+            JSObject ret = new JSObject();
+            ret.put("mediaId", jumped == null ? "" : jumped);
             pending.resolve(ret);
         });
     }
@@ -249,6 +324,9 @@ public class PlaybackBridge extends Plugin {
             ret.put("ended", svc.isEnded());
             ret.put("playing", svc.isPlaying());
             ret.put("hasNext", svc.hasNext());
+            ret.put("awaitingSource", svc.isAwaitingSource());
+            ret.put("plannedCount", svc.plannedCount());
+            ret.put("plannedHead", svc.plannedHeadMediaId());
             ret.put("rate", svc.currentRate());
             ret.put("volume", svc.currentVolume());
             pending.resolve(ret);
@@ -256,6 +334,34 @@ public class PlaybackBridge extends Plugin {
     }
 
     // ---------- 服务绑定 ----------
+
+    /**
+     * Android 13+ 通知权限（前台服务通知的前提）：未授予时 Media3 发不出
+     * 前台通知，服务不进 FGS，熄屏约 90s 被系统回收（后台停播的直接原因之一）。
+     * JS 侧首次开播时调用（mediaNotification.ensurePermissionOnce）。
+     */
+    @PluginMethod
+    public void ensurePermission(PluginCall call) {
+        JSObject res = new JSObject();
+        if (android.os.Build.VERSION.SDK_INT < 33) {
+            res.put("granted", true);
+            call.resolve(res);
+            return;
+        }
+        if (getPermissionState("notifications") == PermissionState.GRANTED) {
+            res.put("granted", true);
+            call.resolve(res);
+            return;
+        }
+        requestPermissionForAlias("notifications", call, "onNotificationPermissionResult");
+    }
+
+    @PermissionCallback
+    private void onNotificationPermissionResult(PluginCall call) {
+        JSObject res = new JSObject();
+        res.put("granted", getPermissionState("notifications") == PermissionState.GRANTED);
+        call.resolve(res);
+    }
 
     /**
      * 起播放服务（JS 侧初始化时调用）。用 startService 而非

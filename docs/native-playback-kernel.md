@@ -3,13 +3,20 @@
 > 分支 `feat/native-playback-kernel`，对应提交：
 > `ae0abc3` 全原生播放内核 → `3a150ab` 修崩溃 → `fb13dfa` 卡顿优化 → `0c44bc5` 修共播拉锯。
 > 净变化：约 +1340 / -2160 行（删除旧机制多于新增）。
+>
+> **v1.0.12 更新**：本文的「队列窗口镜像」（§三）已升级为「队列计划下沉 +
+> needsource 拉取协议」——原生持有完整播放顺序（shadow 队列），缺源时按需向
+> JS 索要；同时落地**原生音源引擎（QuickJS `PluginRuntime`）**：needsource 并行
+> 由服务自跑插件 `getMediaSource`，JS 冻结也能解析续播。现状与决策记录见
+> `background-playback-design.md` §二.1/§二.2；本文保留重构历史与踩坑教训，
+> §六协议表已按新接口更新。
 
 ## 一、要解决的问题
 
 ### 1.1 背景架构约束
 
-音频源解析（插件 `getMediaSource`）只能在 WebView 的 JS 里运行（音源插件机制），
-但熄屏后台的渲染进程会被 ROM 冻结——即使 `MainActivity` 把渲染进程钉为
+音频源解析（插件 `getMediaSource`）历史上只能在 WebView 的 JS 里运行（音源插件机制；
+v1.0.12 起另有原生 QuickJS 引擎兜底，见 §八.1），但熄屏后台的渲染进程会被 ROM 冻结——即使 `MainActivity` 把渲染进程钉为
 `RENDERER_PRIORITY_IMPORTANT`（这只是建议），Chromium 对不可见页面仍有密集
 唤醒节流与冻结。因此**「下一首放什么」的控制面不能依赖 JS 存活**。
 
@@ -193,15 +200,19 @@ JS 侧 `NativeAudioElement` 记住最近一次请求的模式（`_focusRequested
 |------|------|------|
 | `isAvailable` | – | 探测（老包回退 WebView `<audio>`） |
 | `ensureService` | – | `startService` 起播放服务（幂等；Media3 开播时自动晋升前台） |
-| `loadTrack` | src, mediaId, startMs, autoplay, title, artist, album, artworkUri | 装载当前曲（替换整条列表）；焦点模式随行重发 |
-| `pushQueueWindow` | items[{mediaId,src,title,artist,album,artworkUri}] | 替换当前曲之后的预载位（≤4） |
-| `play` / `pause` / `stop` | – | stop = 暂停并清空列表 |
+| `loadTrack` | src, mediaId, startMs, autoplay, title, artist, album, artworkUri | 装载当前曲（替换整条列表，shadow 计划清空等重推）；焦点模式随行重发 |
+| `pushQueuePlan` | items[{mediaId,src,title,artist,album,artworkUri}] | 整条播放计划入档（≤50，src 可空=未解析）；窗内条目按 mediaId 去重保留 |
+| `supplySource` | mediaId, src | 补一条已解析音源；等源态下补上即自动续播 |
+| `dropPlanned` | mediaId | 撤一条计划（解析失败冷却） |
+| `play` / `pause` / `stop` | – | stop = 暂停并清空列表；play 在 ENDED 且有计划时补窗续播 |
 | `seekTo` | positionMs | – |
 | `skip` | direction: next/previous | 原生队列直切，返回切到的 mediaId（空串=无目标） |
+| `jumpToItem` | mediaId | 计划内定点跳转（含 shadow 深处已解析条目）；未命中空串 |
 | `setRate` / `setVolume` | rate/volume | – |
-| `setRepeatMode` | repeatOne | 单曲循环原生处理；队列随机/顺序由 JS 算窗口 |
+| `setRepeatMode` | repeatOne | 单曲循环原生处理；队列随机/顺序由 JS 算计划 |
 | `setAudioFocusMode` | focusEnabled | 缺省 false（不入仲裁） |
-| `getState` | – | available/hasPlayer/currentMediaId/currentSrc/positionMs/bufferedMs/durationMs/paused/ended/playing/hasNext/rate/volume |
+| `getState` | – | available/hasPlayer/currentMediaId/currentSrc/positionMs/bufferedMs/durationMs/paused/ended/playing/hasNext/awaitingSource/plannedCount/rate/volume |
+| `ensurePermission` | – | Android 13+ 通知权限一次请求（FGS 晋升前提） |
 | `otherMediaPlaying` | – | 活跃媒体会话数（排除自家），共播让路用 |
 | `isBatteryOptimizationIgnored` / `requestIgnoreBatteryOptimizations` | – | 自原 MediaNotificationPlugin 迁入 |
 
@@ -215,6 +226,7 @@ JS 侧 `NativeAudioElement` 记住最近一次请求的模式（`_focusRequested
 | `timeupdate` | positionMs, bufferedMs, durationMs, paused | 播放中每 1s |
 | `durationchange` | durationMs | STATE_READY 时 |
 | `itemtransition` | mediaId, index | 自动续播/直切后的簿记信号 |
+| `needsource` | mediaId（shadow 队头）, plannedCount | 队列推进缺音源，向 JS 索要（1.5s 首发 + 12s 周期重发） |
 
 ### 6.3 线程规则（反复踩坑的教训）
 
@@ -236,8 +248,10 @@ JS 侧 `NativeAudioElement` 记住最近一次请求的模式（`_focusRequested
 
 ## 八、已知边界
 
-1. 后台连播上限为窗口 4 首（窗口总时长）；耗尽且 JS 仍冻结则停止——音源解析
-   只能在 JS 里跑，这是架构的硬边界（除非引入原生侧的预解析方案）。
+1. ~~后台连播上限为窗口 N 首~~（v1.0.12 起由 shadow 计划 + needsource 拉取接管：
+   JS 只要在 12s 重发周期内能醒一瞬即可整队续播；被彻底长期冻结时由**原生
+   QuickJS 音源引擎**（`PluginRuntime`）拿计划 payload 自解析续播——「原生侧
+   预解析」这一硬边界已消除，详见 `background-playback-design.md` §二.2）。
 2. Android 切音质为「原位重挂」（单实例 ExoPlayer，双播放器会顶掉在播的歌），
    大缓冲下间隙极短；WebView 后端保留双 `<audio>` 无缝交接。
 3. WebView `<audio>` 后端（浏览器 dev）仍走旧的 probe 预载路径，行为不变。

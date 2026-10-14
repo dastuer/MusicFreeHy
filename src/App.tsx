@@ -12,6 +12,7 @@ import { sourceSelectOpenAtom } from "@/core/uiAtoms";
 import { TrackPlayerSingleton, TrackPlayerEvents } from "@/core/trackPlayer";
 import type { IPlayFailurePayload } from "@/core/trackPlayer";
 import { pluginHost } from "@/core/ipc";
+import { initNativePluginRuntime } from "@/core/nativePluginRuntime";
 import { setupMediaNotification } from "@/core/mediaNotification";
 import { useThemeSetup } from "@/core/theme";
 import { ensureLikesSheet } from "@/core/musicSheet";
@@ -210,6 +211,9 @@ export default function App() {
         } else {
             setTimeout(warmupLibrary, 1200);
         }
+        // 原生（QuickJS）插件运行时：注册变更钩子并推首次插件快照，
+        // 之后后台缺源时 MediaPlaybackService 无需 WebView 即可自己跑 getMediaSource
+        initNativePluginRuntime();
         pluginHost.setup().catch((e: any) => console.warn("[app] 插件宿主初始化失败", e));
         TrackPlayerSingleton.setup();
         // 系统媒体通知（Android 下拉栏媒体卡片；仅原生环境生效）

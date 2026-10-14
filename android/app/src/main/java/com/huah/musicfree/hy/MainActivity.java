@@ -17,6 +17,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(LocalMusicPlugin.class);
         registerPlugin(StoragePlugin.class);
         registerPlugin(UpdatePlugin.class);
+        registerPlugin(PluginRuntimeBridge.class);
         super.onCreate(savedInstanceState);
 
         // WebView 就绪后再钉渲染进程策略（getBridge 在 super.onCreate 后才有值）

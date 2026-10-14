@@ -2,10 +2,12 @@
  * 原生音频后端（Android）：把 MediaPlaybackService 里的 ExoPlayer 伪装成
  * HTMLAudioElement。
  *
- * 播放内核（ExoPlayer + MediaSession）住在前台服务里、持有整条已解析队列：
- * 前台 JS 把接下来几首经 pushQueueWindow 推进去后，预缓冲/自动续播/通知栏
- * 切歌全部原生完成，后台连播不依赖 JS 存活——这是后台播放根治的核心。
- * JS 侧只做三件事：装载当前曲、镜像队列窗口、做换歌簿记（itemtransition）。
+ * 播放内核（ExoPlayer + MediaSession）住在前台服务里、持有**整条播放计划**：
+ * JS 把播放顺序连同元数据经 pushQueuePlan 推给原生（src 可为空=未解析），
+ * 队列推进的状态机在原生：预缓冲/自动续播/通知栏切歌全原生完成；解析位缺源
+ * 时原生经 needsource 事件向 JS 索要，JS resolveMediaUrl 后经 supplySource 补上
+ * ——若在等源态，补源即自动续播，不依赖回前台对账。后台连播不依赖 JS 存活。
+ * JS 侧只做三件事：装载当前曲、推计划、按需补源（+换歌簿记 itemtransition）。
  *
  * 对 trackPlayer 呈现与 <audio> 相同的接口（属性 + 事件 + play() 返回
  * promise），播放主流程不用感知后端差异。插件缺失时 createAudioElement()
@@ -19,14 +21,18 @@ const PLUGIN = "PlaybackBridge";
 /** 是否已确认原生音频后端可用（缓存探测结果） */
 let backendReady: boolean | null = null;
 
-/** 队列窗口条目：推给原生预载的下一批歌（mediaId = platform-id） */
-export interface IQueueWindowItem {
+/** 队列计划条目：推给原生的播放顺序（mediaId = platform-id；src 空串 = 顺序已定、音源未解析） */
+export interface IQueuePlanItem {
     mediaId: string;
     src: string;
     title: string;
     artist: string;
     album: string;
     artworkUri: string;
+    /** 曲目完整快照：src 缺失时原生自己跑 getMediaSource 用（JS 冻结/被杀也能解析） */
+    payload?: Record<string, unknown>;
+    /** 请求音质档（low/standard/high/super），原生按它逐级降档 */
+    quality?: string;
 }
 
 /** 探测原生音频插件是否可用；浏览器 / 老包回退 WebView <audio> */
@@ -70,6 +76,10 @@ export interface INativeAudioState {
     ended: boolean;
     /** 原生队列里「当前曲之后」还有没有预载条目 */
     hasNext: boolean;
+    /** 队列未完但下一条缺音源，原生已停在等源态（补源即自动续播） */
+    awaitingSource: boolean;
+    /** 原生 shadow 计划里未入窗的条目数 */
+    plannedCount: number;
 }
 
 /** MediaError 形状（对齐 HTMLMediaElement.error） */
@@ -125,8 +135,8 @@ export class NativeAudioElement {
      * 页面被冻结期间原生自动续播后，回前台靠 mediaId 与 JS 队列对齐。
      */
     private _mediaId = "";
-    /** 最近一次推给原生的窗口条目（mediaId → item）：transition 簿记对账用 */
-    private windowItems: Map<string, IQueueWindowItem> = new Map();
+    /** 最近一次推给原生的计划里已带源条目（mediaId → src）：transition 时对齐本地 src */
+    private plannedSrcs: Map<string, string> = new Map();
 
     constructor(options?: { autoplay?: boolean }) {
         this._autoplay = !!options?.autoplay;
@@ -148,7 +158,7 @@ export class NativeAudioElement {
         this._ended = false;
         this._src = value ?? "";
         this._hasSource = !!this._src;
-        this.windowItems.clear();
+        this.plannedSrcs.clear();
         if (!this._src) {
             callNativeMethod(PLUGIN, "stop").catch(() => {});
             return;
@@ -348,7 +358,7 @@ export class NativeAudioElement {
             this._pendingSeekMs = null;
             this._error = null;
             this._ended = false;
-            this.windowItems.clear();
+            this.plannedSrcs.clear();
             callNativeMethod(PLUGIN, "stop").catch(() => {});
         }
     }
@@ -401,13 +411,24 @@ export class NativeAudioElement {
     // ---------- 原生播放内核专属 ----------
 
     /**
-     * 队列窗口镜像：把接下来几首的已解析音源（连同元数据）推给原生，
-     * 替换「当前曲之后」的预载位。之后当前曲播完由 ExoPlayer 自动无缝续播，
-     * 不经过 JS——后台连播的根基。
+     * 整条播放计划入档：按 JS 算好的顺序替换原生 shadow 队列（当前可播窗不动）。
+     * src 为空的条目 = 顺序已定、音源未解析，原生轮到它时经 needsource 索要。
      */
-    async pushQueueWindow(items: IQueueWindowItem[]): Promise<void> {
-        this.windowItems = new Map(items.map((it) => [it.mediaId, it]));
-        await callNativeMethod(PLUGIN, "pushQueueWindow", { items });
+    async pushQueuePlan(items: IQueuePlanItem[]): Promise<void> {
+        this.plannedSrcs = new Map(items.filter((it) => it.src).map((it) => [it.mediaId, it.src]));
+        await callNativeMethod(PLUGIN, "pushQueuePlan", { items });
+    }
+
+    /** 补一条已解析音源（needsource 往返 / 缓存落盘本地化升级）；等源态补上即自动续播 */
+    async supplySource(mediaId: string, src: string): Promise<void> {
+        if (src) this.plannedSrcs.set(mediaId, src);
+        await callNativeMethod(PLUGIN, "supplySource", { mediaId, src });
+    }
+
+    /** 撤下一条计划（解析失败/冷却跳过） */
+    dropPlanned(mediaId: string): void {
+        this.plannedSrcs.delete(mediaId);
+        callNativeMethod(PLUGIN, "dropPlanned", { mediaId }).catch(() => {});
     }
 
     /** 原生队列直切（通知栏同款通路）：切到返回 mediaId，切不了返回 null */
@@ -416,6 +437,20 @@ export class NativeAudioElement {
             const res = await callNativeMethod(PLUGIN, "skip", { direction });
             const mediaId = String(res?.mediaId ?? "");
             return mediaId || null;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * 原生队列定点跳转（手动点播已预载进窗口的歌时替代整链重装）：
+     * 命中返回 mediaId（过渡经 itemtransition 簿记），未命中返回 null。
+     */
+    async jumpToNative(mediaId: string): Promise<string | null> {
+        try {
+            const res = await callNativeMethod(PLUGIN, "jumpToItem", { mediaId });
+            const jumped = String(res?.mediaId ?? "");
+            return jumped || null;
         } catch {
             return null;
         }
@@ -473,6 +508,8 @@ export class NativeAudioElement {
                 paused: !!res.paused,
                 ended: !!res.ended,
                 hasNext: !!res.hasNext,
+                awaitingSource: !!res.awaitingSource,
+                plannedCount: Number(res.plannedCount) || 0,
             };
         } catch {
             return null;
@@ -567,16 +604,22 @@ export class NativeAudioElement {
                 break;
             }
             case "itemtransition": {
-                // 原生自动续播了窗口里的下一首：src/mediaId 跟上播放器的现实
+                // 原生自动续播了计划里的下一首：src/mediaId 跟上播放器的现实
                 const mediaId = String(data.mediaId ?? "");
-                if (mediaId && this.windowItems.has(mediaId)) {
-                    this._src = this.windowItems.get(mediaId)!.src;
+                if (mediaId && this.plannedSrcs.has(mediaId)) {
+                    this._src = this.plannedSrcs.get(mediaId)!;
                     this._mediaId = mediaId;
                 } else if (mediaId) {
                     this._mediaId = mediaId;
                 }
                 this._ended = false;
                 payload = { mediaId, index: Number(data.index) || 0 };
+                break;
+            }
+            case "needsource": {
+                // 原生缺源索求：trackPlayer 解析后经 supplySource 补上（等源态下补上即续播）
+                const mediaId = String(data.mediaId ?? "");
+                payload = { mediaId, plannedCount: Number(data.plannedCount) || 0 };
                 break;
             }
             case "error": {

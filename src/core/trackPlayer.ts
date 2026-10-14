@@ -1,7 +1,13 @@
 import { atom, getDefaultStore, useAtomValue } from "jotai";
 import EventEmitter from "eventemitter3";
 import { buildPlayableMediaUrl } from "./net";
-import { getPluginByMedia, getPlugins, pluginCall } from "./ipc";
+import {
+    getPluginByMedia,
+    getPlugins,
+    invalidatePluginCache,
+    pluginHost,
+    pluginCall,
+} from "./ipc";
 import { setMusicHistory } from "./musicHistory";
 import { getQuality, setQuality, getConfig, getAllowCoPlay } from "./appConfig";
 import { isNative, localFileUrl } from "./native";
@@ -15,7 +21,7 @@ import {
 import {
     createAudioElement,
     destroyAudioBackend,
-    IQueueWindowItem,
+    IQueuePlanItem,
     NativeAudioElement,
 } from "./nativeAudio";
 
@@ -167,22 +173,21 @@ function bufferedEndAfter(audio: AudioBackend, position: number): number {
     return end;
 }
 
-/** ---------- 队列窗口镜像（原生后端的后台连播根基） ---------- */
+/** ---------- 队列计划下沉（原生状态机的根基） ---------- */
 
 /**
- * 原生播放内核持有整条已解析队列：把接下来几首的音源在前台解析好推给
- * ExoPlayer（连同元数据），之后预缓冲、自动无缝续播、通知栏切歌全原生完成，
- * 熄屏后台不依赖 JS 存活。WebView 后端仍走下面的 probe 预载路径。
+ * 原生播放内核持有整条播放计划：JS 把播放顺序（含元数据）经 pushQueuePlan
+ * 推给 ExoPlayer 侧的 shadow 队列，src 解析不出来的先占位（src=""）。
+ * 预缓冲、逐首自动续播、通知栏切歌全原生完成；轮到未解析条目时原生发
+ * needsource 索要，JS 解析后 supplySource 补上——等源态下补上即续播，
+ * 不需要 JS「正好在换歌那一刻」活着。WebView 后端仍走下面的 probe 预载路径。
  */
 
-/** 队列窗口推几首（与原生 QUEUE_WINDOW_MAX 一致）；1 = 只预载下一首 */
-const QUEUE_WINDOW_SIZE = 2;
+/** 一次推给原生的计划条数（覆盖常见歌单长度；队列变动即重推，成本仅元数据） */
+const PLAN_MAX = 50;
 
-/**
- * 窗口本地化复查延迟：直链入窗后启动了缓存下载，等它落盘后把本地路径
- * 换进窗口。90s 足够覆盖弱网下整首下载；到点时窗口若已被换过（seq 变）自然作废。
- */
-const WINDOW_RELOCALIZE_DELAY = 90000;
+/** 主动补源的前瞻条数：JS 活着时多备几首，减少 needsource 往返 */
+const PLAN_SUPPLY_AHEAD = 3;
 
 /** 结尾多少秒开始预加载下一首（仅 WebView 后端的 probe 路径使用） */
 const NEXT_PRELOAD_AHEAD = 30;
@@ -215,16 +220,18 @@ interface INextTrackPreload {
     probe: AudioBackend | null;
 }
 
-/** 队列窗口镜像记录：mediaId → 已解析条目（transition 簿记按它对账） */
-interface IMirroredTrack {
+/** 队列计划记录：mediaId → 曲目与已解析源（原生自动续播时 onItemTransition 按它对账） */
+interface IPlanSource {
     musicItem: IMusic.IMusicItem;
-    resolved: {
+    /** resolveMediaUrl 成功结果（supply 时写入；未解析过则缺省） */
+    resolved?: {
         src: string;
         source?: IPlugin.IMediaSourceResult;
         quality: IMusic.IQualityKey | null;
         localDownload?: true;
     };
-    playSrc: string;
+    /** 已可播的地址（本地文件或直链；空 = 还没解析） */
+    playSrc?: string;
 }
 
 /**
@@ -265,6 +272,59 @@ export function qualityRank(q: IMusic.IQualityKey): number {
 export function qualityLadderDown(first: IMusic.IQualityKey): IMusic.IQualityKey[] {
     const idx = Math.max(0, QUALITY_LADDER.indexOf(first));
     return QUALITY_LADDER.slice(0, idx + 1).reverse();
+}
+
+/** 计划条目给原生的解析请求音质（与 resolveMediaUrl 的 requested 同式） */
+function planRequestedQuality(musicItem: IMusic.IMusicItem): IMusic.IQualityKey {
+    return pickSupportedQuality(getQuality(), musicItem.qualities) ?? getQuality();
+}
+
+/** payload 里封面的上限：data: 大图 / 超长串一律剥掉（原生解析用不到图） */
+const MAX_PAYLOAD_ARTWORK = 4 * 1024;
+/** payload 整体体积上限：超过就退化成插件解析必需的最小集 */
+const MAX_PAYLOAD_JSON = 32 * 1024;
+const PAYLOAD_KEEP_KEYS = [
+    "platform",
+    "id",
+    "title",
+    "artist",
+    "album",
+    "url",
+    "localPath",
+    "qualities",
+    "duration",
+];
+
+/**
+ * 计划条目带给原生的曲目快照：原生缺源时靠它自己跑 getMediaSource，
+ * 因此要保留插件解析所需的全部字段，只剥掉超大字段（base64 封面 / 整段歌词）。
+ */
+function toPlanPayload(musicItem: IMusic.IMusicItem): Record<string, unknown> {
+    const full: Record<string, unknown> = { ...musicItem };
+    const artwork = full.artwork;
+    if (
+        typeof artwork === "string" &&
+        (artwork.startsWith("data:") || artwork.length > MAX_PAYLOAD_ARTWORK)
+    ) {
+        full.artwork = "";
+    }
+    let size = 0;
+    try {
+        size = JSON.stringify(full)?.length ?? 0;
+    } catch {
+        size = MAX_PAYLOAD_JSON + 1; // 结构不可序列化：退化到最小集
+    }
+    if (size <= MAX_PAYLOAD_JSON) {
+        return full;
+    }
+    const min: Record<string, unknown> = {};
+    for (const k of PAYLOAD_KEEP_KEYS) {
+        const v = (musicItem as Record<string, unknown>)?.[k];
+        if (v !== undefined && v !== null) {
+            min[k] = v;
+        }
+    }
+    return min;
 }
 
 /** ---------- jotai atoms ---------- */
@@ -374,8 +434,8 @@ export function setDownloadedSourceResolver(
 }
 
 /**
- * 「预载曲目元数据预登记」机制已随旧架构移除：队列窗口条目自带元数据
- * （title/artist/album/artworkUri 随 pushQueueWindow 下发），通知栏由
+ * 「预载曲目元数据预登记」机制已随旧架构移除：队列计划条目自带元数据
+ * （title/artist/album/artworkUri 随 pushQueuePlan 下发），通知栏由
  * Media3 直接从 MediaItem 渲染，不再需要 JS 侧另行登记。
  */
 
@@ -432,7 +492,7 @@ class TrackPlayer extends EventEmitter {
     private coPlayResumeTimer: ReturnType<typeof setTimeout> | null = null;
     /** 正在执行的共播续播尝试序号：换歌 / 用户暂停时作废在途 play() */
     private coPlayResumeSeq = 0;
-    /** 下一首的预加载记录（仅 WebView 后端 probe 路径；原生后端走队列窗口镜像） */
+    /** 下一首的预加载记录（仅 WebView 后端 probe 路径；原生后端走队列计划） */
     private nextPreload: INextTrackPreload | null = null;
     /** 预加载会话序号：换歌 / 队列变动 / 换音质时作废在途预加载 */
     private nextPreloadSeq = 0;
@@ -441,27 +501,22 @@ class TrackPlayer extends EventEmitter {
     /** 最近一次预加载失败的曲键与时间：同曲一段时间内不再撞同一个坏音源 */
     private preloadFailedKey = "";
     private preloadFailedAt = 0;
-    /** 队列窗口镜像记录：mediaId → 已解析条目（原生自动续播的簿记对账用） */
-    private mirroredWindow: Map<string, IMirroredTrack> = new Map();
-    /** 窗口镜像流程启动中（防 timeupdate / visibilitychange 重入） */
-    private mirroring = false;
-    /** 镜像会话序号：换歌 / 队列变动时作废在途镜像 */
-    private mirrorSeq = 0;
+    /** 队列计划记录：mediaId → 曲目/已解析源（原生自动续播的簿记对账用） */
+    private planSources: Map<string, IPlanSource> = new Map();
+    /** 推送给原生的计划顺序（mediaId 列表）：补源按此序推进 */
+    private planEntries: string[] = [];
+    /** 计划推送流程启动中（防 transition / visibilitychange / 队列变动重入） */
+    private planPushing = false;
+    /** 计划会话序号：换歌 / 队列变动时作废在途推送 */
+    private planSeq = 0;
+    /** 补源在途标记（needsource / 主动前瞻共用） */
+    private planSupplying = false;
+    /** 补源解析失败的曲键与时间：冷却期内不再撞同一个坏音源，冷却过 drop 跳过 */
+    private supplyFailed = new Map<string, number>();
     /** isLoading 的进入时间：回前台对账时识别「解析卡死」用 */
     private loadingSince = 0;
     /** 切后台兜底镜像的延后定时器（避开新应用冷启动窗口，见 visibilitychange 监听） */
     private hiddenMirrorTimer: ReturnType<typeof setTimeout> | null = null;
-    /**
-     * 窗口本地化复查定时器（按 mediaId 一把）：窗口里有远端直链且缓存下载
-     * 刚启动时预约；到点重镜像把已落盘的本地路径换进窗口。直链时效短
-     * （网易类 20~30 分钟），窗口在 JS 冻结期间无法重推，本地化是后台连播
-     * 跨直链时效的唯一手段。
-     */
-    private relocalizeTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
-    /** 本地化复查超时后允许直链降级入窗的曲键（一次性，重镜像时消费） */
-    private remoteFallbackKeys: Set<string> = new Set();
-    /** 窗口里「暂不入窗等本地文件」的曲键（落盘回调据此判断要不要补窗） */
-    private _windowKeysAwaitingLocal: Set<string> = new Set();
     /** WebView 静音保活音源：原生后端在播时维持 renderer 不进冻结名单
      *  （窗口补镜像/缓存本地化依赖 JS 存活，见 startWebViewKeepAlive 注释） */
     private keepAlive: HTMLAudioElement | null = null;
@@ -525,7 +580,7 @@ class TrackPlayer extends EventEmitter {
                 }
                 this.hiddenMirrorTimer = setTimeout(() => {
                     this.hiddenMirrorTimer = null;
-                    this.maybeMirrorQueueWindow();
+                    this.maybePushPlan();
                 }, 5000);
             } else {
                 // 回前台：取消延后的镜像（马上会由对账流程补），并对齐状态
@@ -543,15 +598,13 @@ class TrackPlayer extends EventEmitter {
         this.restoreSession();
         this.syncLoopFlag();
 
-        // 缓存落盘 → 补窗：窗口镜像把非首位的歌留在「等本地文件」状态，
-        // 落盘即补入（90s 复查只是页面冻结吃不到事件时的兜底）
+        // 缓存落盘 → 逐曲升级：把计划里的远端直链换成刚落盘的本地文件
+        // （supplySource 就地替换 shadow/窗内条目，不再整窗重镜像；
+        //  冻结期间直链过期也能靠已本地化的条目续播）
         setCacheStoredListener((key) => {
-            const mirrored = this.mirroredWindow.get(key);
-            const pending = !mirrored || this._windowKeysAwaitingLocal.has(key);
-            if (pending && this.audio instanceof NativeAudioElement && !this.mirroring) {
-                console.info(`[trackPlayer] 缓存落盘补窗：${key}`);
-                this._windowKeysAwaitingLocal.delete(key);
-                void this.mirrorUpcomingWindow();
+            const rec = this.planSources.get(key);
+            if (rec?.playSrc && this.audio instanceof NativeAudioElement) {
+                void this.upgradePlanToLocal(key);
             }
         });
     }
@@ -608,7 +661,7 @@ class TrackPlayer extends EventEmitter {
                 });
                 setAtom(musicStateAtom, state.paused ? "paused" : "playing");
                 await this.updateMediaSession(nativeMusic);
-                this.maybeMirrorQueueWindow();
+                this.maybePushPlan();
                 return;
             }
         }
@@ -622,8 +675,9 @@ class TrackPlayer extends EventEmitter {
                 console.info(
                     `[trackPlayer] 后台续播对账：播放器已在放《${nativeMusic.title}》，同步 JS 状态`,
                 );
-                // 播放器自行推进过了：镜像记录以原生现实为准（清掉旧记录）
-                this.mirroredWindow.clear();
+                // 播放器自行推进过了：计划记录以原生现实为准（清掉旧记录，重推重建）
+                this.planSources.clear();
+                this.planEntries = [];
                 this._currentMusic = nativeMusic;
                 this.consumePendingNext(nativeMusic);
                 this.pushHistory(nativeMusic);
@@ -651,9 +705,13 @@ class TrackPlayer extends EventEmitter {
         if (!state.paused) {
             this.startWebViewKeepAlive();
         }
-        if (trackChanged || (state.hasNext && !this.mirroredWindow.size)) {
-            // 对齐后窗口可能已经不对（推进过/被换过）：重镜像
-            this.maybeMirrorQueueWindow();
+        if (trackChanged || !this.planEntries.length) {
+            // 对齐后计划可能已经不对（推进过/被换过）：重推
+            this.maybePushPlan();
+        }
+        if (state.awaitingSource) {
+            // 原生停在等源态：立即补源续播（needsource 事件可能在冻结期丢了）
+            void this.supplyPlannedSources();
         }
     }
 
@@ -766,8 +824,8 @@ class TrackPlayer extends EventEmitter {
             // 熄屏断流等场景里被系统静默暂停：非用户意图，补播回来
             this.resume();
         } else if (!audio.paused && music) {
-            // 在播：确认队列窗口就位（冻结期间可能消耗了窗口却没补上）
-            this.maybeMirrorQueueWindow();
+            // 在播：确认队列计划就位（冻结期间可能消耗了计划却没补上）
+            this.maybePushPlan();
         }
     }
 
@@ -783,6 +841,8 @@ class TrackPlayer extends EventEmitter {
         audio.addEventListener("stalled", this.onAudioStall);
         // 仅原生后端会发：ExoPlayer 播完当前曲目自动续播预载的下一首
         audio.addEventListener("itemtransition", this.onItemTransition);
+        // 仅原生后端会发：计划轮到未解析的条目，向 JS 索要音源（补上即续播）
+        audio.addEventListener("needsource", this.onNeedSource);
     }
 
     private detachAudioListeners(audio: AudioBackend) {
@@ -796,6 +856,7 @@ class TrackPlayer extends EventEmitter {
         audio.removeEventListener("waiting", this.onAudioWaiting);
         audio.removeEventListener("stalled", this.onAudioStall);
         audio.removeEventListener("itemtransition", this.onItemTransition);
+        audio.removeEventListener("needsource", this.onNeedSource);
     }
 
     /** 彻底弃用一个播放器实例：摘掉监听，免得它的 pause/error 事件回头改状态 */
@@ -1096,11 +1157,11 @@ class TrackPlayer extends EventEmitter {
         // 换歌路上 detachAudio 的内部暂停事件会把 userPaused 置回 true（与用户
         // 主动暂停共用同一条 pause 通道），真正出声即视为用户要播，共播回抢恢复
         this.userPaused = false;
-        // 开播完成：把队列窗口推给原生播放器（后台连播的根基——窗口必须
-        // 在前台期就位，冻结后 JS 不可依赖）；并确保保活音源在跑
+        // 开播完成：把整条播放计划推给原生播放器（后台连播的根基——计划必须
+        // 在 JS 活着时就位，冻结后原生自己推进、缺源由 needsource 醒来续接）；并确保保活音源在跑
         if (this.audio instanceof NativeAudioElement) {
             this.startWebViewKeepAlive();
-            this.maybeMirrorQueueWindow();
+            this.maybePushPlan();
         }
         setAtom(musicStateAtom, "playing");
         this.syncMediaSessionState();
@@ -1333,6 +1394,19 @@ class TrackPlayer extends EventEmitter {
         if (!this._currentMusic) {
             return;
         }
+        // 原生后端 + 计划未完：只是下一条还没源（等源态）。补源即可让原生就地
+        // 续播——不走下面的 skipToNext/loadTrack 重装链路（那会清空通知栏尾部，
+        // 也和 needsource 的往返重复）。
+        {
+            const audio = this.audio;
+            if (audio instanceof NativeAudioElement) {
+                const st = await audio.queryNativeState();
+                if (st && (st.awaitingSource || st.plannedCount > 0)) {
+                    void this.supplyPlannedSources();
+                    return;
+                }
+            }
+        }
         // 下一首已预加载好：直接交接，跳过「解析音源 + 重新加载」的空隙
         if (await this.tryCommitPreloadedNext()) {
             return;
@@ -1559,142 +1633,83 @@ class TrackPlayer extends EventEmitter {
     }
 
     /**
-     * 队列窗口镜像：解析接下来几首 → 推给原生播放器（连同元数据）。
-     * 成功的条目记进 mirroredWindow，原生自动续播时 onItemTransition 按
-     * mediaId 在这里对账。解析失败的单曲跳过（不阻塞后面的歌）。
+     * 队列计划推送：算出整条播放顺序 → 推给原生（连同元数据；已解析出源的条目
+     * 带上 src，其余 src 空由原生 needsource 往返补齐）。
+     * 推送本身只有顺序+元数据成本，队列变动/换歌/对账都可随做，不打扰窗内条目。
      */
-    private async mirrorUpcomingWindow() {
+    private async pushUpcomingPlan() {
         const audio = this.audio;
         if (
-            this.mirroring ||
+            this.planPushing ||
             !(audio instanceof NativeAudioElement) ||
-            this._repeatMode === "single" ||
             !this._currentMusic ||
             !this._playList.length
         ) {
             return;
         }
-        this.mirroring = true;
-        const seq = ++this.mirrorSeq;
+        this.planPushing = true;
+        const seq = ++this.planSeq;
         try {
-            const upcoming = await this.computeUpcoming(QUEUE_WINDOW_SIZE);
-            if (seq !== this.mirrorSeq) {
+            if (this._repeatMode === "single") {
+                // 单曲循环交给原生 REPEAT_ONE：计划清空即不续播
+                this.planSources.clear();
+                this.planEntries = [];
+                await audio.pushQueuePlan([]);
                 return;
             }
-            if (!upcoming.length) {
-                // 没有下一首（队尾 repeat off 等）：清掉原生窗口
-                this.mirroredWindow.clear();
-                await audio.pushQueueWindow([]);
+            const upcoming = await this.computeUpcoming(PLAN_MAX);
+            if (seq !== this.planSeq || this.audio !== audio) {
                 return;
             }
-            const items: IQueueWindowItem[] = [];
-            const mirrored: Map<string, IMirroredTrack> = new Map();
-            // 窗口位次决定取源策略（v1.0.9 全本地化的回归修正）：
-            //  - 第 1 首是「当前曲播完后立即要续播的」：缓存命中用本地，未命中
-            //    推直链——刚解析的直链几十分钟内有效，足够播完这一首；保证
-            //    窗口非空（推空窗口会让 ExoPlayer 播完即停，且冻结期间无法补）。
-            //  - 第 2 首起：只收本地文件（无过期风险）。未落盘不入窗，由缓存
-            //    落盘回调/复查触发重镜像补入——收听得越久窗口越「全本地」。
-            let windowPosition = 0;
+            const items: IQueuePlanItem[] = [];
+            const entries: string[] = [];
+            const nextSources = new Map<string, IPlanSource>();
             for (const musicItem of upcoming) {
                 const key = playListKey(musicItem);
-                windowPosition += 1;
-                // 冷却期内的坏音源不再撞（与 WebView probe 路径同规则）
-                if (
-                    this.preloadFailedKey === key &&
-                    Date.now() - this.preloadFailedAt < NEXT_PRELOAD_RETRY_AFTER
-                ) {
+                // 解析失败的曲在冷却期内直接不进计划（与旧窗口镜像同规则）
+                const failedAt = this.supplyFailed.get(key);
+                if (failedAt && Date.now() - failedAt < NEXT_PRELOAD_RETRY_AFTER) {
                     continue;
                 }
-                try {
-                    const resolved = await this.resolveMediaUrl(musicItem);
-                    if (seq !== this.mirrorSeq) {
-                        return;
-                    }
-                    if (!resolved.ok) {
-                        this.preloadFailedKey = key;
-                        this.preloadFailedAt = Date.now();
-                        console.warn(`[trackPlayer] 窗口镜像解析失败 ${musicItem.title}：${resolved.reason}`);
-                        continue;
-                    }
-                    let playSrc: string | null = null;
-                    if (!musicItem.localPath && !resolved.localDownload) {
-                        const cached = await lookupCachedSrc(musicItem, resolved.quality);
-                        if (seq !== this.mirrorSeq) {
-                            return;
-                        }
-                        if (cached) {
-                            playSrc = cached;
-                        } else {
-                            requestAudioCacheStore(musicItem, resolved.quality, resolved.source);
-                            if (windowPosition === 1 || this.remoteFallbackKeys.delete(key)) {
-                                // 窗口首位/降级名单：推直链保住「下一首永远可播」
-                                //（原生侧有跳坏条目自愈兜底）
-                                playSrc = resolved.src;
-                            }
-                            // 预约落盘后的复查入窗（90s 兜底 + 下载完成事件驱动）
-                            this.scheduleWindowRelocalize(key);
-                        }
-                    } else {
-                        playSrc = resolved.src;
-                    }
-                    if (!playSrc) {
-                        // 非首位且本地未就绪：暂不入窗（落盘回调/复查时补入）
-                        this._windowKeysAwaitingLocal.add(key);
-                        continue;
-                    }
-                    items.push({
-                        mediaId: key,
-                        src: playSrc,
-                        title: musicItem.title ?? "",
-                        artist: musicItem.artist ?? "",
-                        album: musicItem.album ?? "",
-                        artworkUri: typeof musicItem.artwork === "string" ? musicItem.artwork : "",
-                    });
-                    mirrored.set(key, {
-                        musicItem,
-                        resolved: {
-                            src: resolved.src,
-                            source: resolved.source,
-                            quality: resolved.quality,
-                            localDownload: resolved.localDownload,
-                        },
-                        playSrc,
-                    });
-                } catch (e: any) {
-                    console.warn(`[trackPlayer] 窗口镜像异常 ${musicItem.title}`, e?.message ?? e);
-                }
+                // 已有的解析记录随计划带走（src 不重复解析），元数据换新
+                const rec: IPlanSource = this.planSources.get(key) ?? { musicItem };
+                rec.musicItem = musicItem;
+                items.push({
+                    mediaId: key,
+                    src: rec.playSrc ?? "",
+                    title: musicItem.title ?? "",
+                    artist: musicItem.artist ?? "",
+                    album: musicItem.album ?? "",
+                    artworkUri:
+                        typeof musicItem.artwork === "string" &&
+                        musicItem.artwork.length <= MAX_PERSISTED_ARTWORK
+                            ? musicItem.artwork
+                            : "",
+                    // 原生缺源时的自救依据：曲目快照 + 请求音质（JS 被冻结也能解析）
+                    payload: toPlanPayload(musicItem),
+                    quality: planRequestedQuality(musicItem),
+                });
+                entries.push(key);
+                nextSources.set(key, rec);
             }
-            if (seq !== this.mirrorSeq) {
-                return;
-            }
-            // 空窗口保护：upcoming 有歌但全部「等本地/解析失败」时，不覆盖
-            // 已推送的旧窗口——旧直链还有时效，推空 = ExoPlayer 播完即停且
-            // 冻结期间无法补。等落盘回调/复查再补窗；只有「真的没有下一首」
-            // （upcoming 为空，队尾 repeat off）才推空。
-            if (!items.length && upcoming.length && this.mirroredWindow.size) {
-                console.info("[trackPlayer] 本轮窗口全未就绪，保留既有窗口");
-                return;
-            }
-            this.mirroredWindow = mirrored;
-            this._windowKeysAwaitingLocal.clear();
-            try {
-                await audio.pushQueueWindow(items);
-            } catch (e: any) {
-                console.warn("[trackPlayer] 队列窗口推送失败", e?.message ?? e);
-                this.mirroredWindow.clear();
-                return;
-            }
-            console.info(`[trackPlayer] 队列窗口就位：${items.length} 首`);
-            // 窗口就位意味着 JS 此刻是活的：保活音源务必在跑（防后续冻结）
+            this.planSources = nextSources;
+            this.planEntries = entries;
+            await audio.pushQueuePlan(items);
+            console.info(
+                `[trackPlayer] 队列计划就位：${items.length} 首（已带源 ${items.filter((it) => it.src).length} 首）`,
+            );
+            // 计划就位意味着 JS 此刻是活的：保活音源务必在跑（防后续冻结）
             this.startWebViewKeepAlive();
+            void this.supplyPlannedSources();
+        } catch (e: any) {
+            console.warn("[trackPlayer] 队列计划推送失败", e?.message ?? e);
         } finally {
-            this.mirroring = false;
+            this.planPushing = false;
         }
     }
 
-    /** 窗口镜像触发守卫：在播、原生后端、没有在途镜像时才补 */
-    private maybeMirrorQueueWindow() {
+    /** 计划推送触发守卫：原生后端、有装载中的曲、没有在途推送 */
+    private maybePushPlan() {
         const audio = this.audio;
         if (
             !audio ||
@@ -1702,39 +1717,99 @@ class TrackPlayer extends EventEmitter {
             !audio.src ||
             this.isLoading ||
             this.reconnecting ||
-            this.mirroring
+            this.planPushing
         ) {
             return;
         }
-        void this.mirrorUpcomingWindow();
+        void this.pushUpcomingPlan();
     }
 
     /**
-     * 预约一次「窗口本地化」复查：到点时若窗口缺这首（缓存未落盘没入窗）
-     * 或仍是远端直链，重镜像一次。缓存落盘则本地路径入窗；仍未落盘则
-     * 降级推直链（allowRemote 置位，原生有跳坏条目自愈兜底）。同曲去重。
+     * 补源：按计划顺序解析还缺 src 的条目（原生只认队头，缺源的条目从原生
+     * 队列撤下、冷却后随下次推送再回来），解析成功即 supplySource 写回原生
+     * ——等源态下写入即续播。needsource / 计划推送 / 回前台对账都会触发，
+     * 前瞻 PLAN_SUPPLY_AHEAD 首减少原生往返。
      */
-    private scheduleWindowRelocalize(mediaId: string) {
-        if (this.relocalizeTimers.has(mediaId)) {
+    private async supplyPlannedSources() {
+        const audio = this.audio;
+        if (this.planSupplying || !(audio instanceof NativeAudioElement)) {
             return;
         }
-        const timer = setTimeout(() => {
-            this.relocalizeTimers.delete(mediaId);
-            // 窗口里这首已本地化则免；否则（未入窗/仍是直链）重镜像。
-            // 本次重镜像允许直链降级：本地化已给过 90s 机会。
-            this.remoteFallbackKeys.add(mediaId);
-            this.maybeMirrorQueueWindow();
-        }, WINDOW_RELOCALIZE_DELAY);
-        this.relocalizeTimers.set(mediaId, timer);
+        this.planSupplying = true;
+        try {
+            for (let round = 0; round < PLAN_SUPPLY_AHEAD; round++) {
+                if (this.audio !== audio) {
+                    return; // 后端被换 / 彻底拆掉
+                }
+                const key = this.planEntries.find(
+                    (id) => !this.planSources.get(id)?.playSrc,
+                );
+                if (!key) {
+                    return; // 计划内都可播：原生自己补窗续播
+                }
+                const rec = this.planSources.get(key)!;
+                try {
+                    const resolved = await this.resolveMediaUrl(rec.musicItem);
+                    if (this.audio !== audio || this.planSources.get(key) !== rec) {
+                        return; // 换歌 / 计划重建，交下一轮触发
+                    }
+                    if (!resolved.ok) {
+                        throw new Error(resolved.reason);
+                    }
+                    let playSrc = resolved.src;
+                    if (!rec.musicItem.localPath && !resolved.localDownload) {
+                        const cached = await lookupCachedSrc(rec.musicItem, resolved.quality);
+                        if (cached) {
+                            playSrc = cached;
+                        } else {
+                            // 顺路启动整首缓存，落盘后经 upgradePlanToLocal 换本地
+                            requestAudioCacheStore(rec.musicItem, resolved.quality, resolved.source);
+                        }
+                    }
+                    rec.resolved = {
+                        src: resolved.src,
+                        source: resolved.source,
+                        quality: resolved.quality,
+                        localDownload: resolved.localDownload,
+                    };
+                    rec.playSrc = playSrc;
+                    await audio.supplySource(key, playSrc);
+                } catch (e: any) {
+                    console.warn(`[trackPlayer] 补源失败 ${rec.musicItem.title}`, e?.message ?? e);
+                    // 记冷却并从计划与原生队列撤下（否则原生永远等在坏源队头）
+                    this.supplyFailed.set(key, Date.now());
+                    this.planEntries = this.planEntries.filter((id) => id !== key);
+                    this.planSources.delete(key);
+                    audio.dropPlanned(key);
+                }
+            }
+        } finally {
+            this.planSupplying = false;
+        }
     }
 
-    private clearRelocalizeTimers() {
-        for (const timer of this.relocalizeTimers.values()) {
-            clearTimeout(timer);
+    /**
+     * needsource：原生推进到缺源的计划条目（周期重发，JS 被节流/冻结醒来后
+     * 也会收到）。补源即可——等源态下原生补上当场续播，换歌簿记走 itemtransition。
+     */
+    private onNeedSource = () => {
+        void this.supplyPlannedSources();
+    };
+
+    /** 缓存落盘 → 计划条目升级本地文件（supplySource 就地替换，不动其余条目） */
+    private async upgradePlanToLocal(mediaId: string) {
+        const audio = this.audio;
+        const rec = this.planSources.get(mediaId);
+        if (!rec?.playSrc || !(audio instanceof NativeAudioElement)) {
+            return;
         }
-        this.relocalizeTimers.clear();
-        this.remoteFallbackKeys.clear();
-        this._windowKeysAwaitingLocal.clear();
+        const cached = await lookupCachedSrc(rec.musicItem, rec.resolved?.quality ?? null);
+        if (!cached || cached === rec.playSrc || this.planSources.get(mediaId) !== rec) {
+            return;
+        }
+        rec.playSrc = cached;
+        await audio.supplySource(mediaId, cached).catch(() => {});
+        console.info(`[trackPlayer] 缓存落盘，计划条目本地化：${mediaId}`);
     }
 
     /**
@@ -1783,23 +1858,24 @@ class TrackPlayer extends EventEmitter {
     }
 
     /**
-     * 作废在途预加载与窗口镜像：队列变动 / 换歌 / 换音质 / 改重复模式都会走到这里。
-     * WebView 后端要销毁预缓冲元素；原生后端要撤下已推送的窗口条目，否则
+     * 作废在途预加载与队列计划：队列变动 / 换歌 / 换音质 / 改重复模式都会走到这里。
+     * WebView 后端要销毁预缓冲元素；原生后端要撤下已推送的计划（含窗内条目），否则
      * ExoPlayer 会在当前曲播完自动续播一首 JS 侧已经不认的歌。
+     * 队列变动后应紧跟一次 maybePushPlan 重建计划（换歌链路由 playing 事件重建）。
      */
     abortNextTrackPreload() {
         this.nextPreloadSeq += 1;
-        this.mirrorSeq += 1;
-        this.clearRelocalizeTimers();
+        this.planSeq += 1;
         const preload = this.nextPreload;
         this.nextPreload = null;
-        this.mirroredWindow.clear();
+        this.planSources.clear();
+        this.planEntries = [];
         if (preload?.probe) {
             this.destroyAudioElement(preload.probe);
         }
         if (this.audio instanceof NativeAudioElement) {
-            // 清空窗口：推送一个空列表（原生侧替换当前曲之后的全部条目）
-            this.audio.pushQueueWindow([]).catch(() => {});
+            // 清空计划：推送一个空列表（原生侧同时撤下窗内残留条目）
+            void this.audio.pushQueuePlan([]).catch(() => {});
         }
     }
 
@@ -1826,7 +1902,7 @@ class TrackPlayer extends EventEmitter {
     }
 
     /**
-     * 原生播放器自动续播了窗口里的下一首（itemtransition，mediaId 命中镜像记录）。
+     * 原生播放器自动续播了计划里的下一首（itemtransition，mediaId 命中计划记录）。
      * 声音已经接上了，这里只做换歌簿记，让 JS 侧状态跟上播放器的现实。
      */
     private onItemTransition = async (ev: any) => {
@@ -1834,9 +1910,9 @@ class TrackPlayer extends EventEmitter {
         if (!mediaId) {
             return; // loadTrack 引起的过渡（无 mediaId），不是自动续播
         }
-        const mirrored = this.mirroredWindow.get(mediaId);
-        if (!mirrored) {
-            // 兜底：镜像记录已不在（页面冻结期间推进过多首 / 队列被换过）。
+        const planned = this.planSources.get(mediaId);
+        if (!planned?.playSrc) {
+            // 兜底：计划记录已不在（页面冻结期间推进过多首 / 队列被换过）。
             // 以原生播放器的现实为准对齐状态——避免按过期记录把状态往回改。
             await this.reconcileWithNative();
             return;
@@ -1850,10 +1926,10 @@ class TrackPlayer extends EventEmitter {
                 return;
             }
         }
-        this.mirroredWindow.delete(mediaId);
-        await this.commitPreloadedNext(mirrored);
-        // 窗口消耗掉一首：立即补镜像（前台时窗口永远满着）
-        this.maybeMirrorQueueWindow();
+        this.planSources.delete(mediaId);
+        await this.commitPreloadedNext(planned);
+        // 计划消耗掉一首：立即重推补全（前台时计划永远满着，补源随推送带上）
+        this.maybePushPlan();
     };
 
     /**
@@ -1864,7 +1940,7 @@ class TrackPlayer extends EventEmitter {
     private async commitPreloadedNext(
         preload:
             | INextTrackPreload
-            | IMirroredTrack,
+            | IPlanSource,
     ) {
         this.nextPreload = null;
         this.nextPreloadSeq += 1;
@@ -2035,7 +2111,7 @@ class TrackPlayer extends EventEmitter {
         beforeIndex?: number,
         shouldShuffle?: boolean,
     ): number {
-        // 队列变动可能改变「下一首」，在途预加载作废（仍在结尾窗口的话下个 timeupdate 重来）
+        // 队列变动改变「下一首」：在途预加载作废，原生计划重推（下方 maybePushPlan）
         this.abortNextTrackPreload();
         const inQueue = new Set(this._playList.map(playListKey));
         const valid = toQueueableList(musicItems).filter((it) => !inQueue.has(playListKey(it)));
@@ -2051,6 +2127,7 @@ class TrackPlayer extends EventEmitter {
             this.notifyPlayListAdded();
         }
         this.persistPlayList();
+        this.maybePushPlan();
         return valid.length;
     }
 
@@ -2069,6 +2146,8 @@ class TrackPlayer extends EventEmitter {
         const currentIndex = this.getMusicIndexInPlayList(this._currentMusic);
         const added = this.addAll(items, currentIndex + 1);
         this.declarePendingNext(items);
+        // 待播登记改变了「下一首」语义：按含待播的顺序重推计划
+        this.maybePushPlan();
         return added;
     }
 
@@ -2123,6 +2202,8 @@ class TrackPlayer extends EventEmitter {
             } else {
                 await this.play(list[Math.min(index, list.length - 1)], true);
             }
+        } else {
+            this.maybePushPlan();
         }
     }
 
@@ -2149,6 +2230,7 @@ class TrackPlayer extends EventEmitter {
         this._playList = list;
         setAtom(playListAtom, list);
         this.persistPlayList();
+        this.maybePushPlan();
     }
 
     /** 清空播放队列，正在播的这首继续播 */
@@ -2377,6 +2459,34 @@ class TrackPlayer extends EventEmitter {
             return;
         }
         const target = musicItem ?? this._currentMusic!;
+        // 快路径：目标已在原生队列计划里且音源已解析（手动点播「下一首/下下首」
+        // 乃至计划深处）——直接让 ExoPlayer 定点跳转，不走下面的重装链路。
+        // loadTrack 会清空当前曲之后的全部条目（通知栏「下一首」图标随之消失，
+        // 要等异步重推计划才回来——就是切歌时图标闪一下的根因），且计划里这首歌
+        // 的音源早已解析好，跳转即无缝。
+        // 簿记（历史/待播/状态）由随后的 itemtransition 经 onItemTransition 统一做。
+        {
+            const audio = this.audio;
+            if (
+                audio instanceof NativeAudioElement &&
+                audio.src &&
+                musicItem &&
+                !forcePlay &&
+                !qualityOverride &&
+                !this.isLoading &&
+                !this.reconnecting &&
+                !this.isCurrentMusic(target) &&
+                this._repeatMode !== "single"
+            ) {
+                const key = playListKey(target);
+                if (this.planSources.get(key)?.playSrc) {
+                    const jumped = await audio.jumpToNative(key);
+                    if (jumped) {
+                        return;
+                    }
+                }
+            }
+        }
         // 新的播放请求取代一切在途预加载（原生后端撤下已 append 的曲目）
         this.abortNextTrackPreload();
         const playId = `${target.platform}-${target.id}-${Date.now()}-${++this.playSeq}`;
@@ -2709,6 +2819,8 @@ class TrackPlayer extends EventEmitter {
         setAtom(repeatModeAtom, next);
         localStorage.setItem("repeatMode", next);
         this.syncLoopFlag();
+        // 模式改变计划语义（single=清空 / queue=随机序）：重推
+        this.maybePushPlan();
     }
 
     async seekTo(position: number) {
@@ -3010,6 +3122,17 @@ class TrackPlayer extends EventEmitter {
 }
 
 export const TrackPlayerSingleton = new TrackPlayer();
+
+/**
+ * debug 包调试钩子：模拟器/真机调试构建暴露单例与原生桥给 DevTools 控制台，
+ * 用于端到端回归（造测试队列、查 getState、注入坏链等）。release 构建摇树剔除。
+ */
+if (import.meta.env.DEV) {
+    const w = window as any;
+    w.__tp = TrackPlayerSingleton;
+    w.__pluginHost = pluginHost;
+    w.__invalidatePluginCache = invalidatePluginCache;
+}
 
 /**
  * 把「允许与其他应用同时播放」声明给播放后端：

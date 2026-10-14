@@ -162,6 +162,29 @@ interface WorkerPending {
     timer: ReturnType<typeof setTimeout>;
 }
 
+/**
+ * 原生（QuickJS）运行时同步钩子：由 nativePluginRuntime.ts 注册。
+ * 这里只负责「集合变了」的通知，不 import 它，避免 pluginHost ↔ nativePluginRuntime 成环。
+ */
+let nativeSyncHook: (() => void) | null = null;
+
+export function setNativeSyncHook(fn: (() => void) | null) {
+    nativeSyncHook = fn;
+}
+
+function kickNativeSync() {
+    try {
+        nativeSyncHook?.();
+    } catch (e) {
+        console.warn("[pluginHost] 通知原生运行时同步失败", e);
+    }
+}
+
+/**给外部（ipc 的缓存失效等）一个「插件集合可能变了」的显式通知入口 */
+export function notifyNativePluginSync() {
+    kickNativeSync();
+}
+
 class WebPluginHost {
     private worker: Worker | null = null;
     private ready: Promise<void> | null = null;
@@ -199,6 +222,8 @@ class WebPluginHost {
             plugin.order = this.meta[hash].order;
             plugin.userVariables = this.meta[hash].userVariables;
         }
+        // 启用状态 / 顺序 / 用户变量都走 saveMeta：原生运行时要跟着变
+        kickNativeSync();
     }
 
     /** 初始化 Worker 并从 IndexedDB 恢复所有插件 */
@@ -245,6 +270,7 @@ class WebPluginHost {
         for (const { hash, code } of codes) {
             await this.mountPersisted(hash, code);
         }
+        kickNativeSync();
     }
 
     private async mountPersisted(hash: string, code: string) {
@@ -393,6 +419,41 @@ class WebPluginHost {
             .map(({ __code, ...rest }) => rest as SerializedPlugin);
     }
 
+    /**
+     * 给原生（QuickJS）运行时的插件快照：已启用且已挂载，顺序与 getSerializedPlugins 一致
+     * （含默认音源置顶），带源码和用户变量 —— 原生没有 IndexedDB，只能整份推过去。
+     */
+    async getNativeSyncSnapshot(): Promise<
+        { hash: string; code: string; userVariables: Record<string, string> }[]
+    > {
+        await this.setup();
+        let list = [...this.plugins.values()].filter(
+            (p) => p.state === "Mounted" && (p.enabled ?? true),
+        );
+        list.sort((a, b) => (a.order ?? 999) - (b.order ?? 999));
+        const defaultHash = localStorage.getItem("defaultPluginHash");
+        if (defaultHash) {
+            const idx = list.findIndex((p) => p.hash === defaultHash);
+            if (idx > 0) {
+                list = [
+                    list[idx],
+                    ...list.slice(0, idx),
+                    ...list.slice(idx + 1),
+                ];
+            }
+        }
+        const out: { hash: string; code: string; userVariables: Record<string, string> }[] = [];
+        for (const p of list) {
+            const rec = await idbGet<{ hash: string; code: string }>(CODE_STORE, p.hash).catch(
+                () => undefined,
+            );
+            if (rec?.code) {
+                out.push({ hash: p.hash, code: rec.code, userVariables: p.userVariables ?? {} });
+            }
+        }
+        return out;
+    }
+
     getPluginByHash(hash: string) {
         return this.plugins.get(hash);
     }
@@ -439,6 +500,7 @@ class WebPluginHost {
             userVariablesDef: info.userVariablesDef,
             supportedMethods: info.supportedMethods,
         });
+        kickNativeSync();
         return {
             success: true,
             pluginName: info.name,
@@ -575,6 +637,7 @@ class WebPluginHost {
         delete this.meta[hash];
         this.writeMeta();
         this.plugins.delete(hash);
+        kickNativeSync();
     }
 
     async uninstallPlugin(hash: string) {

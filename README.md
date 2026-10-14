@@ -101,12 +101,15 @@ npm run android:live
 - `CapacitorHttp` 已启用（原生网络直连，插件请求无跨域问题）
 
 > Android 后台播放说明（原生播放内核架构）：ExoPlayer 住在 `MediaPlaybackService`
-> （Media3 `MediaSessionService` 前台服务）里，持有整条已解析队列——JS 在前台把
-> 接下来几首的音源解析好经 `PlaybackBridge.pushQueueWindow` 推进原生播放列表，
-> 之后曲终自动续播、预缓冲、通知栏/耳机/锁屏操作全部原生完成，不依赖 WebView
-> JS 存活（音源解析只能在 JS 里跑，但全部发生在前台期）。窗口内歌曲播完且 JS
-> 仍冻结时才会停止；回前台由对账逻辑（`reconcileWithNative`）以播放器现实校准
-> JS 状态并补齐窗口。通知卡片由 Media3 从 MediaItem 元数据直接渲染。
+> （Media3 `MediaSessionService` 前台服务）里，持有**整条播放计划**（shadow 队列：
+> 完整顺序 + 元数据 + 可空音源）——JS 经 `PlaybackBridge.pushQueuePlan` 把播放
+> 顺序交给原生，队列推进的状态机在原生：曲终自动续播、预缓冲、通知栏/耳机/锁屏
+> 操作全部原生完成。缺源条目双路补源：JS 经 `needsource` 事件补上即自动续播
+> （1.5s 首发 + 周期重发）；JS 被冻结/杀掉时**原生 QuickJS 引擎（`PluginRuntime`）
+> 自己跑插件 `getMediaSource`**（计划条目自带曲目快照与音质档，同步原生 HTTP），
+> 2.5s 与 needsource 并行首发、失败 8s×3 重试——音源解析不再依赖 WebView 存活，
+> 模拟器上冻结页面后已验证自动续播下一首。回前台由对账逻辑（`reconcileWithNative`）
+> 以播放器现实校准 JS 状态。通知卡片由 Media3 从 MediaItem 元数据直接渲染。
 
 ## 目录结构
 
