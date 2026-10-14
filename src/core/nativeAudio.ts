@@ -2,9 +2,10 @@
  * 原生音频后端（Android）：把 MediaPlaybackService 里的 ExoPlayer 伪装成
  * HTMLAudioElement。
  *
- * 播放内核（ExoPlayer + MediaSession）住在前台服务里：装载/播放/通知栏
- * 控制全原生完成，JS 死了通知栏暂停/播放/拖进度照常工作。
- * JS 侧负责装载当前曲与回前台对账。
+ * 播放内核（ExoPlayer + MediaSession）住在前台服务里、持有整条已解析队列：
+ * 前台 JS 把接下来几首经 pushQueueWindow 推进去后，预缓冲/自动续播/通知栏
+ * 切歌全部原生完成，后台连播不依赖 JS 存活——这是后台播放根治的核心。
+ * JS 侧只做三件事：装载当前曲、镜像队列窗口、做换歌簿记（itemtransition）。
  *
  * 对 trackPlayer 呈现与 <audio> 相同的接口（属性 + 事件 + play() 返回
  * promise），播放主流程不用感知后端差异。插件缺失时 createAudioElement()
@@ -17,6 +18,16 @@ const PLUGIN = "PlaybackBridge";
 
 /** 是否已确认原生音频后端可用（缓存探测结果） */
 let backendReady: boolean | null = null;
+
+/** 队列窗口条目：推给原生预载的下一批歌（mediaId = platform-id） */
+export interface IQueueWindowItem {
+    mediaId: string;
+    src: string;
+    title: string;
+    artist: string;
+    album: string;
+    artworkUri: string;
+}
 
 /** 探测原生音频插件是否可用；浏览器 / 老包回退 WebView <audio> */
 export async function probeNativeAudio(): Promise<boolean> {
@@ -114,6 +125,8 @@ export class NativeAudioElement {
      * 页面被冻结期间原生自动续播后，回前台靠 mediaId 与 JS 队列对齐。
      */
     private _mediaId = "";
+    /** 最近一次推给原生的窗口条目（mediaId → item）：transition 簿记对账用 */
+    private windowItems: Map<string, IQueueWindowItem> = new Map();
 
     constructor(options?: { autoplay?: boolean }) {
         this._autoplay = !!options?.autoplay;
@@ -135,6 +148,7 @@ export class NativeAudioElement {
         this._ended = false;
         this._src = value ?? "";
         this._hasSource = !!this._src;
+        this.windowItems.clear();
         if (!this._src) {
             callNativeMethod(PLUGIN, "stop").catch(() => {});
             return;
@@ -334,6 +348,7 @@ export class NativeAudioElement {
             this._pendingSeekMs = null;
             this._error = null;
             this._ended = false;
+            this.windowItems.clear();
             callNativeMethod(PLUGIN, "stop").catch(() => {});
         }
     }
@@ -384,6 +399,16 @@ export class NativeAudioElement {
     }
 
     // ---------- 原生播放内核专属 ----------
+
+    /**
+     * 队列窗口镜像：把接下来几首的已解析音源（连同元数据）推给原生，
+     * 替换「当前曲之后」的预载位。之后当前曲播完由 ExoPlayer 自动无缝续播，
+     * 不经过 JS——后台连播的根基。
+     */
+    async pushQueueWindow(items: IQueueWindowItem[]): Promise<void> {
+        this.windowItems = new Map(items.map((it) => [it.mediaId, it]));
+        await callNativeMethod(PLUGIN, "pushQueueWindow", { items });
+    }
 
     /** 原生队列直切（通知栏同款通路）：切到返回 mediaId，切不了返回 null */
     async skipNative(direction: "next" | "previous"): Promise<string | null> {
@@ -542,9 +567,12 @@ export class NativeAudioElement {
                 break;
             }
             case "itemtransition": {
-                // 过渡到新条目：mediaId 跟上播放器的现实（对账用）
+                // 原生自动续播了窗口里的下一首：src/mediaId 跟上播放器的现实
                 const mediaId = String(data.mediaId ?? "");
-                if (mediaId) {
+                if (mediaId && this.windowItems.has(mediaId)) {
+                    this._src = this.windowItems.get(mediaId)!.src;
+                    this._mediaId = mediaId;
+                } else if (mediaId) {
                     this._mediaId = mediaId;
                 }
                 this._ended = false;

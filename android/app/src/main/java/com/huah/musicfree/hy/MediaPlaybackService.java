@@ -37,11 +37,12 @@ import okhttp3.OkHttpClient;
 /**
  * 原生播放内核：Media3 MediaSessionService 托管 ExoPlayer。
  *
- * 为什么播放器要住进服务：
+ * 为什么播放器要住进服务、持有整条队列（后台连播的根治）：
  *  - 音源解析只能在 WebView JS 里跑（音源插件机制），而熄屏后台的渲染进程
- *    会被部分 ROM 无视优先级建议直接冻结。播放器与控制面（通知栏/耳机/
- *    锁屏按键）住在这里，JS 死了通知栏暂停/播放/拖进度照常工作。
- *  - onPlayerError 队列自愈：条目取流失败（直链过期等）自动跳下一首。
+ *    会被部分 ROM 无视优先级建议直接冻结——「下一首放什么」的控制面不能依赖
+ *    JS 存活。前台时 JS 把接下来几首的已解析音源推进这里的播放列表
+ *    （PlaybackBridge.pushQueueWindow），之后预缓冲、逐首自动续播、通知栏
+ *    切歌/暂停/拖进度全部由原生完成，JS 死了也不影响。
  *  - MediaSessionService 自带前台服务生命周期与系统媒体通知
  *    （DefaultMediaNotificationProvider）：元数据随 MediaItem 走，封面/标题/
  *    播放态由系统渲染，不再手写 MediaStyle 通知与封面解码。
@@ -52,6 +53,8 @@ import okhttp3.OkHttpClient;
  */
 public class MediaPlaybackService extends MediaSessionService {
 
+    /** 播放列表里「当前曲之后」保留的预载上限（与 JS 侧窗口镜像一致） */
+    static final int QUEUE_WINDOW_MAX = 6;
     /** transition 后保留的已播条目数：通知栏/耳机「上一首」由原生直切 */
     private static final int KEEP_BEHIND = 2;
     /** 队列自愈的连续失败上限：连续这么多首取流失败才真正停下 */
@@ -365,6 +368,47 @@ public class MediaPlaybackService extends MediaSessionService {
             player.prepare();
             player.setPlayWhenReady(autoplay);
         });
+    }
+
+    /**
+     * 队列窗口镜像：把接下来几首的已解析音源替换到「当前曲之后」。
+     * 前台 JS 做完解析后调用；之后当前曲播完由 ExoPlayer 自动无缝续播，
+     * 全程不经过 JS。每条携带元数据，通知栏/锁屏能直接显示下一首。
+     */
+    void pushQueueWindow(androidx.collection.ArrayMap<String, String[]> items) {
+        runOnMain(() -> {
+            if (player == null) {
+                return;
+            }
+            dropNextSources();
+            int count = 0;
+            for (int i = 0; i < items.size() && count < QUEUE_WINDOW_MAX; i++) {
+                String key = items.keyAt(i);
+                String[] v = items.valueAt(i);
+                // v: [src, title, artist, album, artworkUri]
+                if (v == null || v.length < 5 || v[0] == null || v[0].isEmpty()) {
+                    continue;
+                }
+                rememberSrc(key, v[0]);
+                player.addMediaItem(buildItem(v[0], key, v[1], v[2], v[3], v[4]));
+                count++;
+            }
+        });
+    }
+
+    /** 移除当前曲目之后的全部条目（预载位）。
+     *  removeMediaItems(from, to) 的第二个参数是排他结束下标，不是个数：
+     *  删 [from, count) 要传 count——传 count-from 会在 from > count-from 时
+     *  触发断言崩溃（列表里有已播条目后必然发生）。 */
+    private void dropNextSources() {
+        if (player == null) {
+            return;
+        }
+        int from = Math.max(player.getCurrentMediaItemIndex() + 1, 1);
+        int count = player.getMediaItemCount();
+        if (count > from) {
+            player.removeMediaItems(from, count);
+        }
     }
 
     void play() {
