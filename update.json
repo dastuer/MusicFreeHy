@@ -1,7 +1,7 @@
 {
-  "versionCode": 12,
-  "versionName": "1.0.11",
-  "changelog": "- 预加载收敛：一首歌开播后只预载下一首（原为 5 首），显著降低流量与后台解析开销\n- 后台播放核心链路保持不变：无缝续播、通知栏/耳机控制、坏链自动跳歌",
-  "apkUrl": "https://gitee.com/huaihui/MusicFreeHy/releases/download/v1.0.11/MusicFreeHy-1.0.11.apk",
+  "versionCode": 13,
+  "versionName": "1.0.12",
+  "changelog": "- 后台连播重做：播放计划整体下沉原生，缺源时由内置音源引擎（QuickJS）直接解析，页面被系统冻结也能自动续播\n- 音源直链的请求头（Referer/UA 等）按地址注入播放器，防盗链音源可正常取流\n- 预载窗口 2→3：通知栏/锁屏「下一首」预览更长；手动点播走队列内直达，切歌更快",
+  "apkUrl": "https://gitee.com/huaihui/MusicFreeHy/releases/download/v1.0.12/MusicFreeHy-1.0.12.apk",
   "publishedAt": "2026-10-14"
 }
