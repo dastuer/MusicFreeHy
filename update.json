@@ -1,7 +1,7 @@
 {
-  "versionCode": 8,
-  "versionName": "1.0.7",
-  "changelog": "- 后台播放内核重构：播放搬进原生前台服务（Media3），熄屏后连续播放不再依赖 WebView 存活，根治「播完一首就停」「通知栏切歌失灵」「回前台界面不同步」\n- 修复连续切歌触发的播放器崩溃\n- 修复播放进度条消失、播放中异常退出\n- 大幅优化后台性能：缓存下载改原生流式落盘（不再经 WebView），打开其他应用不再卡顿音乐；输出缓冲加大，切后台/冷启动瞬间更平滑\n- 共播策略优化：默认不再被其他应用抢焦点打断（设置页可切回独占模式）",
-  "apkUrl": "https://gitee.com/huaihui/MusicFreeHy/releases/download/v1.0.7/MusicFreeHy-1.0.7.apk",
-  "publishedAt": "2026-10-13"
+  "versionCode": 9,
+  "versionName": "1.0.8",
+  "changelog": "- 修复后台连播几首后自动停止：播放队列预载改用本地缓存文件（不再受音源直链时效限制），预载窗口加深到 6 首\n- 修复开启「与其他应用同时播放」后通知栏无法暂停的问题\n- 后台播放稳定性增强：页面保活恢复，队列预载可持续补齐",
+  "apkUrl": "https://gitee.com/huaihui/MusicFreeHy/releases/download/v1.0.8/MusicFreeHy-1.0.8.apk",
+  "publishedAt": "2026-10-14"
 }
