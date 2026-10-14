@@ -175,7 +175,13 @@ function bufferedEndAfter(audio: AudioBackend, position: number): number {
  */
 
 /** 队列窗口推几首（与原生 QUEUE_WINDOW_MAX 一致） */
-const QUEUE_WINDOW_SIZE = 4;
+const QUEUE_WINDOW_SIZE = 6;
+
+/**
+ * 窗口本地化复查延迟：直链入窗后启动了缓存下载，等它落盘后把本地路径
+ * 换进窗口。90s 足够覆盖弱网下整首下载；到点时窗口若已被换过（seq 变）自然作废。
+ */
+const WINDOW_RELOCALIZE_DELAY = 90000;
 
 /** 结尾多少秒开始预加载下一首（仅 WebView 后端的 probe 路径使用） */
 const NEXT_PRELOAD_AHEAD = 30;
@@ -444,6 +450,18 @@ class TrackPlayer extends EventEmitter {
     private loadingSince = 0;
     /** 切后台兜底镜像的延后定时器（避开新应用冷启动窗口，见 visibilitychange 监听） */
     private hiddenMirrorTimer: ReturnType<typeof setTimeout> | null = null;
+    /**
+     * 窗口本地化复查定时器（按 mediaId 一把）：窗口里有远端直链且缓存下载
+     * 刚启动时预约；到点重镜像把已落盘的本地路径换进窗口。直链时效短
+     * （网易类 20~30 分钟），窗口在 JS 冻结期间无法重推，本地化是后台连播
+     * 跨直链时效的唯一手段。
+     */
+    private relocalizeTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+    /** WebView 静音保活音源：原生后端在播时维持 renderer 不进冻结名单
+     *  （窗口补镜像/缓存本地化依赖 JS 存活，见 startWebViewKeepAlive 注释） */
+    private keepAlive: HTMLAudioElement | null = null;
+    /** 保活音源的回前台补拉起监听器（停保活时解绑用） */
+    private keepAliveKick: (() => void) | null = null;
 
     setup() {
         if (this.audio) {
@@ -612,6 +630,10 @@ class TrackPlayer extends EventEmitter {
             });
         }
         this.syncMediaSessionState();
+        // 对账后原生仍在播：保活音源可能被冻结一并暂停了，回前台拉起来
+        if (!state.paused) {
+            this.startWebViewKeepAlive();
+        }
         if (trackChanged || (state.hasNext && !this.mirroredWindow.size)) {
             // 对齐后窗口可能已经不对（推进过/被换过）：重镜像
             this.maybeMirrorQueueWindow();
@@ -619,9 +641,82 @@ class TrackPlayer extends EventEmitter {
     }
 
     /**
-     * WebView 静音保活音源已随旧架构移除：播放内核住在前台服务里，
-     * 后台连播不再依赖 WebView JS 存活（队列窗口镜像 + 原生自动续播）。
+     * WebView 静音保活音源（原生后端在播时启用）：
+     * 播放本体虽在原生 ExoPlayer，但窗口补镜像与缓存本地化依赖页面 JS——
+     * WebView 无媒体活动时安卓省电策略会冻结 renderer，JS 停摆后窗口
+     * 耗尽就无法续推（后台连播几首后停止的根因之一）。维持一个静音、
+     * 循环的极短无声 WAV 让 renderer 不进冻结名单（部分 ROM 无视
+     * renderer 优先级建议，这层是能活设备的最后保障；钉优先级在 MainActivity）。
      */
+    private startWebViewKeepAlive() {
+        if (!isNative() || this.keepAlive) {
+            return;
+        }
+        // 0.1s 8kHz 单声道 16bit 全零 PCM：data URL 常驻内存，循环播放不出声。
+        // 头部必须逐字段小端写入（String.fromCharCode 超过 255 的字节数值会让
+        // btoa 抛 InvalidCharacterError）
+        const SAMPLES = 800;
+        const buffer = new ArrayBuffer(44 + SAMPLES * 2);
+        const view = new DataView(buffer);
+        const writeStr = (offset: number, s: string) => {
+            for (let i = 0; i < s.length; i += 1) {
+                view.setUint8(offset + i, s.charCodeAt(i));
+            }
+        };
+        writeStr(0, "RIFF");
+        view.setUint32(4, 36 + SAMPLES * 2, true);
+        writeStr(8, "WAVE");
+        writeStr(12, "fmt ");
+        view.setUint32(16, 16, true); // fmt 段长度
+        view.setUint16(20, 1, true); // PCM
+        view.setUint16(22, 1, true); // 单声道
+        view.setUint32(24, 8000, true); // 采样率
+        view.setUint32(28, 16000, true); // 字节率
+        view.setUint16(32, 2, true); // 块对齐
+        view.setUint16(34, 16, true); // 位深
+        writeStr(36, "data");
+        view.setUint32(40, SAMPLES * 2, true); // 数据长度（PCM 全零不用写）
+        let bin = "";
+        const bytes = new Uint8Array(buffer);
+        for (let i = 0; i < bytes.length; i += 4096) {
+            bin += String.fromCharCode(...bytes.subarray(i, i + 4096));
+        }
+        const el = new Audio();
+        el.loop = true;
+        el.muted = true;
+        el.volume = 0;
+        el.preload = "auto";
+        el.src = `data:audio/wav;base64,${btoa(bin)}`;
+        const kick = () => {
+            el.play().catch(() => {
+                // 被省电暂停 / 竞态打断：页面回前台时再拉起
+            });
+        };
+        document.addEventListener("visibilitychange", kick);
+        kick();
+        this.keepAlive = el;
+        this.keepAliveKick = kick;
+    }
+
+    /** 停掉 WebView 保活音源（彻底停止播放时） */
+    private stopWebViewKeepAlive() {
+        const el = this.keepAlive;
+        if (!el) {
+            return;
+        }
+        this.keepAlive = null;
+        if (this.keepAliveKick) {
+            document.removeEventListener("visibilitychange", this.keepAliveKick);
+            this.keepAliveKick = null;
+        }
+        el.pause();
+        el.removeAttribute("src");
+        try {
+            el.load();
+        } catch {
+            // ignore
+        }
+    }
 
     /**
      * 回前台对账（后台自动停止的双保险）：冻结期间原生 ExoPlayer 的
@@ -985,8 +1080,9 @@ class TrackPlayer extends EventEmitter {
         // 主动暂停共用同一条 pause 通道），真正出声即视为用户要播，共播回抢恢复
         this.userPaused = false;
         // 开播完成：把队列窗口推给原生播放器（后台连播的根基——窗口必须
-        // 在前台期就位，冻结后 JS 不可依赖）
+        // 在前台期就位，冻结后 JS 不可依赖）；并确保保活音源在跑
         if (this.audio instanceof NativeAudioElement) {
+            this.startWebViewKeepAlive();
             this.maybeMirrorQueueWindow();
         }
         setAtom(musicStateAtom, "playing");
@@ -1240,6 +1336,7 @@ class TrackPlayer extends EventEmitter {
             this.emit(TrackPlayerEvents.PlayEnd);
             setAtom(musicStateAtom, "stopped");
             this.clearMediaSession();
+            this.stopWebViewKeepAlive();
             return;
         }
         const index = this.getMusicIndexInPlayList(this._currentMusic);
@@ -1251,6 +1348,7 @@ class TrackPlayer extends EventEmitter {
             this.emit(TrackPlayerEvents.PlayEnd);
             setAtom(musicStateAtom, "stopped");
             this.clearMediaSession();
+            this.stopWebViewKeepAlive();
             return;
         }
         await this.skipToNext();
@@ -1489,7 +1587,10 @@ class TrackPlayer extends EventEmitter {
                     }
                     let playSrc = resolved.src;
                     if (!musicItem.localPath && !resolved.localDownload) {
-                        // 与 play() 同规则：命中缓存播本地；未命中顺路后台缓存
+                        // 与 play() 同规则：命中缓存播本地；未命中顺路后台缓存。
+                        // 本地化对后台连播是刚需：直链有时效（网易类 20~30 分钟），
+                        // JS 冻结期间窗口不会重镜像，直链过期 = 播到那首失败且
+                        // 无人自救；本地文件永不过期、Doze 断网也稳。
                         const cached = await lookupCachedSrc(musicItem, resolved.quality);
                         if (seq !== this.mirrorSeq) {
                             return;
@@ -1498,6 +1599,9 @@ class TrackPlayer extends EventEmitter {
                             playSrc = cached;
                         } else {
                             requestAudioCacheStore(musicItem, resolved.quality, resolved.source);
+                            // 缓存下载已启动：稍后（通常几十秒）重镜像一次，
+                            // 把已落盘的本地路径换进窗口，提升后台存活率
+                            this.scheduleWindowRelocalize(key);
                         }
                     }
                     items.push({
@@ -1534,6 +1638,8 @@ class TrackPlayer extends EventEmitter {
                 return;
             }
             console.info(`[trackPlayer] 队列窗口就位：${items.length} 首`);
+            // 窗口就位意味着 JS 此刻是活的：保活音源务必在跑（防后续冻结）
+            this.startWebViewKeepAlive();
         } finally {
             this.mirroring = false;
         }
@@ -1553,6 +1659,39 @@ class TrackPlayer extends EventEmitter {
             return;
         }
         void this.mirrorUpcomingWindow();
+    }
+
+    /**
+     * 预约一次「窗口本地化」复查：到点时若窗口仍含这首的远端直链（缓存下载
+     * 应已落盘），重镜像把它换成永久有效的本地路径。同曲重复预约去重。
+     */
+    private scheduleWindowRelocalize(mediaId: string) {
+        if (this.relocalizeTimers.has(mediaId)) {
+            return;
+        }
+        const timer = setTimeout(() => {
+            this.relocalizeTimers.delete(mediaId);
+            const audio = this.audio;
+            // 窗口里这首仍是远端直链才需要重镜像（已本地化/窗口已变则免）
+            const mirrored = this.mirroredWindow.get(mediaId);
+            if (
+                audio instanceof NativeAudioElement &&
+                mirrored &&
+                !mirrored.playSrc.startsWith("file://") &&
+                !mirrored.playSrc.includes("/_capacitor_file_")
+            ) {
+                console.info(`[trackPlayer] 窗口本地化复查：${mirrored.musicItem.title}`);
+                this.maybeMirrorQueueWindow();
+            }
+        }, WINDOW_RELOCALIZE_DELAY);
+        this.relocalizeTimers.set(mediaId, timer);
+    }
+
+    private clearRelocalizeTimers() {
+        for (const timer of this.relocalizeTimers.values()) {
+            clearTimeout(timer);
+        }
+        this.relocalizeTimers.clear();
     }
 
     /**
@@ -1608,6 +1747,7 @@ class TrackPlayer extends EventEmitter {
     abortNextTrackPreload() {
         this.nextPreloadSeq += 1;
         this.mirrorSeq += 1;
+        this.clearRelocalizeTimers();
         const preload = this.nextPreload;
         this.nextPreload = null;
         this.mirroredWindow.clear();
@@ -1991,6 +2131,8 @@ class TrackPlayer extends EventEmitter {
         this.clearMediaSession();
         this.clearPlayList();
         this._history = [];
+        // 队列彻底清空：保活音源一并停掉，不留无声媒体占着后台
+        this.stopWebViewKeepAlive();
         try {
             localStorage.removeItem("playProgress");
         } catch {

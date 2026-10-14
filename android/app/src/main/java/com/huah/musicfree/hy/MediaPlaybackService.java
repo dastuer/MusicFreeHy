@@ -54,7 +54,7 @@ import okhttp3.OkHttpClient;
 public class MediaPlaybackService extends MediaSessionService {
 
     /** 播放列表里「当前曲之后」保留的预载上限（与 JS 侧窗口镜像一致） */
-    static final int QUEUE_WINDOW_MAX = 4;
+    static final int QUEUE_WINDOW_MAX = 6;
     /** transition 后保留的已播条目数：通知栏/耳机「上一首」由原生直切 */
     private static final int KEEP_BEHIND = 2;
 
@@ -175,6 +175,13 @@ public class MediaPlaybackService extends MediaSessionService {
                     );
                 }
                 if (playbackState == Player.STATE_ENDED) {
+                    // 队列播尽（窗口耗尽且 JS 冻结没能补）：置为暂停态并落位到 0，
+                    // 通知栏翻成「播放键」而不是停在假播放中——用户可见地知道停了，
+                    // 回前台 JS 复活后对账会按现实恢复续播
+                    if (player.getCurrentMediaItemIndex() + 1 >= player.getMediaItemCount()) {
+                        player.seekTo(0);
+                        player.setPlayWhenReady(false);
+                    }
                     emitPlaybackEvent("ended", currentMediaId(), null);
                 }
             }
