@@ -6,7 +6,6 @@ import android.net.Uri;
 import android.os.PowerManager;
 import android.provider.Settings;
 
-import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -64,49 +63,6 @@ public class PlaybackBridge extends Plugin {
             call.getString("album", ""),
             call.getString("artworkUri", "")
         );
-        call.resolve();
-    }
-
-    /**
-     * 队列窗口镜像：items = [{ mediaId, src, title, artist, album, artworkUri }]，
-     * 替换「当前曲之后」的预载位。之后当前曲播完由原生自动续播，不经 JS。
-     */
-    @PluginMethod
-    public void pushQueueWindow(PluginCall call) {
-        MediaPlaybackService svc = activeService;
-        if (svc == null) {
-            call.reject("service unavailable");
-            return;
-        }
-        JSArray items = call.getArray("items");
-        androidx.collection.ArrayMap<String, String[]> map = new androidx.collection.ArrayMap<>();
-        if (items != null) {
-            try {
-                int len = items.length();
-                int cap = Math.min(len, MediaPlaybackService.QUEUE_WINDOW_MAX);
-                for (int i = 0; i < len && map.size() < cap; i++) {
-                    JSONObject o = items.getJSONObject(i);
-                    if (o == null) {
-                        continue;
-                    }
-                    String mediaId = o.optString("mediaId", "");
-                    if (mediaId.isEmpty()) {
-                        continue;
-                    }
-                    map.put(mediaId, new String[]{
-                        o.optString("src", ""),
-                        o.optString("title", ""),
-                        o.optString("artist", ""),
-                        o.optString("album", ""),
-                        o.optString("artworkUri", ""),
-                    });
-                }
-            } catch (Exception e) {
-                call.reject("pushQueueWindow failed: " + e.getMessage());
-                return;
-            }
-        }
-        svc.pushQueueWindow(map);
         call.resolve();
     }
 
