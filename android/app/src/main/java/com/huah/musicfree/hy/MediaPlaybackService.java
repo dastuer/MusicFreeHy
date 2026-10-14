@@ -54,7 +54,7 @@ import okhttp3.OkHttpClient;
 public class MediaPlaybackService extends MediaSessionService {
 
     /** 播放列表里「当前曲之后」保留的预载上限（与 JS 侧窗口镜像一致） */
-    static final int QUEUE_WINDOW_MAX = 6;
+    static final int QUEUE_WINDOW_MAX = 2;
     /** transition 后保留的已播条目数：通知栏/耳机「上一首」由原生直切 */
     private static final int KEEP_BEHIND = 2;
     /** 队列自愈的连续失败上限：连续这么多首取流失败才真正停下 */

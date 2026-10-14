@@ -175,8 +175,8 @@ function bufferedEndAfter(audio: AudioBackend, position: number): number {
  * 熄屏后台不依赖 JS 存活。WebView 后端仍走下面的 probe 预载路径。
  */
 
-/** 队列窗口推几首（与原生 QUEUE_WINDOW_MAX 一致） */
-const QUEUE_WINDOW_SIZE = 6;
+/** 队列窗口推几首（与原生 QUEUE_WINDOW_MAX 一致）；1 = 只预载下一首 */
+const QUEUE_WINDOW_SIZE = 2;
 
 /**
  * 窗口本地化复查延迟：直链入窗后启动了缓存下载，等它落盘后把本地路径
