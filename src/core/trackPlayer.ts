@@ -457,6 +457,8 @@ class TrackPlayer extends EventEmitter {
      * 跨直链时效的唯一手段。
      */
     private relocalizeTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+    /** 本地化复查超时后允许直链降级入窗的曲键（一次性，重镜像时消费） */
+    private remoteFallbackKeys: Set<string> = new Set();
     /** WebView 静音保活音源：原生后端在播时维持 renderer 不进冻结名单
      *  （窗口补镜像/缓存本地化依赖 JS 存活，见 startWebViewKeepAlive 注释） */
     private keepAlive: HTMLAudioElement | null = null;
@@ -1138,6 +1140,13 @@ class TrackPlayer extends EventEmitter {
         if (!this._currentMusic || !this.audio?.src) {
             return;
         }
+        // 原生后端已带队列自愈（onPlayerError 跳坏条目继续播）：JS 侧的失败链
+        // （降级重试/自动跳歌）会与原生的跳歌叠加成「一次失败跳两首」，
+        // 原生在播（跳到了下一首）就交给对账簿记，别再抢。
+        if (this.audio instanceof NativeAudioElement && !this.audio.paused) {
+            await this.reconcileWithNative();
+            return;
+        }
         // 播放中的网络断流（熄屏 WiFi 休眠 / 系统省电限网）：先原地重连续播，
         // 不直接走「降级→跳歌」失败链，一次网络抖动不至于打断整队听歌。
         // 只救网络类错误（2）；链接失效（4）、解码失败（3）重连也没用。
@@ -1585,12 +1594,11 @@ class TrackPlayer extends EventEmitter {
                         console.warn(`[trackPlayer] 窗口镜像解析失败 ${musicItem.title}：${resolved.reason}`);
                         continue;
                     }
-                    let playSrc = resolved.src;
+                    let playSrc: string | null = null;
                     if (!musicItem.localPath && !resolved.localDownload) {
-                        // 与 play() 同规则：命中缓存播本地；未命中顺路后台缓存。
-                        // 本地化对后台连播是刚需：直链有时效（网易类 20~30 分钟），
-                        // JS 冻结期间窗口不会重镜像，直链过期 = 播到那首失败且
-                        // 无人自救；本地文件永不过期、Doze 断网也稳。
+                        // 窗口优先本地文件：直链有时效（网易类 20~30 分钟），JS 冻结
+                        // 期间窗口无法重推，直链在排到之前过期 = 原生停在坏条目上。
+                        // 本地文件永不过期、Doze 断网也稳——把「URL 过期」从窗口里剔除。
                         const cached = await lookupCachedSrc(musicItem, resolved.quality);
                         if (seq !== this.mirrorSeq) {
                             return;
@@ -1599,10 +1607,20 @@ class TrackPlayer extends EventEmitter {
                             playSrc = cached;
                         } else {
                             requestAudioCacheStore(musicItem, resolved.quality, resolved.source);
-                            // 缓存下载已启动：稍后（通常几十秒）重镜像一次，
-                            // 把已落盘的本地路径换进窗口，提升后台存活率
-                            this.scheduleWindowRelocalize(key);
+                            if (this.remoteFallbackKeys.delete(key)) {
+                                // 本地化复查超时：降级推直链（原生侧有跳坏条目自愈兜底）
+                                playSrc = resolved.src;
+                            } else {
+                                // 首次：启动缓存下载，预约 90s 后复查入窗
+                                this.scheduleWindowRelocalize(key);
+                            }
                         }
+                    } else {
+                        playSrc = resolved.src;
+                    }
+                    if (!playSrc) {
+                        // 本地未就绪且不降级（复查时再入窗）
+                        continue;
                     }
                     items.push({
                         mediaId: key,
@@ -1662,8 +1680,9 @@ class TrackPlayer extends EventEmitter {
     }
 
     /**
-     * 预约一次「窗口本地化」复查：到点时若窗口仍含这首的远端直链（缓存下载
-     * 应已落盘），重镜像把它换成永久有效的本地路径。同曲重复预约去重。
+     * 预约一次「窗口本地化」复查：到点时若窗口缺这首（缓存未落盘没入窗）
+     * 或仍是远端直链，重镜像一次。缓存落盘则本地路径入窗；仍未落盘则
+     * 降级推直链（allowRemote 置位，原生有跳坏条目自愈兜底）。同曲去重。
      */
     private scheduleWindowRelocalize(mediaId: string) {
         if (this.relocalizeTimers.has(mediaId)) {
@@ -1671,18 +1690,10 @@ class TrackPlayer extends EventEmitter {
         }
         const timer = setTimeout(() => {
             this.relocalizeTimers.delete(mediaId);
-            const audio = this.audio;
-            // 窗口里这首仍是远端直链才需要重镜像（已本地化/窗口已变则免）
-            const mirrored = this.mirroredWindow.get(mediaId);
-            if (
-                audio instanceof NativeAudioElement &&
-                mirrored &&
-                !mirrored.playSrc.startsWith("file://") &&
-                !mirrored.playSrc.includes("/_capacitor_file_")
-            ) {
-                console.info(`[trackPlayer] 窗口本地化复查：${mirrored.musicItem.title}`);
-                this.maybeMirrorQueueWindow();
-            }
+            // 窗口里这首已本地化则免；否则（未入窗/仍是直链）重镜像。
+            // 本次重镜像允许直链降级：本地化已给过 90s 机会。
+            this.remoteFallbackKeys.add(mediaId);
+            this.maybeMirrorQueueWindow();
         }, WINDOW_RELOCALIZE_DELAY);
         this.relocalizeTimers.set(mediaId, timer);
     }
@@ -1692,6 +1703,7 @@ class TrackPlayer extends EventEmitter {
             clearTimeout(timer);
         }
         this.relocalizeTimers.clear();
+        this.remoteFallbackKeys.clear();
     }
 
     /**

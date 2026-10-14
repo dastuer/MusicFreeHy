@@ -57,6 +57,10 @@ public class MediaPlaybackService extends MediaSessionService {
     static final int QUEUE_WINDOW_MAX = 6;
     /** transition 后保留的已播条目数：通知栏/耳机「上一首」由原生直切 */
     private static final int KEEP_BEHIND = 2;
+    /** 队列自愈的连续失败上限：连续这么多首取流失败才真正停下 */
+    private static final int MAX_CONSECUTIVE_ERRORS = 5;
+    /** 连续取流失败计数（成功开播即清零，见 onIsPlayingChanged） */
+    private int consecutiveErrors = 0;
 
     /**
      * 播放状态变化回调（PlaybackBridge 注册，转发给 WebView 里的 JS）。
@@ -150,6 +154,7 @@ public class MediaPlaybackService extends MediaSessionService {
             public void onIsPlayingChanged(boolean isPlaying) {
                 emitPlaybackEvent(isPlaying ? "playing" : "pause", currentMediaId(), null);
                 if (isPlaying) {
+                    consecutiveErrors = 0;
                     main.removeCallbacks(progressTick);
                     main.postDelayed(progressTick, PROGRESS_INTERVAL_MS);
                 } else {
@@ -188,10 +193,30 @@ public class MediaPlaybackService extends MediaSessionService {
 
             @Override
             public void onPlayerError(androidx.media3.common.PlaybackException error) {
+                // 队列自愈：坏条目（直链过期/音源失效）不让整条队列停下——
+                // JS 冻结时 error 事件无人处理，若停在坏条目上就是「后台播几首
+                // 后自动暂停」的最终形态。跳到下一首继续播；连续多首全失败
+                // 才真正放弃（整队坏源时避免静默空转烧电）。
+                boolean recovered = false;
+                if (player.getCurrentMediaItemIndex() + 1 < player.getMediaItemCount()) {
+                    // ERROR 态下播放器已停止：seek + prepare 后必须重新声明
+                    // playWhenReady=true 才会真正续播（prepare 不继承播放意图）
+                    player.seekToNextMediaItem();
+                    player.prepare();
+                    player.setPlayWhenReady(true);
+                    recovered = true;
+                }
+                consecutiveErrors = recovered ? consecutiveErrors + 1 : 0;
+                if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+                    recovered = false;
+                    consecutiveErrors = 0;
+                    player.setPlayWhenReady(false);
+                }
                 emitPlaybackEvent(
                     "error",
                     currentMediaId(),
-                    error == null ? "unknown" : String.valueOf(error.errorCode)
+                    (error == null ? "unknown" : String.valueOf(error.errorCode))
+                        + (recovered ? "|skip" : "")
                 );
             }
         });
