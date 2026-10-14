@@ -352,6 +352,25 @@ export function notifyPlaybackStarted() {
     playbackStartedAt = Date.now();
 }
 
+/**
+ * 「某首歌缓存落盘完成」通知回调（trackPlayer 注册，避免循环依赖）：
+ * 队列窗口镜像据此把刚落盘的本地路径补进窗口（落盘驱动的补窗，比定时
+ * 复查快且准——90s 定时器只是页面冻结时的兜底）。
+ */
+let cacheStoredListener: ((key: string) => void) | null = null;
+
+export function setCacheStoredListener(fn: (key: string) => void) {
+    cacheStoredListener = fn;
+}
+
+function notifyCacheStored(key: string) {
+    try {
+        cacheStoredListener?.(key);
+    } catch {
+        // 通知失败不影响缓存本身
+    }
+}
+
 /** 由页面在 visibilitychange → hidden 时调用：重置切后台静默窗 */
 export function notifyPageHidden() {
     pageHiddenAt = Date.now();
@@ -444,6 +463,7 @@ async function doStore(request: IStoreRequest) {
                 quality,
             };
             writeIndex(index);
+            notifyCacheStored(key);
             await enforceAudioCacheLimit();
             return;
         }
@@ -474,6 +494,7 @@ async function doStore(request: IStoreRequest) {
             quality,
         };
         writeIndex(index);
+        notifyCacheStored(key);
         await enforceAudioCacheLimit();
     } catch (e: any) {
         if (!abort.signal.aborted) {

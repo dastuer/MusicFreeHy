@@ -10,6 +10,7 @@ import {
     notifyPageHidden,
     notifyPlaybackStarted,
     requestAudioCacheStore,
+    setCacheStoredListener,
 } from "./audioCache";
 import {
     createAudioElement,
@@ -459,6 +460,8 @@ class TrackPlayer extends EventEmitter {
     private relocalizeTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
     /** 本地化复查超时后允许直链降级入窗的曲键（一次性，重镜像时消费） */
     private remoteFallbackKeys: Set<string> = new Set();
+    /** 窗口里「暂不入窗等本地文件」的曲键（落盘回调据此判断要不要补窗） */
+    private _windowKeysAwaitingLocal: Set<string> = new Set();
     /** WebView 静音保活音源：原生后端在播时维持 renderer 不进冻结名单
      *  （窗口补镜像/缓存本地化依赖 JS 存活，见 startWebViewKeepAlive 注释） */
     private keepAlive: HTMLAudioElement | null = null;
@@ -539,6 +542,18 @@ class TrackPlayer extends EventEmitter {
 
         this.restoreSession();
         this.syncLoopFlag();
+
+        // 缓存落盘 → 补窗：窗口镜像把非首位的歌留在「等本地文件」状态，
+        // 落盘即补入（90s 复查只是页面冻结吃不到事件时的兜底）
+        setCacheStoredListener((key) => {
+            const mirrored = this.mirroredWindow.get(key);
+            const pending = !mirrored || this._windowKeysAwaitingLocal.has(key);
+            if (pending && this.audio instanceof NativeAudioElement && !this.mirroring) {
+                console.info(`[trackPlayer] 缓存落盘补窗：${key}`);
+                this._windowKeysAwaitingLocal.delete(key);
+                void this.mirrorUpcomingWindow();
+            }
+        });
     }
 
     /**
@@ -1574,8 +1589,16 @@ class TrackPlayer extends EventEmitter {
             }
             const items: IQueueWindowItem[] = [];
             const mirrored: Map<string, IMirroredTrack> = new Map();
+            // 窗口位次决定取源策略（v1.0.9 全本地化的回归修正）：
+            //  - 第 1 首是「当前曲播完后立即要续播的」：缓存命中用本地，未命中
+            //    推直链——刚解析的直链几十分钟内有效，足够播完这一首；保证
+            //    窗口非空（推空窗口会让 ExoPlayer 播完即停，且冻结期间无法补）。
+            //  - 第 2 首起：只收本地文件（无过期风险）。未落盘不入窗，由缓存
+            //    落盘回调/复查触发重镜像补入——收听得越久窗口越「全本地」。
+            let windowPosition = 0;
             for (const musicItem of upcoming) {
                 const key = playListKey(musicItem);
+                windowPosition += 1;
                 // 冷却期内的坏音源不再撞（与 WebView probe 路径同规则）
                 if (
                     this.preloadFailedKey === key &&
@@ -1596,9 +1619,6 @@ class TrackPlayer extends EventEmitter {
                     }
                     let playSrc: string | null = null;
                     if (!musicItem.localPath && !resolved.localDownload) {
-                        // 窗口优先本地文件：直链有时效（网易类 20~30 分钟），JS 冻结
-                        // 期间窗口无法重推，直链在排到之前过期 = 原生停在坏条目上。
-                        // 本地文件永不过期、Doze 断网也稳——把「URL 过期」从窗口里剔除。
                         const cached = await lookupCachedSrc(musicItem, resolved.quality);
                         if (seq !== this.mirrorSeq) {
                             return;
@@ -1607,19 +1627,20 @@ class TrackPlayer extends EventEmitter {
                             playSrc = cached;
                         } else {
                             requestAudioCacheStore(musicItem, resolved.quality, resolved.source);
-                            if (this.remoteFallbackKeys.delete(key)) {
-                                // 本地化复查超时：降级推直链（原生侧有跳坏条目自愈兜底）
+                            if (windowPosition === 1 || this.remoteFallbackKeys.delete(key)) {
+                                // 窗口首位/降级名单：推直链保住「下一首永远可播」
+                                //（原生侧有跳坏条目自愈兜底）
                                 playSrc = resolved.src;
-                            } else {
-                                // 首次：启动缓存下载，预约 90s 后复查入窗
-                                this.scheduleWindowRelocalize(key);
                             }
+                            // 预约落盘后的复查入窗（90s 兜底 + 下载完成事件驱动）
+                            this.scheduleWindowRelocalize(key);
                         }
                     } else {
                         playSrc = resolved.src;
                     }
                     if (!playSrc) {
-                        // 本地未就绪且不降级（复查时再入窗）
+                        // 非首位且本地未就绪：暂不入窗（落盘回调/复查时补入）
+                        this._windowKeysAwaitingLocal.add(key);
                         continue;
                     }
                     items.push({
@@ -1647,7 +1668,16 @@ class TrackPlayer extends EventEmitter {
             if (seq !== this.mirrorSeq) {
                 return;
             }
+            // 空窗口保护：upcoming 有歌但全部「等本地/解析失败」时，不覆盖
+            // 已推送的旧窗口——旧直链还有时效，推空 = ExoPlayer 播完即停且
+            // 冻结期间无法补。等落盘回调/复查再补窗；只有「真的没有下一首」
+            // （upcoming 为空，队尾 repeat off）才推空。
+            if (!items.length && upcoming.length && this.mirroredWindow.size) {
+                console.info("[trackPlayer] 本轮窗口全未就绪，保留既有窗口");
+                return;
+            }
             this.mirroredWindow = mirrored;
+            this._windowKeysAwaitingLocal.clear();
             try {
                 await audio.pushQueueWindow(items);
             } catch (e: any) {
@@ -1704,6 +1734,7 @@ class TrackPlayer extends EventEmitter {
         }
         this.relocalizeTimers.clear();
         this.remoteFallbackKeys.clear();
+        this._windowKeysAwaitingLocal.clear();
     }
 
     /**
