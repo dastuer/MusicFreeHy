@@ -266,7 +266,26 @@ public class MediaPlaybackService extends MediaSessionService {
         PlaybackBridge.activeService = this;
         queueStateFile = new File(getFilesDir(), QUEUE_STATE_FILE);
         player = createPlayer();
-        mediaSession = new MediaSession.Builder(this, player)
+        // session activity：通知栏媒体卡片的**点击目标**。
+        // 不设它 Media3 的通知缺少 contentIntent，部分 ROM（实测 realme/ColorOS）
+        // 会把这条通知视为不完整而不展示——前台服务没有可见通知时会被厂商省电
+        // 策略当作后台服务清理（exit-info 里的 o-kill），表现为「播一会儿就停」。
+        PendingIntent sessionActivity = null;
+        try {
+            Intent launch = getPackageManager().getLaunchIntentForPackage(getPackageName());
+            if (launch != null) {
+                launch.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                sessionActivity = PendingIntent.getActivity(
+                    this,
+                    0,
+                    launch,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "构建 sessionActivity 失败（通知点击将无反应）：" + t);
+        }
+        MediaSession.Builder sessionBuilder =
+            new MediaSession.Builder(this, player)
             .setCallback(new MediaSession.Callback() {
                 @Override
                 public ListenableFuture<MediaSession.MediaItemsWithStartPosition>
@@ -300,8 +319,11 @@ public class MediaPlaybackService extends MediaSessionService {
                     }
                     return com.google.common.util.concurrent.Futures.immediateFuture(out);
                 }
-            })
-            .build();
+            });
+        if (sessionActivity != null) {
+            sessionBuilder.setSessionActivity(sessionActivity);
+        }
+        mediaSession = sessionBuilder.build();
         // 队列快照恢复：进程被杀/服务重建后把上次的队列挂回来（不自动开播）
         restoreQueueState();
         player.addListener(new Player.Listener() {
