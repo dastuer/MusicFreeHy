@@ -46,9 +46,14 @@ export default function BackupRestorePage() {
         showToast("正在备份中…");
         const res = await exportBackupToLocal();
         if (res.success) {
-            showToast(`备份成功（${res.sizeText}）`);
+            // 原生落盘给完整路径；浏览器只知道文件名，提示去下载目录找
+            const detail =
+                res.channel === "android" || res.channel === "ios"
+                    ? `已保存到 ${res.channel === "ios" ? "文件 App / MusicFree / " : ""}${res.path}`
+                    : `已加入浏览器下载（${res.path ?? "备份文件"}）`;
+            showToast(`备份成功（${res.sizeText}）：${detail}`, 4200);
         } else {
-            showToast(res.message ?? "备份失败");
+            showToast(res.message ?? "备份失败", 3200);
         }
     };
 

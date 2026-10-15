@@ -19,6 +19,12 @@ import {
 import { TrackPlayerSingleton } from "./trackPlayer";
 import { uploadBackupToWebdav, downloadBackupFromWebdav } from "./dav";
 import { netFetchText } from "./net";
+import {
+    callNativeMethod,
+    nativePlatform,
+    writeAndroidFile,
+    writeIosFile,
+} from "./native";
 
 /**
  * 备份与恢复（Pad 版）
@@ -249,38 +255,94 @@ export async function collectBackup(): Promise<IBackupPayload> {
     };
 }
 
-/** 导出备份文件（浏览器下载） */
-export async function exportBackupToLocal(): Promise<IBackupResult> {
-    try {
-        const payload = await collectBackup();
-        const content = JSON.stringify(payload);
-        const blob = new Blob([content], { type: "application/json" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        const now = new Date();
-        const pad = (n: number) => String(n).padStart(2, "0");
-        a.href = url;
-        a.download = `MusicFreeBackup-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(
-            now.getDate(),
-        )}-${pad(now.getHours())}${pad(now.getMinutes())}.json`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 5000);
-        const sizeText =
-            blob.size > 1024 * 1024
-                ? `${(blob.size / 1024 / 1024).toFixed(1)} MB`
-                : `${Math.max(1, Math.round(blob.size / 1024))} KB`;
-        return { success: true, sizeText };
-    } catch (e: any) {
-        return { success: false, message: e?.message ?? "导出失败" };
-    }
-}
-
 export interface IBackupResult {
     success: boolean;
     message?: string;
     sizeText?: string;
+    /** 落盘路径（原生：绝对 / 沙盒相对；浏览器：仅文件名） */
+    path?: string;
+    /** 落盘通道 */
+    channel?: "android" | "ios" | "browser";
+}
+
+function backupFileName(): string {
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `MusicFreeBackup-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(
+        now.getDate(),
+    )}-${pad(now.getHours())}${pad(now.getMinutes())}.json`;
+}
+
+function blobSizeText(size: number): string {
+    return size > 1024 * 1024
+        ? `${(size / 1024 / 1024).toFixed(1)} MB`
+        : `${Math.max(1, Math.round(size / 1024))} KB`;
+}
+
+/**
+ * 导出备份文件。
+ *
+ * 原生包（Android / iOS）必须走 Storage / Filesystem 插件写盘：
+ * WebView 里的 <a download> + blob 在 Capacitor 的 Android Bridge 里
+ * 会被 shouldOverrideUrlLoading 放行到 WebView 默认行为，而 WebView 没装
+ * DownloadListener 时直接静默丢弃（iOS WKWebView 同样不接），用户点了
+ * 「备份到本地」但磁盘上根本没文件。这里按平台分派到已验证可用的原生写入通道，
+ * 浏览器（MusicFree Desktop / 网页调试）仍走锚点下载。
+ */
+export async function exportBackupToLocal(): Promise<IBackupResult> {
+    let payload: IBackupPayload;
+    try {
+        payload = await collectBackup();
+    } catch (e: any) {
+        return { success: false, message: e?.message ?? "备份数据组装失败" };
+    }
+    const filename = backupFileName();
+    const content = JSON.stringify(payload);
+    const blob = new Blob([content], { type: "application/json" });
+    const sizeText = blobSizeText(blob.size);
+    const platform = nativePlatform();
+
+    try {
+        if (platform === "android") {
+            const perm = await callNativeMethod("Storage", "requestWritePermission");
+            if (!perm?.granted) {
+                if (perm?.needAllFiles) {
+                    // 引导用户去「所有文件访问」授权页；本次不静默落浏览器通道
+                    callNativeMethod("Storage", "openAllFilesAccess").catch(() => {});
+                    return {
+                        success: false,
+                        message: "需要「所有文件访问」权限才能写进下载目录，已打开系统授权页",
+                    };
+                }
+                return { success: false, message: "未授予存储写入权限" };
+            }
+            const root = await callNativeMethod("Storage", "getStorageRoot");
+            const absPath = `${String(root?.path ?? "").replace(/\/+$/, "")}/Download/${filename}`;
+            await writeAndroidFile(absPath, blob);
+            return { success: true, sizeText, path: absPath, channel: "android" };
+        }
+        if (platform === "ios") {
+            await writeIosFile("DOCUMENTS", filename, blob);
+            return { success: true, sizeText, path: filename, channel: "ios" };
+        }
+    } catch (e: any) {
+        return { success: false, message: e?.message ?? "写入备份文件失败" };
+    }
+
+    // 浏览器：沿用锚点下载（桌面 MusicFree / 网页调试）
+    try {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        return { success: true, sizeText, path: filename, channel: "browser" };
+    } catch (e: any) {
+        return { success: false, message: e?.message ?? "导出失败" };
+    }
 }
 
 /** ---------- 恢复 ---------- */
