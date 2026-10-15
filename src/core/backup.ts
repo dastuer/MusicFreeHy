@@ -125,7 +125,7 @@ export interface IResumeSummary {
 
 export const BACKUP_FORMAT = "musicfree-desktop";
 export const BACKUP_VERSION = 1;
-export const APP_VERSION = "1.0.12";
+export const APP_VERSION = "1.0.13";
 
 /** ---------- localStorage 偏好白名单（与桌面端完全一致） ---------- */
 
