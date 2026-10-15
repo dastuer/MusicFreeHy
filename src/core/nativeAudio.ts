@@ -169,7 +169,9 @@ export class NativeAudioElement {
         // JS 侧设置页改过独占模式的话，这里把用户选择重新声明一遍
         callNativeMethod(PLUGIN, "setAudioFocusMode", { focusEnabled: this._focusRequested })
             .catch(() => {});
-        // 装载元数据随行：通知栏/锁屏直接显示（不再走 metadata 上报通道）
+        // 装载元数据随行：通知栏/锁屏直接显示（不再走 metadata 上报通道）。
+        // payload/quality 是当前曲的自救依据：直链过期时原生拿它重跑
+        // getMediaSource 原地换源（当前曲不在 pushQueuePlan 里，只能从这里带）。
         callNativeMethod(PLUGIN, "loadTrack", {
             src: this._src,
             mediaId: this._mediaId,
@@ -179,6 +181,8 @@ export class NativeAudioElement {
             artist: this._meta?.artist ?? "",
             album: this._meta?.album ?? "",
             artworkUri: this._meta?.artworkUri ?? "",
+            payload: this._payload ?? undefined,
+            quality: this._quality ?? "",
         }).catch((e: any) => {
             this._error = new NativeMediaError(4, String(e?.message ?? e));
             this.fire("error");
@@ -260,6 +264,20 @@ export class NativeAudioElement {
     /** 装载当前曲时随行的元数据（通知栏/锁屏显示；由 trackPlayer 在赋 src 前设置） */
     private _meta: { title: string; artist: string; album: string; artworkUri: string } | null =
         null;
+
+    /**
+     * 当前曲的曲目快照与请求音质（随 loadTrack 下发）。原生侧在直链过期时
+     * 用它重跑 getMediaSource 原地换源——当前曲不在 pushQueuePlan 里
+     * （那推的是「接下来的」），所以只能从 loadTrack 这条路带给原生。
+     */
+    private _payload: Record<string, unknown> | null = null;
+    private _quality: string | null = null;
+
+    /** 设置当前曲的自救快照（trackPlayer 在赋 src 前调用，与 setTrackMeta 同批） */
+    setTrackRecovery(payload: Record<string, unknown> | null, quality: string | null) {
+        this._payload = payload;
+        this._quality = quality;
+    }
 
     /** 当前曲目的展示元数据：随 loadTrack 下发，通知栏由 Media3 直接渲染 */
     setTrackMeta(meta: {

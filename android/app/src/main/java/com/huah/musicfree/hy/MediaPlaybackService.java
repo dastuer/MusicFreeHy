@@ -33,8 +33,20 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.session.MediaSession;
 import androidx.media3.session.MediaSessionService;
 
+import com.google.common.collect.ImmutableList;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.SettableFuture;
+
+import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import okhttp3.OkHttpClient;
@@ -84,6 +96,12 @@ public class MediaPlaybackService extends MediaSessionService {
     private static final int MAX_NATIVE_RESOLVE_ATTEMPTS = 3;
     /** 原生解析总超时（QuickJS 内部每档 15s，这里给整条链兜底） */
     private static final long NATIVE_RESOLVE_TIMEOUT_MS = 20_000L;
+    /**
+     * 原生解析前瞻深度：一次把计划前段这么多条排上解析（executor 单线程串行执行）。
+     * 一次只解析队头的话，队头进窗后下一条要从 2.5s 等起，短歌 + 慢网会在切歌点
+     * 露出空隙；解析太深又会让直链在计划里躺太久、过期面变大——取窗口量级即可。
+     */
+    private static final int NATIVE_RESOLVE_LOOKAHEAD = 3;
 
     /**
      * 计划条目：JS 整条播放顺序在原生侧的镜像。src 为空 = 还没解析出音源
@@ -144,7 +162,7 @@ public class MediaPlaybackService extends MediaSessionService {
         @Override
         public void run() {
             nativeResolveScheduled = false;
-            resolveHeadNatively();
+            pumpNativeResolve();
         }
     };
     /** nativeResolveTick 是否已排（Handler.hasCallbacks 要 API 29，自维护） */
@@ -159,6 +177,328 @@ public class MediaPlaybackService extends MediaSessionService {
     /** 插件返回的请求头（按播放地址索引）：数据源 open 时按 URI 注入 */
     private final java.util.HashMap<String, java.util.HashMap<String, String>> headersByUri =
         new java.util.HashMap<>();
+
+    /**
+     * 取流失败的直链（mediaId → 刚失败的 src）：原生重解析时作为 excludeUrl 传下去。
+     * 没有它的话，插件很可能再次返回同一条坏直链，把 3 次原生重试机会全烧在同一条源上
+     * （JS 侧 resolveMediaUrl 一直有 excludeUrl 机制，原生侧此前缺这条）。
+     */
+    private final java.util.HashMap<String, String> failedSrcByMediaId = new java.util.HashMap<>();
+
+    /**
+     * mediaId → 计划条目（payload/quality/元数据）：队列持久化与「窗内条目换源重解析」
+     * 都要靠它。注意与 shadow 的分工——shadow 是「还没进播放器列表的剩余计划」
+     * （进窗即移除），这里是「所有收到过的计划条目」的索引，窗内条目也在其中。
+     * 用 LRU 限长，避免长会话里无限增长（队列本身有上限，这里留够余量）。
+     */
+    private final android.util.LruCache<String, Planned> plannedById =
+        new android.util.LruCache<>(512);
+
+    /** ---------------- 队列持久化（进程/服务被杀后冷启动恢复） ---------------- */
+
+    /**
+     * 队列快照落盘：进程被系统回收、服务重建之后，播放器还能自己把整个队列
+     * 挂回来继续播（媒体恢复卡片也据此可用）。存的是「能重放的完整信息」——
+     * shadow 计划（含 payload/quality，可重新解析）+ 当前曲索引与播放位置 +
+     * 循环模式；直链 src 也存（重启后若能直接用就省一次解析）。
+     *
+     * 之所以能在原生侧做这件事：队列的推进状态机本来就在原生（shadow），
+     * JS 只是把顺序推过来——顺序是数据，不是 JS 的运行时状态。
+     */
+    private static final String QUEUE_STATE_FILE = "playback-queue.json";
+    /** 落盘去抖：队列变动/进度更新都很频繁，攒一下再写 */
+    private static final long QUEUE_PERSIST_DEBOUNCE_MS = 1_200L;
+    private File queueStateFile;
+    private final Runnable persistQueueTick = new Runnable() {
+        @Override
+        public void run() {
+            persistQueueScheduled = false;
+            writeQueueState();
+        }
+    };
+    private boolean persistQueueScheduled = false;
+    /** 队列恢复中：期间不落盘、不打扰（避免把半恢复状态写成新快照） */
+    private boolean restoringQueue = false;
+    /** 落盘执行线程：文件 IO 不能压主线程 */
+    private final ExecutorService persistExecutor =
+        java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "queue-persist");
+            t.setPriority(Thread.MIN_PRIORITY);
+            return t;
+        });
+
+    /** 队列有变动/进度推进：去抖落盘（主线程调用） */
+    private void scheduleQueuePersist() {
+        if (restoringQueue || queueStateFile == null) {
+            return;
+        }
+        if (persistQueueScheduled) {
+            return;
+        }
+        persistQueueScheduled = true;
+        main.postDelayed(persistQueueTick, QUEUE_PERSIST_DEBOUNCE_MS);
+    }
+
+    /** 立即落盘一次（停止播放/退出前用，绕过去抖） */
+    private void persistQueueNow() {
+        if (restoringQueue || queueStateFile == null) {
+            return;
+        }
+        main.removeCallbacks(persistQueueTick);
+        persistQueueScheduled = false;
+        writeQueueState();
+    }
+
+    private void writeQueueState() {
+        if (queueStateFile == null) {
+            return;
+        }
+        final String json = buildQueueStateJson();
+        if (json == null) {
+            // 无可存内容（队列已清空 / stop）：删掉旧快照，避免下次启动
+            // 把用户已经停止的队列恢复出来
+            persistExecutor.execute(() -> {
+                try {
+                    //noinspection ResultOfMethodCallIgnored
+                    queueStateFile.delete();
+                } catch (Throwable ignored) {
+                }
+            });
+            return;
+        }
+        persistExecutor.execute(() -> {
+            FileOutputStream fos = null;
+            File tmp = new File(queueStateFile.getParentFile(), QUEUE_STATE_FILE + ".tmp");
+            try {
+                fos = new FileOutputStream(tmp);
+                fos.write(json.getBytes(StandardCharsets.UTF_8));
+                fos.getFD().sync();
+                fos.close();
+                fos = null;
+                if (!tmp.renameTo(queueStateFile)) {
+                    //noinspection ResultOfMethodCallIgnored
+                    tmp.delete();
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "队列快照落盘失败：" + t);
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
+            } finally {
+                if (fos != null) {
+                    try {
+                        fos.close();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        });
+    }
+
+    /** 生成队列快照 JSON（须主线程；player 访问限制）；没什么可存时返回 null */
+    private String buildQueueStateJson() {
+        if (player == null) {
+            return null;
+        }
+        try {
+            JSONObject root = new JSONObject();
+            int curIndex = player.getCurrentMediaItemIndex();
+            long positionMs = Math.max(0L, player.getCurrentPosition());
+            // 列表里「当前曲及之前」的已播条目也要存：重启后上一首仍可直切。
+            // 但已播条目在切歌时会被摘除，列表本身只保留 KEEP_BEHIND 首，
+            // 所以这里就是 ExoPlayer 列表原样 + shadow 剩余计划。
+            JSONArray items = new JSONArray();
+            for (int i = 0; i < player.getMediaItemCount(); i++) {
+                MediaItem it = player.getMediaItemAt(i);
+                if (it == null || it.mediaId == null || it.mediaId.isEmpty()) {
+                    continue;
+                }
+                JSONObject o = new JSONObject();
+                o.put("mediaId", it.mediaId);
+                String src = it.localConfiguration != null && it.localConfiguration.uri != null
+                    ? it.localConfiguration.uri.toString()
+                    : "";
+                o.put("src", src);
+                MediaMetadata meta = it.mediaMetadata;
+                if (meta != null) {
+                    o.put("title", meta.title == null ? "" : meta.title);
+                    o.put("artist", meta.artist == null ? "" : meta.artist);
+                    o.put("album", meta.albumTitle == null ? "" : meta.albumTitle);
+                    o.put("artworkUri",
+                        meta.artworkUri == null ? "" : meta.artworkUri.toString());
+                }
+                // 该条的 payload/quality 从计划索引里找（可重解析的依据）
+                Planned planned = plannedById.get(it.mediaId);
+                if (planned != null) {
+                    o.put("payload", planned.payload);
+                    o.put("quality", planned.quality);
+                }
+                items.put(o);
+            }
+            for (Planned p : shadow) {
+                JSONObject o = new JSONObject();
+                o.put("mediaId", p.mediaId);
+                o.put("src", p.src);
+                o.put("title", p.title == null ? "" : p.title);
+                o.put("artist", p.artist == null ? "" : p.artist);
+                o.put("album", p.album == null ? "" : p.album);
+                o.put("artworkUri", p.artworkUri == null ? "" : p.artworkUri);
+                o.put("payload", p.payload);
+                o.put("quality", p.quality);
+                items.put(o);
+            }
+            if (items.length() == 0) {
+                return null;
+            }
+            root.put("items", items);
+            root.put("currentIndex", curIndex);
+            root.put("positionMs", positionMs);
+            root.put("repeatOne",
+                player.getRepeatMode() == Player.REPEAT_MODE_ONE);
+            root.put("playWhenReady", player.getPlayWhenReady());
+            root.put("focusEnabled", focusEnabled);
+            root.put("savedAt", System.currentTimeMillis());
+            return root.toString();
+        } catch (Throwable t) {
+            Log.w(TAG, "生成队列快照失败：" + t);
+            return null;
+        }
+    }
+
+    /**
+     * 冷启动恢复：把上次的队列挂回播放器。只挂「元数据 + 已知 src」，
+     * **不自动开播**——进程重启后的出声必须由用户发起（系统媒体恢复卡片
+     * 会显示上一首，用户点播放才出声），这也是 Media3 的语义。
+     * 缺 src 的条目留在 shadow，由 needsource / 原生解析照常补。
+     */
+    private void restoreQueueState() {
+        if (player == null || queueStateFile == null || !queueStateFile.exists()) {
+            return;
+        }
+        String raw = readQueueStateRaw();
+        if (raw == null || raw.isEmpty()) {
+            return;
+        }
+        restoringQueue = true;
+        try {
+            JSONObject root = new JSONObject(raw);
+            JSONArray items = root.optJSONArray("items");
+            if (items == null || items.length() == 0) {
+                return;
+            }
+            int currentIndex = root.optInt("currentIndex", -1);
+            // 先按顺序把条目分成两段：能播的（有 src）进播放器列表，缺源的进 shadow。
+            // 注意 shadow 只装「当前曲之后」的缺源条目——当前曲之前的缺源条目
+            // 没有意义（用户点上一首时 JS 会按队列语义重新装载）。
+            java.util.ArrayList<Planned> restoredPlan = new java.util.ArrayList<>();
+            java.util.ArrayList<MediaItem> mediaItems = new java.util.ArrayList<>();
+            int restoredCurrent = -1;
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject o = items.optJSONObject(i);
+                if (o == null) {
+                    continue;
+                }
+                String mediaId = o.optString("mediaId", "");
+                if (mediaId.isEmpty()) {
+                    continue;
+                }
+                Planned p = new Planned(
+                    mediaId, o.optString("src", ""), o.optString("title", ""),
+                    o.optString("artist", ""), o.optString("album", ""),
+                    o.optString("artworkUri", ""), o.optString("payload", ""),
+                    o.optString("quality", ""));
+                plannedById.put(mediaId, p);
+                if (i == currentIndex) {
+                    restoredCurrent = p.src.isEmpty() ? -1 : mediaItems.size();
+                }
+                if (p.src.isEmpty()) {
+                    if (currentIndex < 0 || i > currentIndex) {
+                        restoredPlan.add(p);
+                    }
+                    continue;
+                }
+                mediaItems.add(buildItem(p.src, p.mediaId, p.title, p.artist,
+                    p.album, p.artworkUri));
+                rememberSrc(p.mediaId, p.src);
+            }
+            shadow.clear();
+            shadow.addAll(restoredPlan);
+            player.clearMediaItems();
+            if (mediaItems.isEmpty()) {
+                // 全是缺源条目（例如刚推到计划就断网）：列表留空，shadow 里等补源。
+                // 此时 currentIndex 无意义，把 shadow 头部当作待播目标即可
+                Log.i(TAG, "队列快照恢复：无可播条目，" + shadow.size() + " 首待在原生/JS 补源");
+                return;
+            }
+            player.setMediaItems(mediaItems, Math.max(0, restoredCurrent), 0L);
+            player.setRepeatMode(root.optBoolean("repeatOne", false)
+                ? Player.REPEAT_MODE_ONE
+                : Player.REPEAT_MODE_OFF);
+            setAudioFocusMode(root.optBoolean("focusEnabled", false));
+            // 不 prepare、不 setPlayWhenReady：等用户按播放（系统媒体恢复卡片
+            // 会显示上一首，用户点播放才出声），语义与原生播放器一致
+            Log.i(TAG, "队列快照恢复：" + mediaItems.size() + " 首可播 + "
+                + shadow.size() + " 首待补源，停在索引 " + restoredCurrent);
+        } catch (Throwable t) {
+            Log.w(TAG, "队列快照恢复失败：" + t);
+        } finally {
+            restoringQueue = false;
+        }
+    }
+
+    private String readQueueStateRaw() {
+        FileInputStream fis = null;
+        try {
+            fis = new FileInputStream(queueStateFile);
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = fis.read(buf)) > 0) {
+                bos.write(buf, 0, n);
+            }
+            return bos.toString("UTF-8");
+        } catch (Throwable t) {
+            Log.w(TAG, "读取队列快照失败：" + t);
+            return null;
+        } finally {
+            if (fis != null) {
+                try {
+                    fis.close();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
+    /**
+     * 系统媒体恢复（MediaSession.Callback）：手机重启/进程被杀后，系统媒体
+     * 卡片点播放时由这里交出队列。与 restoreQueueState 的区别是这条路径
+     * 需要**真正开播**，所以要 prepare + 声明播放意图。
+     */
+    private ListenableFuture<MediaSession.MediaItemsWithStartPosition> buildResumptionFuture() {
+        SettableFuture<MediaSession.MediaItemsWithStartPosition> future = SettableFuture.create();
+        runOnMain(() -> {
+            try {
+                if (player == null || player.getMediaItemCount() == 0) {
+                    restoreQueueState();
+                }
+                if (player == null || player.getMediaItemCount() == 0) {
+                    future.setException(new IllegalStateException("无可恢复的播放队列"));
+                    return;
+                }
+                java.util.ArrayList<MediaItem> items = new java.util.ArrayList<>();
+                for (int i = 0; i < player.getMediaItemCount(); i++) {
+                    items.add(player.getMediaItemAt(i));
+                }
+                future.set(new MediaSession.MediaItemsWithStartPosition(
+                    ImmutableList.copyOf(items),
+                    player.getCurrentMediaItemIndex(),
+                    Math.max(0L, player.getCurrentPosition())));
+            } catch (Throwable t) {
+                future.setException(t);
+            }
+        });
+        return future;
+    }
 
     /**
      * 播放状态变化回调（PlaybackBridge 注册，转发给 WebView 里的 JS）。
@@ -226,6 +566,21 @@ public class MediaPlaybackService extends MediaSessionService {
             }
         }
     };
+    /**
+     * 播放位置定期落盘：进程被系统静默回收时来不及走 onDestroy 的落盘，
+     * 没有这条的话恢复出来的是「上一次队列变动时」的位置（可能差整首歌）。
+     * 30s 一次足够——恢复位置的精度要求不高，省电优先。
+     */
+    private static final long PROGRESS_PERSIST_INTERVAL_MS = 30_000L;
+    private final Runnable persistProgressTick = new Runnable() {
+        @Override
+        public void run() {
+            if (player != null && player.isPlaying()) {
+                scheduleQueuePersist();
+                main.postDelayed(this, PROGRESS_PERSIST_INTERVAL_MS);
+            }
+        }
+    };
     /** 当前条目 mediaId → JS 侧地址（getState 返回 currentSrc 供对账收养用） */
     private static final android.util.LruCache<String, String> sSrcById =
         new android.util.LruCache<>(32);
@@ -234,8 +589,46 @@ public class MediaPlaybackService extends MediaSessionService {
     public void onCreate() {
         super.onCreate();
         PlaybackBridge.activeService = this;
+        queueStateFile = new File(getFilesDir(), QUEUE_STATE_FILE);
         player = createPlayer();
-        mediaSession = new MediaSession.Builder(this, player).build();
+        mediaSession = new MediaSession.Builder(this, player)
+            .setCallback(new MediaSession.Callback() {
+                @Override
+                public ListenableFuture<MediaSession.MediaItemsWithStartPosition>
+                    onPlaybackResumption(MediaSession session,
+                                         MediaSession.ControllerInfo controller) {
+                    // 系统媒体恢复（手机重启 / 进程被杀后，用户从系统媒体卡片点播放）：
+                    // 把上次落盘的队列交回去，由系统按 resume 语义开播
+                    Log.i(TAG, "系统请求媒体恢复（onPlaybackResumption）");
+                    return buildResumptionFuture();
+                }
+
+                @Override
+                public ListenableFuture<java.util.List<MediaItem>> onAddMediaItems(
+                    MediaSession session,
+                    MediaSession.ControllerInfo controller,
+                    java.util.List<MediaItem> mediaItems) {
+                    // 外部控制器（车机 / 手表 / 助手）推来的 MediaItem 通常只带 URI，
+                    // 缺 mediaId 时按 URI 补一个——播放器列表按 mediaId 对齐队列语义
+                    java.util.ArrayList<MediaItem> out = new java.util.ArrayList<>();
+                    for (MediaItem item : mediaItems) {
+                        if (item.mediaId == null || item.mediaId.isEmpty()) {
+                            String uri = item.localConfiguration != null
+                                && item.localConfiguration.uri != null
+                                ? item.localConfiguration.uri.toString()
+                                : "";
+                            out.add(uri.isEmpty() ? item
+                                : item.buildUpon().setMediaId(uri).build());
+                        } else {
+                            out.add(item);
+                        }
+                    }
+                    return com.google.common.util.concurrent.Futures.immediateFuture(out);
+                }
+            })
+            .build();
+        // 队列快照恢复：进程被杀/服务重建后把上次的队列挂回来（不自动开播）
+        restoreQueueState();
         player.addListener(new Player.Listener() {
             @Override
             public void onMediaItemTransition(@Nullable MediaItem mediaItem, int reason) {
@@ -247,6 +640,8 @@ public class MediaPlaybackService extends MediaSessionService {
                 }
                 // 消耗了一个可播位：从 shadow 补窗，不足则向 JS 索源
                 afterQueueConsumed();
+                // 队列推进了：落盘（被系统杀掉后从这里恢复）
+                scheduleQueuePersist();
                 emitPlaybackEvent("itemtransition", currentMediaId(), String.valueOf(index));
             }
 
@@ -257,10 +652,16 @@ public class MediaPlaybackService extends MediaSessionService {
                     consecutiveErrors = 0;
                     main.removeCallbacks(progressTick);
                     main.postDelayed(progressTick, PROGRESS_INTERVAL_MS);
+                    // 播放位置定期落盘（进程被静默回收时也能恢复到接近的位置）
+                    main.removeCallbacks(persistProgressTick);
+                    main.postDelayed(persistProgressTick, PROGRESS_PERSIST_INTERVAL_MS);
                     // 暂停期间被取消的原生解析：真正出声了再排上
                     ensureNativeResolve();
                 } else {
                     main.removeCallbacks(progressTick);
+                    main.removeCallbacks(persistProgressTick);
+                    // 暂停即落盘一次：暂停态被杀是最常见的场景（用户放着歌去睡了）
+                    persistQueueNow();
                 }
             }
 
@@ -325,22 +726,35 @@ public class MediaPlaybackService extends MediaSessionService {
             public void onPlayerError(androidx.media3.common.PlaybackException error) {
                 // 队列自愈：坏条目（直链过期/音源失效）不让整条队列停下——
                 // JS 冻结时 error 事件无人处理，若停在坏条目上就是「后台播几首
-                // 后自动暂停」的最终形态。跳到下一首继续播；连续多首全失败
-                // 才真正放弃（整队坏源时避免静默空转烧电）。
+                // 后自动暂停」的最终形态。优先原地换源，换不出来才跳下一首；
+                // 连续多首全失败才真正放弃（整队坏源时避免静默空转烧电）。
+                // 失败地址先记下来：本条若还在计划里，原生重解析会用它做 excludeUrl，
+                // 免得插件再返回同一条坏源把重试次数烧光（见 launchNativeResolve）。
+                String failedId = currentMediaId();
+                String failedSrc = currentSrc();
+                if (!failedId.isEmpty() && !failedSrc.isEmpty()) {
+                    failedSrcByMediaId.put(failedId, failedSrc);
+                }
+                // 原地换源优先（尤其对快照恢复出来的队列：存的是几小时前的直链，
+                // 过期概率很高，直接跳歌会把整队「听一首跳一首」地毁掉）。
+                // 失败也照常发 error 事件，JS 活着时仍能感知。
+                boolean retrying = retryCurrentTrackNatively(failedId);
                 refillWindow(); // 坏条目身后可能还有已补源的计划条目
                 boolean recovered = false;
-                if (player.getCurrentMediaItemIndex() + 1 < player.getMediaItemCount()) {
-                    // ERROR 态下播放器已停止：seek + prepare 后必须重新声明
-                    // playWhenReady=true 才会真正续播（prepare 不继承播放意图）
-                    player.seekToNextMediaItem();
-                    player.prepare();
-                    player.setPlayWhenReady(true);
-                    recovered = true;
-                } else if (!shadow.isEmpty() && player.getPlayWhenReady()) {
-                    // 身后只剩未解析条目：进等源态，needsource + 原生解析双路续命
-                    awaitingSource = true;
-                    scheduleNeedTick();
-                    ensureNativeResolve();
+                if (!retrying) {
+                    if (player.getCurrentMediaItemIndex() + 1 < player.getMediaItemCount()) {
+                        // ERROR 态下播放器已停止：seek + prepare 后必须重新声明
+                        // playWhenReady=true 才会真正续播（prepare 不继承播放意图）
+                        player.seekToNextMediaItem();
+                        player.prepare();
+                        player.setPlayWhenReady(true);
+                        recovered = true;
+                    } else if (!shadow.isEmpty() && player.getPlayWhenReady()) {
+                        // 身后只剩未解析条目：进等源态，needsource + 原生解析双路续命
+                        awaitingSource = true;
+                        scheduleNeedTick();
+                        ensureNativeResolve();
+                    }
                 }
                 consecutiveErrors = recovered ? consecutiveErrors + 1 : 0;
                 if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
@@ -460,9 +874,16 @@ public class MediaPlaybackService extends MediaSessionService {
     @Override
     public void onDestroy() {
         main.removeCallbacks(progressTick);
+        main.removeCallbacks(persistProgressTick);
         main.removeCallbacks(needTick);
+        main.removeCallbacks(persistQueueTick);
         cancelNativeResolve();
+        // 退出前落一次盘（此时 player 还活着，能读到真实进度）。
+        // 注意：这里**不**清空快照——服务因系统回收而销毁时，下一次启动
+        // 要靠它把队列恢复出来；用户主动停止（stop()）时才删文件（见 writeQueueState）
+        writeQueueState();
         resolveExecutor.shutdownNow();
+        persistExecutor.shutdown();
         shadow.clear();
         if (PlaybackBridge.activeService == this) {
             PlaybackBridge.activeService = null;
@@ -515,6 +936,21 @@ public class MediaPlaybackService extends MediaSessionService {
      */
     void loadTrack(String src, String mediaId, long startMs, boolean autoplay,
                    String title, String artist, String album, String artworkUri) {
+        loadTrack(src, mediaId, startMs, autoplay, title, artist, album, artworkUri,
+            "", "");
+    }
+
+    /**
+     * 单曲装载（对应旧的 setSource 语义）：替换整条播放列表为这一首。
+     * autoplay=true 立即开播。整条计划作废（新起一首，计划由 JS 随后重推）。
+     *
+     * payload/quality 是当前曲的曲目快照与请求音质：**当前曲的换源自愈靠它**
+     * （直链过期时用 payload 重跑 getMediaSource）。JS 侧 resolveMediaUrl 已
+     * 拿过一次，顺手带下来成本为零。
+     */
+    void loadTrack(String src, String mediaId, long startMs, boolean autoplay,
+                   String title, String artist, String album, String artworkUri,
+                   String payload, String quality) {
         runOnMain(() -> {
             if (player == null) {
                 return;
@@ -524,8 +960,18 @@ public class MediaPlaybackService extends MediaSessionService {
             sSrcById.evictAll();
             shadow.clear();
             awaitingSource = false;
+            // 用户手动装载新曲 = 全新上下文：换源重试预算一并重置
+            retriedCurrentAttempts.clear();
             main.removeCallbacks(needTick);
             cancelNativeResolve();
+            // 当前曲的 payload 也记进计划索引：它不在 pushQueuePlan 里
+            // （那推的是「接下来的」，不含当前曲），但取流失败时要靠它换源
+            if (mediaId != null && !mediaId.isEmpty() && payload != null
+                && !payload.isEmpty()) {
+                plannedById.put(mediaId, new Planned(
+                    mediaId, src == null ? "" : src, title, artist, album, artworkUri,
+                    payload, quality));
+            }
             if (src == null || src.isEmpty()) {
                 return;
             }
@@ -534,6 +980,7 @@ public class MediaPlaybackService extends MediaSessionService {
                 Math.max(startMs, 0L));
             player.prepare();
             player.setPlayWhenReady(autoplay);
+            scheduleQueuePersist();
         });
     }
 
@@ -561,6 +1008,8 @@ public class MediaPlaybackService extends MediaSessionService {
                 if (p == null || p.mediaId == null || p.mediaId.isEmpty()) {
                     continue;
                 }
+                // 计划索引先记（窗内条目也要有 payload：被杀后靠它重解析）
+                plannedById.put(p.mediaId, p);
                 if (inPlayer.contains(p.mediaId)) {
                     continue;
                 }
@@ -578,6 +1027,7 @@ public class MediaPlaybackService extends MediaSessionService {
                 main.removeCallbacks(needTick);
             }
             afterQueueConsumed();
+            scheduleQueuePersist();
         });
     }
 
@@ -614,6 +1064,7 @@ public class MediaPlaybackService extends MediaSessionService {
             }
             rememberSrc(mediaId, src);
             afterQueueConsumed();
+            scheduleQueuePersist();
         });
     }
 
@@ -635,7 +1086,10 @@ public class MediaPlaybackService extends MediaSessionService {
                     player.removeMediaItems(i, i + 1);
                 }
             }
+            plannedById.remove(mediaId);
+            failedSrcByMediaId.remove(mediaId);
             afterQueueConsumed();
+            scheduleQueuePersist();
         });
     }
 
@@ -731,22 +1185,37 @@ public class MediaPlaybackService extends MediaSessionService {
         nativeResolveScheduled = false;
     }
 
+    /** 计划前段第一个「原生还能接手」的条目：缺源、不在途、有 payload、次数没用尽 */
+    private Planned firstResolvablePending() {
+        int limit = Math.min(shadow.size(), NATIVE_RESOLVE_LOOKAHEAD);
+        for (int i = 0; i < limit; i++) {
+            Planned p = shadow.get(i);
+            if (p.src.isEmpty()
+                && !p.resolving
+                && !p.payload.isEmpty()
+                && p.resolveAttempts < MAX_NATIVE_RESOLVE_ATTEMPTS) {
+                return p;
+            }
+        }
+        return null;
+    }
+
     /**
-     * shadow 头部缺源且还该由原生接手：排一次解析。
+     * 计划前段还有原生能接手的缺源条目：排一次解析。
      * 首次多等 2.5s（JS 活着就先走 needsource 往返，比原生快），没等到才原生上；
-     * 暂停中/已排/次数用尽都不动。
+     * 暂停中/已排/没人能接手都不动。
      */
     private void ensureNativeResolve() {
-        if (player == null || shadow.isEmpty()) {
+        if (player == null
+            || shadow.isEmpty()
+            || !(player.getPlayWhenReady() || awaitingSource)) {
             cancelNativeResolve();
             return;
         }
-        Planned head = shadow.get(0);
-        if (!head.src.isEmpty()
-            || head.resolving
-            || head.payload.isEmpty()
-            || head.resolveAttempts >= MAX_NATIVE_RESOLVE_ATTEMPTS
-            || !(player.getPlayWhenReady() || awaitingSource)) {
+        Planned pending = firstResolvablePending();
+        if (pending == null) {
+            // 前段要么都解析好了、要么都在途（完成回调会再驱动一轮）、
+            // 要么已用尽次数（只等 JS 的 needsource）——都不需要这个定时器
             cancelNativeResolve();
             return;
         }
@@ -754,46 +1223,191 @@ public class MediaPlaybackService extends MediaSessionService {
             return;
         }
         scheduleNativeResolve(
-            head.resolveAttempts == 0 ? NATIVE_RESOLVE_DELAY_MS : NATIVE_RESOLVE_RETRY_MS);
+            pending.resolveAttempts == 0 ? NATIVE_RESOLVE_DELAY_MS : NATIVE_RESOLVE_RETRY_MS);
+    }
+
+    /**
+     * 解析泵：把计划前段（≤NATIVE_RESOLVE_LOOKAHEAD）缺源条目一次排上解析。
+     * 一次只解析队头的话，队头进窗后下一条又要从 2.5s 等起——短歌 + 慢网时
+     * 每个切歌点都会露出空隙。PluginRuntime 的 executor 是单线程，排队即串行
+     * 执行，不会把引擎压垮。深度限制在窗口量级：解析太深会让直链在计划里
+     * 躺太久，反而放大过期面。
+     */
+    private void pumpNativeResolve() {
+        if (player == null
+            || shadow.isEmpty()
+            || !(player.getPlayWhenReady() || awaitingSource)) {
+            return;
+        }
+        int limit = Math.min(shadow.size(), NATIVE_RESOLVE_LOOKAHEAD);
+        for (int i = 0; i < limit; i++) {
+            Planned p = shadow.get(i);
+            if (p.src.isEmpty()
+                && !p.resolving
+                && !p.payload.isEmpty()
+                && p.resolveAttempts < MAX_NATIVE_RESOLVE_ATTEMPTS) {
+                launchNativeResolve(p);
+            }
+        }
+        // 还有没在途、能再试的条目：按重试周期再排一轮
+        // （在途条目的完成回调会经 applyNativeResolve → afterQueueConsumed 再驱动；
+        //   次数用尽的只等 JS，不驱动重排，否则这里会无限空转）
+        if (firstResolvablePending() != null) {
+            scheduleNativeResolve(NATIVE_RESOLVE_RETRY_MS);
+        }
     }
 
     /** 发起一次原生解析（主线程判定；真正阻塞的 PluginRuntime.resolve 丢到 resolveExecutor） */
-    private void resolveHeadNatively() {
-        if (player == null || shadow.isEmpty()) {
-            return;
-        }
-        final Planned head = shadow.get(0);
-        if (!head.src.isEmpty()
+    private void launchNativeResolve(final Planned head) {
+        if (head == null || !head.src.isEmpty()
             || head.resolving
             || head.payload.isEmpty()
-            || head.resolveAttempts >= MAX_NATIVE_RESOLVE_ATTEMPTS
-            || !(player.getPlayWhenReady() || awaitingSource)) {
+            || head.resolveAttempts >= MAX_NATIVE_RESOLVE_ATTEMPTS) {
             return;
         }
         head.resolving = true;
         head.resolveAttempts++;
-        // 预排下一次兜底：成功路径会经 ensureNativeResolve 把它撤掉
-        if (head.resolveAttempts < MAX_NATIVE_RESOLVE_ATTEMPTS) {
-            scheduleNativeResolve(NATIVE_RESOLVE_RETRY_MS);
-        }
         final String mediaId = head.mediaId;
         final String itemJson = head.payload;
         final String quality = head.quality == null || head.quality.isEmpty()
             ? "standard"
             : head.quality;
+        // 这条刚才取流失败过：第一次重试把坏直链作为 excludeUrl 传下去，让插件
+        // 换一条源。但只在第一次——不少插件无视 quality 逐档、只用 musicItem
+        // 算出唯一地址，永远排除就会让这条彻底解析不出来（一次网络抖动即永久
+        // 毒化）。所以从第二次起允许再拿同一条：宁可拿回同一条坏源交给
+        // 上层自愈跳歌，也不能因为排除而彻底无源。
+        final String excludeUrl = head.resolveAttempts > 1
+            ? ""
+            : (failedSrcByMediaId.get(mediaId) == null ? "" : failedSrcByMediaId.get(mediaId));
         Log.i(TAG, "原生自解析发起：" + mediaId
-            + "（第" + head.resolveAttempts + "次，音质 " + quality + "）");
+            + "（第" + head.resolveAttempts + "次，音质 " + quality
+            + (excludeUrl.isEmpty() ? "" : "，排除刚失败的直链") + "）");
         resolveExecutor.execute(() -> {
             String res = null;
             try {
                 res = PluginRuntime.getInstance(getApplicationContext())
-                    .resolve(itemJson, quality, "", NATIVE_RESOLVE_TIMEOUT_MS);
+                    .resolve(itemJson, quality, excludeUrl, NATIVE_RESOLVE_TIMEOUT_MS);
             } catch (Throwable t) {
                 res = null;
             }
             final String resultJson = res;
             runOnMain(() -> applyNativeResolve(mediaId, resultJson));
         });
+    }
+
+    /**
+     * 当前曲的换源次数（mediaId → 已用次数）：只对「播放器列表里的当前曲」计数，
+     * 与计划条目各自的 resolveAttempts 独立。成功换源即清。
+     */
+    private final java.util.HashMap<String, Integer> retriedCurrentAttempts =
+        new java.util.HashMap<>();
+
+    /**
+     * 当前曲取流失败：原地用它自己的 payload 重新解析一条新源并重启播放。
+     *
+     * 与 shadow 的解析是两条路：当前曲已在播放器列表里，不属于「还没入窗的计划条目」，
+     * 所以解析成功后要 replaceMediaItem + seek 回原位置 + prepare + 重申播放意图。
+     * 队列快照恢复出来的情况尤其依赖它——存的是几小时前的直链，过期概率很高，
+     * 直接跳歌会把整队变成「听一首跳一首」。
+     *
+     * @return true 表示已发起换源重试（调用方不要再跳歌）
+     */
+    private boolean retryCurrentTrackNatively(String mediaId) {
+        if (player == null || mediaId == null || mediaId.isEmpty()) {
+            return false;
+        }
+        final Planned planned = plannedById.get(mediaId);
+        if (planned == null || planned.payload.isEmpty()) {
+            return false; // 没 payload（JS 没给）：只能跳歌或等 JS
+        }
+        Integer used = retriedCurrentAttempts.get(mediaId);
+        int attempts = used == null ? 0 : used;
+        if (attempts >= MAX_NATIVE_RESOLVE_ATTEMPTS) {
+            return false; // 换源机会用尽：交给跳歌逻辑
+        }
+        retriedCurrentAttempts.put(mediaId, attempts + 1);
+        final int targetIndex = player.getCurrentMediaItemIndex();
+        final long positionMs = Math.max(0L, player.getCurrentPosition());
+        final String quality = planned.quality == null || planned.quality.isEmpty()
+            ? "standard"
+            : planned.quality;
+        // 与计划条目同规则：只有第一次重试排除坏直链，之后允许拿回同一条
+        // （插件可能只有这一条源，永久排除等于彻底播不了）
+        final String excludeUrl = attempts > 0
+            ? ""
+            : (failedSrcByMediaId.get(mediaId) == null ? "" : failedSrcByMediaId.get(mediaId));
+        Log.i(TAG, "当前曲换源重试：" + mediaId + "（第" + (attempts + 1) + "次"
+            + (excludeUrl.isEmpty() ? "）" : "，排除刚失败的直链）"));
+        resolveExecutor.execute(() -> {
+            String res = null;
+            try {
+                res = PluginRuntime.getInstance(getApplicationContext())
+                    .resolve(planned.payload, quality, excludeUrl, NATIVE_RESOLVE_TIMEOUT_MS);
+            } catch (Throwable t) {
+                res = null;
+            }
+            final String resultJson = res;
+            runOnMain(() -> applyCurrentTrackReplace(
+                mediaId, targetIndex, positionMs, resultJson));
+        });
+        return true;
+    }
+
+    /**
+     * 当前曲换源结果写回：新直链替换进播放器列表并原地续播。
+     * 期间用户可能已切歌/停止：用 mediaId + 索引双重校验，对不上就丢弃。
+     * 换源失败则按原自愈语义跳到下一首（避免停在坏条目上）。
+     */
+    private void applyCurrentTrackReplace(String mediaId, int targetIndex,
+                                         long positionMs, String resultJson) {
+        if (player == null) {
+            return;
+        }
+        String url = "";
+        if (resultJson != null && !resultJson.isEmpty()) {
+            try {
+                JSONObject res = new JSONObject(resultJson);
+                if (res.optBoolean("ok", false)) {
+                    url = res.optString("url", "");
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        if (url.isEmpty()) {
+            Log.i(TAG, "当前曲换源失败，按自愈语义跳下一首：" + mediaId);
+            if (player.getCurrentMediaItemIndex() + 1 < player.getMediaItemCount()) {
+                player.seekToNextMediaItem();
+                player.prepare();
+                player.setPlayWhenReady(true);
+            } else if (!shadow.isEmpty() && player.getPlayWhenReady()) {
+                awaitingSource = true;
+                scheduleNeedTick();
+                ensureNativeResolve();
+            }
+            return;
+        }
+        // 校验：还是同一首、索引也没变（用户没切歌）
+        if (!mediaId.equals(currentMediaId())
+            || targetIndex != player.getCurrentMediaItemIndex()
+            || targetIndex < 0 || targetIndex >= player.getMediaItemCount()) {
+            Log.i(TAG, "当前曲换源结果作废（已切歌/换队列）：" + mediaId);
+            return;
+        }
+        MediaItem it = player.getMediaItemAt(targetIndex);
+        if (it == null) {
+            return;
+        }
+        Log.i(TAG, "当前曲换源成功，原地续播：" + mediaId + " -> " + url);
+        rememberSrc(mediaId, url);
+        rememberHeadersFor(url, resultJson);
+        failedSrcByMediaId.remove(mediaId);
+        player.replaceMediaItem(targetIndex,
+            it.buildUpon().setUri(resolveSrc(url)).build());
+        player.seekTo(targetIndex, positionMs);
+        player.prepare();
+        player.setPlayWhenReady(true);
+        scheduleQueuePersist();
     }
 
     /**
@@ -839,9 +1453,11 @@ public class MediaPlaybackService extends MediaSessionService {
         }
         Log.i(TAG, "原生自解析成功：" + mediaId + " -> " + url);
         target.src = url;
+        // 拿到新源了：坏直链记录作废（下次再失败会重新记）
+        failedSrcByMediaId.remove(mediaId);
         rememberSrc(mediaId, url);
         rememberHeadersFor(url, resultJson);
-        afterQueueConsumed(); // 补窗 +（等源态则）续播 + 下一轮 ensure
+        afterQueueConsumed(); // 补窗 +（等源态则）续播 + 下一轮解析
     }
 
     /** 记住插件返回的请求头（按播放地址索引），数据源 open 时按 URI 注入 */
@@ -906,6 +1522,13 @@ public class MediaPlaybackService extends MediaSessionService {
             if (player == null) {
                 return;
             }
+            // 队列快照恢复出来的列表是 IDLE 态（没有 prepare，见 restoreQueueState）：
+            // 此时只 setPlayWhenReady 不会出声，必须先 prepare。判断依据用
+            // getPlaybackState()==STATE_IDLE + 列表非空，避免误 prepare 掉正常播放。
+            if (player.getPlaybackState() == Player.STATE_IDLE
+                && player.getMediaItemCount() > 0) {
+                player.prepare();
+            }
             player.setPlayWhenReady(true);
             // 播完停下后按播放：补上了源就继续连播（与 STATE_ENDED 的自动续播同语义）
             if (player.getPlaybackState() == Player.STATE_ENDED) {
@@ -936,9 +1559,14 @@ public class MediaPlaybackService extends MediaSessionService {
             }
             sSrcById.evictAll();
             shadow.clear();
+            plannedById.evictAll();
+            failedSrcByMediaId.clear();
+            retriedCurrentAttempts.clear();
             awaitingSource = false;
             main.removeCallbacks(needTick);
             cancelNativeResolve();
+            // 队列已清空：落盘也要清掉，否则下次启动会把「已停止」的队列恢复出来
+            scheduleQueuePersist();
         });
     }
 

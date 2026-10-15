@@ -286,7 +286,90 @@ const r5 = runTask(
 assert(r5.ok === false, "宿主网络错误被插件捕获后返回 ok:false", r5);
 assert(String(r5.reason).includes("原生网络错误"), "错误信息透传到 reason", r5.reason);
 
-// 8) 卸载同步（只留 B）
+// 8) fetch 插件（不打 axios，直接用全局 fetch）+ TextDecoder
+console.log("[test] fetch 插件 + TextDecoder");
+const pluginD = `
+module.exports = {
+    platform: "L4D",
+    version: "1.0.0",
+    async getMediaSource(musicItem, quality) {
+        // 直接用 fetch（此前原生侧是硬拒绝，这类插件后台必然解析失败）
+        const res = await fetch("https://api.l4a.test/fetch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-From": "fetch" },
+            body: JSON.stringify({ id: musicItem.id, quality }),
+        });
+        if (!res.ok) {
+            return null;
+        }
+        const data = await res.json();
+        // TextDecoder 也必须在（QuickJS 原生没有）
+        const decoded = new TextDecoder("utf-8").decode(
+            new Uint8Array([0xe4, 0xb8, 0xad, 0xe6, 0x96, 0x87]),
+        );
+        return { url: data.url + "?decoded=" + decoded, quality };
+    },
+};
+`;
+const listD = JSON.stringify([
+    { hash: sha256(pluginB), code: pluginB, userVariables: {} },
+    { hash: sha256(pluginD), code: pluginD, userVariables: {} },
+]);
+const syncFetch = evalJs(`__sync(${JSON.stringify(listD)})`);
+runtime.executePendingJobs();
+assert(syncFetch.includes('"total":2'), "同步 fetch 插件", syncFetch);
+const r6 = runTask(
+    "resolve",
+    JSON.stringify({ item: { platform: "L4D", id: "77" }, quality: "standard" }),
+    "",
+    "",
+);
+assert(r6.ok === true, "fetch 插件解析成功", r6);
+assert(String(r6.url).includes("decoded=中文"), "TextDecoder 正确解出中文", r6.url);
+const fetchCall = httpCalls.find((c) => c.url.includes("api.l4a.test/fetch"));
+assert(!!fetchCall, "fetch 到达原生宿主", httpCalls.map((c) => c.url));
+assert(fetchCall && fetchCall.method === "POST", "fetch 方法透传", fetchCall && fetchCall.method);
+assert(
+    fetchCall && fetchCall.headers["X-From"] === "fetch",
+    "fetch 自定义请求头透传",
+    fetchCall && fetchCall.headers,
+);
+assert(
+    fetchCall && String(fetchCall.body).includes('"id":"77"'),
+    "fetch body 透传",
+    fetchCall && fetchCall.body,
+);
+
+// 9) fetch 非 2xx（res.ok === false 分支）
+console.log("[test] fetch 非 2xx");
+const pluginE = `
+module.exports = {
+    platform: "L4E",
+    version: "1.0.0",
+    async getMediaSource() {
+        const res = await fetch("https://unknown.test/nope");
+        if (res.ok) {
+            return { url: "https://should-not.test/" };
+        }
+        return null;
+    },
+};
+`;
+const listE = JSON.stringify([
+    { hash: sha256(pluginB), code: pluginB, userVariables: {} },
+    { hash: sha256(pluginE), code: pluginE, userVariables: {} },
+]);
+evalJs(`__sync(${JSON.stringify(listE)})`);
+runtime.executePendingJobs();
+const r7 = runTask(
+    "resolve",
+    JSON.stringify({ item: { platform: "L4E", id: "1" }, quality: "standard" }),
+    "",
+    "",
+);
+assert(r7.ok === false, "fetch 非 2xx 时 res.ok=false 可判", r7);
+
+// 10) 卸载同步（只留 B）
 const listB = JSON.stringify([
     { hash: sha256(pluginB), code: pluginB, userVariables: {} },
 ]);

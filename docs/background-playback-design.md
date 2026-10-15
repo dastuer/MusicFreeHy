@@ -1,10 +1,13 @@
-# 后台播放设计与实现现状（截至 v1.0.12）
+# 后台播放设计与实现现状（截至 v1.0.14）
 
 > 本文是后台播放子系统的**当前真实状态**与历史决策记录，供后续优化接续。
 > 演进脉络：v1.0.7 全原生播放内核重构 → v1.0.8~1.0.10 后台连播多轮修复 →
 > v1.0.11 预载收敛为「只预载下一首」→ **v1.0.12**（一次发布三件事）：窗口 2→3 +
 > 手动点播快路径、**播放队列整体下沉原生（shadow 计划 + needsource 拉取协议）**、
-> **原生音源引擎（QuickJS 自解析，L4 终局方案）**。
+> **原生音源引擎（QuickJS 自解析，L4 终局方案）** → **v1.0.14**：删除无效的
+> WebView 保活两层、补齐 QuickJS 环境（fetch/TextDecoder）、原生解析换源自愈
+> （excludeUrl + 当前曲原地重解析）、**队列快照落盘 + `onPlaybackResumption`
+> 媒体恢复**（进程被杀不再丢队列）。
 > 主要提交：`ae0abc3`（内核重构）、`3a150ab`（修崩溃）、`fb13dfa`/`b57a84b`/`626fd0f`（卡顿三层优化）、
 > `0c44bc5`（共播）、`f83bc9b`（通知暂停）、`ff7ba9f`/`31d4881`（窗口本地化与分层）、
 > `89aae3f`+`c44f54c`（删预载又还原，最终保留）、`af16279`（窗口 6→2）。
@@ -20,21 +23,29 @@ MediaPlaybackService（Media3 MediaSessionService 前台服务，Android 原生�
    ├─ shadow 计划队列：完整播放顺序（元数据 + src 可空），播完自动从窗续播
    ├─ needsource 拉取协议：轮到缺源条目时向 JS 索要（1.5s 首发 + 12s 周期重发），
    │   JS 醒来经 supplySource 补源 → 等源态当场自动续播（不依赖回前台对账）
-   ├─ 原生音源引擎（QuickJS `PluginRuntime`，v1.0.12）：计划条目带 payload/quality，
-   │   服务在 needsource 并行自行跑插件 getMediaSource（同步原生 HTTP）→ JS 冻结也续播
+   ├─ 原生音源引擎（QuickJS `PluginRuntime`，v1.0.12；v1.0.14 补 fetch/TextDecoder）：
+   │   计划条目带 payload/quality，服务自行跑插件 getMediaSource（同步原生 HTTP）；
+   │   解析泵一次排前 3 条（NATIVE_RESOLVE_LOOKAHEAD），不等队头逐条串行
+   ├─ 换源自愈（v1.0.14）：取流失败按 mediaId 记坏直链，重解析时首次作 excludeUrl
+   │   传给插件（第 2 次起允许复用，防「唯一源被永久排除」）；当前曲走
+   │   retryCurrentTrackNatively 原地换源续播，换不出才跳歌
+   ├─ 队列快照（v1.0.14）：shadow + 窗内条目 + 当前索引/位置/循环模式落盘
+   │   （filesDir/playback-queue.json，去抖 1.2s、播放中每 30s、暂停即写），
+   │   冷启动 restoreQueueState 挂回（不自动开播），系统恢复走 onPlaybackResumption
    ├─ ExoPlayer：OkHttp 数据源 / 30~60s 大缓冲 / WAKE_MODE_NETWORK / 输出缓冲≥500ms
    │   └─ ResolvingDataSource：按 URI 注入原生解析返回的请求头（≤64 条）
    └─ MediaSession：通知栏、耳机、蓝牙、锁屏（系统渲染，不经 JS）
 ```
 
 关键文件：
-- `android/.../MediaPlaybackService.java` — 播放内核（shadow 计划/补窗/等源续播/原生自解析/自愈/通知/焦点）
+- `android/.../MediaPlaybackService.java` — 播放内核（shadow 计划/补窗/等源续播/原生自解析/解析泵/换源自愈/队列快照恢复/媒体恢复/通知/焦点）
 - `android/.../PlaybackBridge.java` — JS↔服务桥 + 通知权限 + 电池优化 + 共播查询
 - `android/.../PluginRuntime.java` / `PluginRuntimeBridge.java` — QuickJS 引擎、插件落盘回灌、阻塞 resolve
-- `src/native/nativeRuntimeEntry.ts` — 原生运行时 bundle 入口（polyfill/同步 HTTP/`__sync/__tick` 协议）
+- `src/native/nativeRuntimeEntry.ts` — 原生运行时 bundle 入口（polyfill/同步 HTTP/fetch 适配/`__sync/__tick` 协议）
+- `src/native/quickjsPreload.ts` — 「必须先于依赖求值」的全局补丁（atob/btoa/Buffer/TextDecoder）
 - `src/core/nativePluginRuntime.ts` — 插件源码同步到原生（去抖 800ms + 并发合并）
 - `src/core/trackPlayer.ts` — 播放语义/计划推送（payload+quality）/按需补源/对账/失败自救
-- `src/core/nativeAudio.ts` — HTMLAudioElement 同形 facade
+- `src/core/nativeAudio.ts` — HTMLAudioElement 同形 facade（含当前曲自救快照 `setTrackRecovery`）
 - `src/core/audioCache.ts` — 播放缓存（原生直落磁盘主通道）
 
 ## 二、核心机制（当前生效）
@@ -132,15 +143,19 @@ JS 侧共播回抢仅剩 WebView 后端一次静默重试，无巡逻拉锯。
 
 - 输出缓冲下限 500ms（`DefaultRenderersFactory.buildAudioSink` 覆写
   `setMinPcmBufferDurationUs`）——吸收新应用冷启动的调度尖峰；
-- WebView 静音保活 WAV（原生后端在播时启用）+ MainActivity 钉 renderer
-  IMPORTANT——维持 JS 存活以补窗口（部分 ROM 无视钉优先级，这是纵深不是保证）；
+- ~~WebView 静音保活 WAV（原生后端在播时启用）+ MainActivity 钉 renderer
+  IMPORTANT~~（**已删除**）：实测对 renderer 冻结无效，不再维持这两层。
+  后台续播的可靠性完全由原生侧承担——shadow 计划 + needsource 拉取 +
+  QuickJS 自解析（§2.1/§2.2），JS 冻结时原生自己把队列推下去；
 - `ensureService` 用普通 `startService`（前台服务 5s 超时被杀的教训），
   开播时 Media3 自动晋升前台；**前提是通知权限已授予**——未授予时 Media3 无法
   发前台通知，服务不进 FGS，熄屏约 90s 被系统 `Stopping service due to app idle`
   回收、播放随之停止（模拟器实测：`POST_NOTIFICATIONS: granted=false` 是后台
-  连播中途停摆的直接原因）。目前应用没有主动引导授予该权限（§四.7）；
+  连播中途停摆的直接原因）。首次进入播放态会弹一次系统授权框（§四.7），
+  用户拒绝则只能在系统设置里补开；
 - ExoPlayer 全部访问必须在主线程：插件方法经 `svc.runOnMain` 转投，
-  读操作（getState/skip/jumpToItem）转主线程后回填 resolve。
+  读操作（getState/skip/jumpToItem）转主线程后回填 resolve；
+- 进程被杀不再等于停播（v1.0.14）：队列快照 + `onPlaybackResumption` 见 §2.10。
 
 ### 2.8 手动点播快路径（`play()` 入口）
 
@@ -153,18 +168,65 @@ JS 侧共播回抢仅剩 WebView 后端一次静默重试，无巡逻拉锯。
 簿记（历史/待播/状态）复用自动续播同一条 `itemtransition` 路径。
 未命中/缺源/单曲循环/加载中/重连中一律回退常规换歌链路。
 
+### 2.9 解析泵与换源自愈（v1.0.14）
+
+**解析泵**（`pumpNativeResolve`）：不再「解析队头 → 入窗 → 再解析新队头（又等 2.5s）」，
+而是一次把计划前 `NATIVE_RESOLVE_LOOKAHEAD=3` 条缺源条目排上（executor 单线程串行，
+不会压垮引擎），深度与窗口量级一致——再深会让直链在计划里躺太久、放大过期面。
+重排条件用 `firstResolvablePending()`：只认「缺源 + 不在途 + 有 payload + 次数未用尽」，
+次数用尽的条目不再驱动重排（否则无限空转），只等 JS 的 needsource。
+
+**当前曲原地换源**（`retryCurrentTrackNatively`）：
+`onPlayerError` 先记「mediaId → 刚失败的直链」，然后优先原地换源而不是直接跳歌——
+队列快照恢复出来的队列存的是几小时前的直链，过期概率很高，直接跳歌会把整队
+变成「听一首跳一首」。当前曲不在 `pushQueuePlan` 里（那推的是「接下来的」），
+payload 经 `loadTrack` 随行下发（JS 侧 `audio.setTrackRecovery(toPlanPayload(target), quality)`），
+原生存进 `plannedById` 供换源用。换源成功即 `replaceMediaItem` + `seekTo(原位置)`
++ `prepare` + 重申播放意图（ERROR 态下 prepare 不继承播放意图）；换不出才跳下一首。
+重试预算 `MAX_NATIVE_RESOLVE_ATTEMPTS=3`，`loadTrack`/`stop` 时清零。
+
+**excludeUrl 的边界**（踩过的坑）：首次重试把坏直链作 excludeUrl 传给插件换源，
+但**从第 2 次起不再排除**——不少插件无视 quality 逐档、只用 musicItem 算出唯一地址，
+永远排除会让这条彻底解析不出来（一次网络抖动即永久毒化）。宁可拿回同一条坏源
+交给上层自愈跳歌，也不能因为排除而彻底无源。
+
+### 2.10 队列快照与媒体恢复（v1.0.14）
+
+**落盘**（`buildQueueStateJson` → `filesDir/playback-queue.json`）：
+存 ExoPlayer 列表（当前曲及身前最多 `KEEP_BEHIND=2` 首）+ shadow 剩余计划 +
+当前索引/位置/循环模式/焦点模式。每条带 `payload`/`quality`（来自 `plannedById`，
+窗内条目也在其中）——**这是恢复后还能重新解析的依据**。
+触发：队列变动（transition / pushQueuePlan / supplySource / dropPlanned / loadTrack）
+去抖 1.2s、播放中每 30s、暂停即写、`onDestroy` 兜底。
+`stop()` / 用户清空队列 → 快照删除（避免恢复出用户已停止的队列）。
+
+**恢复**（`restoreQueueState`，`onCreate` 时）：
+有 src 的进播放器列表，缺源的进 shadow 等补源；**不 prepare、不自动开播**——
+进程重启后的出声必须由用户发起，与原生播放器语义一致。
+配套：`play()` 补了 IDLE 态判断（恢复出的列表是 IDLE，只 `setPlayWhenReady`
+不出声，必须先 `prepare`，否则按播放没反应）。
+
+**系统媒体恢复**（`MediaSession.Callback.onPlaybackResumption`）：
+手机重启/进程被杀后，用户从系统媒体卡片点播放时交出队列
+（`MediaItemsWithStartPosition`，这条路径需要真正开播）。
+`onAddMediaItems` 一并实现：外部控制器（车机/手表）推来的 MediaItem 缺 mediaId 时按 URI 补。
+
+**JS 侧冷启动对账**（`reconcileOnColdStart`）：服务刚被 `startService` 拉起时
+`onCreate` 可能没跑完，`getState` 拿到 `available=false`——退避重试 3 次
+（0.5s/1s/1.5s），拿到状态后走常规对账（含「JS 无源但原生有」的收养分支）。
+
 ## 三、桥接协议备忘
 
 | 方法 | 说明 |
 |------|------|
-| loadTrack(src,mediaId,startMs,autoplay,title,artist,album,artworkUri) | 装载当前曲（替换整条列表，shadow 计划一并清空等重推）；焦点模式随行重发 |
+| loadTrack(src,mediaId,startMs,autoplay,title,artist,album,artworkUri,**payload,quality**) | 装载当前曲（替换整条列表，shadow 计划一并清空等重推）；焦点模式随行重发；payload/quality 是当前曲的换源自救依据（v1.0.14） |
 | pushQueuePlan(items≤50) | 整条播放计划入档（元数据 + src 可空）；窗内条目保留不动，其余替换 shadow |
 | supplySource(mediaId,src) | 补一条已解析音源（needsource 往返/落盘本地化）；等源态补上即自动续播 |
 | dropPlanned(mediaId) | 撤一条计划（解析失败冷却）；shadow 与窗内命中都移除 |
-| play/pause/stop/seekTo/setRate/setVolume/setRepeatMode/setAudioFocusMode | 直达播放器（play 在 ENDED 且有计划时自动补窗续播） |
+| play/pause/stop/seekTo/setRate/setVolume/setRepeatMode/setAudioFocusMode | 直达播放器（play 在 ENDED 且有计划时自动补窗续播；IDLE 且列表非空时先 prepare——队列快照恢复的场景） |
 | skip(direction) | 原生队列直切，返回切到的 mediaId（空=无目标） |
 | jumpToItem(mediaId) | 原生队列定点跳转（计划内已解析条目，含 shadow 深处）；命中返回 mediaId，未命中空串 |
-| getState | currentMediaId/currentSrc/positionMs/bufferedMs/durationMs/paused/ended/playing/hasNext/**awaitingSource/plannedCount**/rate/volume |
+| getState | currentMediaId/currentSrc/positionMs/bufferedMs/durationMs/paused/ended/playing/hasNext/**awaitingSource/plannedCount**/plannedHead/rate/volume |
 | ensurePermission | Android 13+ 通知权限一次到位（首播时 JS 触发；FGS 晋升前提） |
 | otherMediaPlaying | 活跃媒体会话数（排除自家），缓存下载共播让路用 |
 
@@ -199,11 +261,20 @@ timeupdate(每 1s 带数值载荷)/durationchange/itemtransition(mediaId,index)/
    可在系统设置里补开。
 8. **Doze 全冻结未验证**：本轮模拟器测试刻意保持 AC 供电（`dumpsys battery set ac 1`）
    避开了 Doze；真机电池供电长时熄屏下系统冻结策略更严，属 §四.6 真机回归缺口。
-9. **原生换源自愈不带 excludeUrl**：`onPlayerError` 触发的原生自解析不知道刚才失败
-   的直链，可能拿到同一条坏源；当前靠跳过坏条目 + 计划内重解析兜底，补法是把失败
-   URL 传入 `excludeUrl`（JS 侧 `supplySource`/重解析路径同理可补）。
-10. **L4 只覆盖「缺源」场景的 E2E**：模拟器冻结注入已验证，真机长时后台 + 弱网 +
+9. ~~**原生换源自愈不带 excludeUrl**~~（v1.0.14 解决）：`onPlayerError` 记下失败的
+   直链，原生重解析首次作 `excludeUrl` 传给插件；当前曲另有原地换源路径（§2.9）。
+   残余边界：**从第 2 次重试起不再排除**（防「唯一源被永久排除」，见 §2.9），
+   所以插件若只提供一条坏源，仍会烧完 3 次机会后跳歌。
+10. ~~**进程被杀 = 队列丢失**~~（v1.0.14 解决）：队列快照落盘 + `onCreate` 恢复 +
+    `onPlaybackResumption`（§2.10）。
+11. **L4 只覆盖「缺源」场景的 E2E**：模拟器冻结注入已验证，真机长时后台 + 弱网 +
     直链过期组合（§四.6/§四.8）仍是回归缺口。
+12. **fetch polyfill 只覆盖文本响应**：`__nativeHttp` 是文本进文本出的宿主接口，
+    `res.arrayBuffer()` 按 latin1 逐字节还原。插件若对二进制响应做解析（罕见）
+    可能拿到错误数据，需扩宿主接口为 base64 传输。
+13. **队列快照恢复后不自动开播**：进程被杀重启后面板显示上次队列、停在暂停态，
+    需用户点播放（或从系统媒体恢复卡片）。这是有意选择（与原生播放器语义一致），
+    若希望「开机自动续播」需另做开关。
 
 ## 五、验证方式速查
 
@@ -221,14 +292,29 @@ timeupdate(每 1s 带数值载荷)/durationchange/itemtransition(mediaId,index)/
   → `__tp.addAll(list); __tp.play(list[0])` → 熄屏用 `dumpsys media_session` 轮询
   `description=`/`state=` 观察原生推进（不依赖 JS 存活）；坏链条目用返回 404 URL 的
   假音源（如 id=999 → /missing.m4a）验证自愈跳过；
-- 原生引擎冒烟（改 `nativeRuntimeEntry.ts` / bundle 后必跑）：
+- 原生引擎冒烟（改 `nativeRuntimeEntry.ts` / `quickjsPreload.ts` / bundle 后必跑）：
   `node scripts/test-native-runtime.mjs`——真实产物在 QuickJS 里跑 axios→原生 HTTP、
-  音质降档、excludeUrl、定时器 `__tick`、错误透传、增量同步，全绿才算过；
+  音源降档、excludeUrl、定时器 `__tick`、错误透传、增量同步，**外加 fetch 插件
+  （方法/请求头/body 透传、非 2xx 判定）与 TextDecoder**，全绿才算过；
 - 冻结页面模拟（L4 验证）：`node scripts/cdp-eval.mjs --freeze` / `--thaw`
   （`Page.setWebLifecycleState`），配合 `adb logcat -s PlaybackService` 看
   「原生自解析发起/成功」与媒体会话是否在冻结期自动切歌续播；
+- 队列快照恢复验证（v1.0.14）：
+  造队列开播 → `adb shell am force-stop <pkg>` → 重启 App →
+  `adb logcat | grep 队列快照` 应见「队列快照恢复：N 首可播 + M 首待补源，停在索引 i」，
+  再用 `Capacitor.nativePromise("PlaybackBridge","getState")` 核对 currentMediaId/paused；
+  快照文件在 `filesDir/playback-queue.json`（`run-as <pkg> cat` 可查看；
+  `stop()` 后应被删除）；
+- 当前曲换源验证（v1.0.14）：`loadTrack` 传一条 404 的 src，但 payload 指向一个
+  能解析出可用直链的曲目 → 日志应见「当前曲换源重试 → 当前曲换源成功，原地续播」，
+  且 `getState` 的 currentSrc 变成新直链、仍在播（不跳歌）；
+- 直链过期模拟（v1.0.14）：把正在播队列的后续音频文件改名（HTTP 返回 404）→
+  原生应走「换源重试 → 换不出跳下一首」，不是停在坏条目上；恢复文件后重新造队列即可；
 - 模拟器注意：`pm grant <pkg> android.permission.POST_NOTIFICATIONS` 必须先行
   （§四.7）；`dumpsys battery set ac 1 level 100` 保持供电避免 Doze 干扰计时；
+- release 包无调试钩子（`window.__tp` 被摇树剔除）：E2E 直接用
+  `Capacitor.nativePromise("PlaybackBridge", method, params)` 驱动桥即可，
+  这恰好覆盖「JS 只是遥控器」这条链路的真实契约（v1.0.14 验证即用此法）；
 - 崩溃：`adb logcat -b crash`；npm 用 nvm 的（pyenv shim 的 npm 坏）：
   `export PATH="$HOME/.nvm/versions/node/v24.19.0/bin:$PATH"`；
 - 发版：`node scripts/release.mjs <版本> --notes "..."`（需 GITEE_TOKEN，在 ~/.zshrc）。

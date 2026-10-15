@@ -54,7 +54,11 @@ public class PlaybackBridge extends Plugin {
         call.resolve(ret);
     }
 
-    /** 单曲装载：src + mediaId（platform-id）+ 起播位置 + 是否自动开播 + 元数据 */
+    /**
+     * 单曲装载：src + mediaId（platform-id）+ 起播位置 + 是否自动开播 + 元数据。
+     * payload/quality 是当前曲的曲目快照与请求音质（可选）：直链过期时原生靠它
+     * 重跑 getMediaSource 原地换源，不必跳歌。
+     */
     @PluginMethod
     public void loadTrack(PluginCall call) {
         MediaPlaybackService svc = activeService;
@@ -66,6 +70,7 @@ public class PlaybackBridge extends Plugin {
         String mediaId = call.getString("mediaId", "");
         Double startMs = call.getDouble("startMs");
         boolean autoplay = Boolean.TRUE.equals(call.getBoolean("autoplay", Boolean.FALSE));
+        JSObject payload = call.getObject("payload");
         svc.loadTrack(
             src,
             mediaId,
@@ -74,7 +79,9 @@ public class PlaybackBridge extends Plugin {
             call.getString("title", ""),
             call.getString("artist", ""),
             call.getString("album", ""),
-            call.getString("artworkUri", "")
+            call.getString("artworkUri", ""),
+            payloadJson(payload),
+            call.getString("quality", "")
         );
         call.resolve();
     }
@@ -132,10 +139,22 @@ public class PlaybackBridge extends Plugin {
     /** 取条目里的曲目快照 JSON（缺失/超限/异常一律给空串 = 放弃原生解析该条） */
     private static String payloadJson(JSONObject o) {
         try {
-            JSONObject payload = o.optJSONObject("payload");
-            if (payload == null) {
-                return "";
-            }
+            return clampPayload(o.optJSONObject("payload"));
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** 同上，但入参是 Capacitor 的 JSObject（loadTrack 直接传 payload 对象时） */
+    private static String payloadJson(JSObject payload) {
+        return clampPayload(payload);
+    }
+
+    private static String clampPayload(JSONObject payload) {
+        if (payload == null) {
+            return "";
+        }
+        try {
             String json = payload.toString();
             return json.length() <= MAX_PAYLOAD_JSON ? json : "";
         } catch (Exception e) {

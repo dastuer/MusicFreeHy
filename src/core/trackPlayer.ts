@@ -10,7 +10,7 @@ import {
 } from "./ipc";
 import { setMusicHistory } from "./musicHistory";
 import { getQuality, setQuality, getConfig, getAllowCoPlay } from "./appConfig";
-import { isNative, localFileUrl } from "./native";
+import { localFileUrl } from "./native";
 import {
     lookupCachedSrc,
     notifyPageHidden,
@@ -517,11 +517,6 @@ class TrackPlayer extends EventEmitter {
     private loadingSince = 0;
     /** 切后台兜底镜像的延后定时器（避开新应用冷启动窗口，见 visibilitychange 监听） */
     private hiddenMirrorTimer: ReturnType<typeof setTimeout> | null = null;
-    /** WebView 静音保活音源：原生后端在播时维持 renderer 不进冻结名单
-     *  （窗口补镜像/缓存本地化依赖 JS 存活，见 startWebViewKeepAlive 注释） */
-    private keepAlive: HTMLAudioElement | null = null;
-    /** 保活音源的回前台补拉起监听器（停保活时解绑用） */
-    private keepAliveKick: (() => void) | null = null;
 
     setup() {
         if (this.audio) {
@@ -561,6 +556,13 @@ class TrackPlayer extends EventEmitter {
                 backend.play().catch((e: any) => {
                     console.warn("[trackPlayer] 原生后端接管起播失败", e?.name ?? e);
                 });
+            } else if (backend instanceof NativeAudioElement) {
+                // 冷启动对账：服务可能刚从落盘快照恢复了上次的队列（进程被系统
+                // 回收后重启），或者服务还活着并在播。JS 侧此刻只有 localStorage
+                // 里的队列，得把状态对齐到原生现实（收养分支在 reconcile 里）。
+                // ensureService 是异步的（服务 onCreate 可能还没跑完），
+                // getState 会拿到 available=false：退避重试几次。
+                this.reconcileOnColdStart(0);
             }
         });
 
@@ -607,6 +609,30 @@ class TrackPlayer extends EventEmitter {
                 void this.upgradePlanToLocal(key);
             }
         });
+    }
+
+    /**
+     * 冷启动对账重试：服务刚被 startService 拉起时 onCreate 可能还没跑完，
+     * 这时 getState 拿不到播放器状态（available=false）。退避几次等它就绪，
+     * 拿到状态后走常规对账（含「JS 无源但原生有」的收养分支）。
+     */
+    private reconcileOnColdStart(attempt: number) {
+        const audio = this.audio;
+        if (!(audio instanceof NativeAudioElement)) {
+            return;
+        }
+        void (async () => {
+            const state = await audio.queryNativeState();
+            const nativeHasSomething =
+                !!state && (!!state.currentMediaId || state.plannedCount > 0);
+            if (nativeHasSomething) {
+                await this.reconcileWithNative();
+                return;
+            }
+            if (attempt < 3) {
+                setTimeout(() => this.reconcileOnColdStart(attempt + 1), 500 * (attempt + 1));
+            }
+        })();
     }
 
     /**
@@ -701,10 +727,6 @@ class TrackPlayer extends EventEmitter {
             });
         }
         this.syncMediaSessionState();
-        // 对账后原生仍在播：保活音源可能被冻结一并暂停了，回前台拉起来
-        if (!state.paused) {
-            this.startWebViewKeepAlive();
-        }
         if (trackChanged || !this.planEntries.length) {
             // 对齐后计划可能已经不对（推进过/被换过）：重推
             this.maybePushPlan();
@@ -712,84 +734,6 @@ class TrackPlayer extends EventEmitter {
         if (state.awaitingSource) {
             // 原生停在等源态：立即补源续播（needsource 事件可能在冻结期丢了）
             void this.supplyPlannedSources();
-        }
-    }
-
-    /**
-     * WebView 静音保活音源（原生后端在播时启用）：
-     * 播放本体虽在原生 ExoPlayer，但窗口补镜像与缓存本地化依赖页面 JS——
-     * WebView 无媒体活动时安卓省电策略会冻结 renderer，JS 停摆后窗口
-     * 耗尽就无法续推（后台连播几首后停止的根因之一）。维持一个静音、
-     * 循环的极短无声 WAV 让 renderer 不进冻结名单（部分 ROM 无视
-     * renderer 优先级建议，这层是能活设备的最后保障；钉优先级在 MainActivity）。
-     */
-    private startWebViewKeepAlive() {
-        if (!isNative() || this.keepAlive) {
-            return;
-        }
-        // 0.1s 8kHz 单声道 16bit 全零 PCM：data URL 常驻内存，循环播放不出声。
-        // 头部必须逐字段小端写入（String.fromCharCode 超过 255 的字节数值会让
-        // btoa 抛 InvalidCharacterError）
-        const SAMPLES = 800;
-        const buffer = new ArrayBuffer(44 + SAMPLES * 2);
-        const view = new DataView(buffer);
-        const writeStr = (offset: number, s: string) => {
-            for (let i = 0; i < s.length; i += 1) {
-                view.setUint8(offset + i, s.charCodeAt(i));
-            }
-        };
-        writeStr(0, "RIFF");
-        view.setUint32(4, 36 + SAMPLES * 2, true);
-        writeStr(8, "WAVE");
-        writeStr(12, "fmt ");
-        view.setUint32(16, 16, true); // fmt 段长度
-        view.setUint16(20, 1, true); // PCM
-        view.setUint16(22, 1, true); // 单声道
-        view.setUint32(24, 8000, true); // 采样率
-        view.setUint32(28, 16000, true); // 字节率
-        view.setUint16(32, 2, true); // 块对齐
-        view.setUint16(34, 16, true); // 位深
-        writeStr(36, "data");
-        view.setUint32(40, SAMPLES * 2, true); // 数据长度（PCM 全零不用写）
-        let bin = "";
-        const bytes = new Uint8Array(buffer);
-        for (let i = 0; i < bytes.length; i += 4096) {
-            bin += String.fromCharCode(...bytes.subarray(i, i + 4096));
-        }
-        const el = new Audio();
-        el.loop = true;
-        el.muted = true;
-        el.volume = 0;
-        el.preload = "auto";
-        el.src = `data:audio/wav;base64,${btoa(bin)}`;
-        const kick = () => {
-            el.play().catch(() => {
-                // 被省电暂停 / 竞态打断：页面回前台时再拉起
-            });
-        };
-        document.addEventListener("visibilitychange", kick);
-        kick();
-        this.keepAlive = el;
-        this.keepAliveKick = kick;
-    }
-
-    /** 停掉 WebView 保活音源（彻底停止播放时） */
-    private stopWebViewKeepAlive() {
-        const el = this.keepAlive;
-        if (!el) {
-            return;
-        }
-        this.keepAlive = null;
-        if (this.keepAliveKick) {
-            document.removeEventListener("visibilitychange", this.keepAliveKick);
-            this.keepAliveKick = null;
-        }
-        el.pause();
-        el.removeAttribute("src");
-        try {
-            el.load();
-        } catch {
-            // ignore
         }
     }
 
@@ -1158,9 +1102,8 @@ class TrackPlayer extends EventEmitter {
         // 主动暂停共用同一条 pause 通道），真正出声即视为用户要播，共播回抢恢复
         this.userPaused = false;
         // 开播完成：把整条播放计划推给原生播放器（后台连播的根基——计划必须
-        // 在 JS 活着时就位，冻结后原生自己推进、缺源由 needsource 醒来续接）；并确保保活音源在跑
+        // 在 JS 活着时就位，冻结后原生自己推进、缺源由 needsource 醒来续接）
         if (this.audio instanceof NativeAudioElement) {
-            this.startWebViewKeepAlive();
             this.maybePushPlan();
         }
         setAtom(musicStateAtom, "playing");
@@ -1434,7 +1377,6 @@ class TrackPlayer extends EventEmitter {
             this.emit(TrackPlayerEvents.PlayEnd);
             setAtom(musicStateAtom, "stopped");
             this.clearMediaSession();
-            this.stopWebViewKeepAlive();
             return;
         }
         const index = this.getMusicIndexInPlayList(this._currentMusic);
@@ -1446,7 +1388,6 @@ class TrackPlayer extends EventEmitter {
             this.emit(TrackPlayerEvents.PlayEnd);
             setAtom(musicStateAtom, "stopped");
             this.clearMediaSession();
-            this.stopWebViewKeepAlive();
             return;
         }
         await this.skipToNext();
@@ -1698,8 +1639,7 @@ class TrackPlayer extends EventEmitter {
             console.info(
                 `[trackPlayer] 队列计划就位：${items.length} 首（已带源 ${items.filter((it) => it.src).length} 首）`,
             );
-            // 计划就位意味着 JS 此刻是活的：保活音源务必在跑（防后续冻结）
-            this.startWebViewKeepAlive();
+            // 计划就位后立刻补源：把计划里的缺失音源解析出来写回原生
             void this.supplyPlannedSources();
         } catch (e: any) {
             console.warn("[trackPlayer] 队列计划推送失败", e?.message ?? e);
@@ -2256,8 +2196,6 @@ class TrackPlayer extends EventEmitter {
         this.clearMediaSession();
         this.clearPlayList();
         this._history = [];
-        // 队列彻底清空：保活音源一并停掉，不留无声媒体占着后台
-        this.stopWebViewKeepAlive();
         try {
             localStorage.removeItem("playProgress");
         } catch {
@@ -2581,6 +2519,9 @@ class TrackPlayer extends EventEmitter {
                             ? target.artwork
                             : "",
                 });
+                // 自救快照随行：直链过期时原生用它在原地换源（不跳歌），
+                // 队列快照恢复出来的曲目也靠它续上
+                audio.setTrackRecovery(toPlanPayload(target), resolved.quality ?? null);
             }
             audio.src = playSrc;
             audio.playbackRate = this._rate;

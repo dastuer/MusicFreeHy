@@ -17,8 +17,9 @@
 
 音频源解析（插件 `getMediaSource`）历史上只能在 WebView 的 JS 里运行（音源插件机制；
 v1.0.12 起另有原生 QuickJS 引擎兜底，见 §八.1），但熄屏后台的渲染进程会被 ROM 冻结——即使 `MainActivity` 把渲染进程钉为
-`RENDERER_PRIORITY_IMPORTANT`（这只是建议），Chromium 对不可见页面仍有密集
-唤醒节流与冻结。因此**「下一首放什么」的控制面不能依赖 JS 存活**。
+`RENDERER_PRIORITY_IMPORTANT`（这只是建议，且 v1.0.13 已连同静音保活一起删除：
+实测无效），Chromium 对不可见页面仍有密集唤醒节流与冻结。因此
+**「下一首放什么」的控制面不能依赖 JS 存活**。
 
 ### 1.2 旧架构的失效点（重构前实测）
 
@@ -75,9 +76,12 @@ MediaPlaybackService（Media3 MediaSessionService 前台服务）
 - 手写 MediaStyle 通知 + 封面解码器 + `ARTWORK_EXECUTOR`（Media3 自动渲染）
 - `WakeLock`/`WifiLock` 心跳与 30s 保活 tick（ExoPlayer `WAKE_MODE_NETWORK` 自管）
 - 手写 `AudioDeviceCallback` 拔耳机暂停（`setHandleAudioBecomingNoisy` 覆盖）
-- WebView 静音保活 WAV（播放不再依赖 JS 存活，还省电）
 - `setNextTrackMetaCache` 元数据预登记间接层（元数据随窗口条目自带）
 - JS 共播续播巡逻（指数退避重试循环，见 §五）
+- WebView 静音保活 WAV 与 `MainActivity` 钉 renderer `IMPORTANT`（**v1.0.13 再次
+  删除**：v1.0.8~1.0.11 期间曾作为「维持 JS 存活以补窗口」的纵深手段重新引入，
+  实测对 renderer 冻结无效，续播可靠性改由原生 shadow 计划 + needsource +
+  QuickJS 自解析承担，见 `background-playback-design.md` §2.1/§2.2/§2.7）
 
 ## 三、核心机制：队列窗口镜像
 
@@ -200,7 +204,7 @@ JS 侧 `NativeAudioElement` 记住最近一次请求的模式（`_focusRequested
 |------|------|------|
 | `isAvailable` | – | 探测（老包回退 WebView `<audio>`） |
 | `ensureService` | – | `startService` 起播放服务（幂等；Media3 开播时自动晋升前台） |
-| `loadTrack` | src, mediaId, startMs, autoplay, title, artist, album, artworkUri | 装载当前曲（替换整条列表，shadow 计划清空等重推）；焦点模式随行重发 |
+| `loadTrack` | src, mediaId, startMs, autoplay, title, artist, album, artworkUri, payload, quality | 装载当前曲（替换整条列表，shadow 计划清空等重推）；焦点模式随行重发；payload/quality 供直链失效时原地换源（v1.0.14） |
 | `pushQueuePlan` | items[{mediaId,src,title,artist,album,artworkUri}] | 整条播放计划入档（≤50，src 可空=未解析）；窗内条目按 mediaId 去重保留 |
 | `supplySource` | mediaId, src | 补一条已解析音源；等源态下补上即自动续播 |
 | `dropPlanned` | mediaId | 撤一条计划（解析失败冷却） |
@@ -235,7 +239,7 @@ JS 侧 `NativeAudioElement` 记住最近一次请求的模式（`_focusRequested
 写操作 fire-and-forget，读操作（getState/skip）转主线程执行后回填 `call.resolve`。
 服务回调（Player.Listener）本身在主线程，可直接读。
 
-## 七、验证清单（真机）
+## 七、验证清单
 
 - [x] 播放中进度条走动、时长正确
 - [x] 通知栏：当前曲标题/封面、上一首/下一首/暂停、拖进度
@@ -243,8 +247,14 @@ JS 侧 `NativeAudioElement` 记住最近一次请求的模式（`_focusRequested
 - [x] 切歌/队列增删/随机模式/单曲循环回归
 - [x] 与抖音共播：本应用不被打断，不再反复暂停/启动
 - [x] 崩溃复现路径（连续切歌触发窗口重镜像）不再触发
+- [x] **页面冻结**（`Page.setWebLifecycleState`）+ 息屏：整队 5 首全缺源仍能
+      原生自解析续播到底（v1.0.14 模拟器实测，日志见 `PlaybackService`）
+- [x] **进程被杀**（`am force-stop`）后重启：队列快照恢复到原曲原索引、按播放可续（v1.0.14）
+- [x] **当前曲直链失效**：原地换源续播、不跳歌（v1.0.14）
+- [x] **`stop()` 清理**：队列与快照文件一并移除，不会恢复出已停止的队列（v1.0.14）
 - [ ] 长时间后台（>窗口总时长）后回前台：界面与播放器状态对齐
 - [ ] 熄屏 WiFi 弱网下的断流自救与回前台补播
+- [ ] 真机（RMX3888）电池供电长时熄屏：Doze 全冻结下的行为
 
 ## 八、已知边界
 
@@ -252,6 +262,7 @@ JS 侧 `NativeAudioElement` 记住最近一次请求的模式（`_focusRequested
    JS 只要在 12s 重发周期内能醒一瞬即可整队续播；被彻底长期冻结时由**原生
    QuickJS 音源引擎**（`PluginRuntime`）拿计划 payload 自解析续播——「原生侧
    预解析」这一硬边界已消除，详见 `background-playback-design.md` §二.2）。
+   v1.0.14 补：解析泵一次排前 3 条、fetch/TextDecoder 补齐（§2.9）。
 2. Android 切音质为「原位重挂」（单实例 ExoPlayer，双播放器会顶掉在播的歌），
    大缓冲下间隙极短；WebView 后端保留双 `<audio>` 无缝交接。
 3. WebView `<audio>` 后端（浏览器 dev）仍走旧的 probe 预载路径，行为不变。

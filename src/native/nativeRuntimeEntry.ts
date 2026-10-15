@@ -249,12 +249,126 @@ function polyfillGlobals() {
         };
     }
     if (typeof g.fetch !== "function") {
-        // 插件理论上只用 axios；给个会报错的 fetch，避免 ReferenceError 难排查
-        g.fetch = () => Promise.reject(new Error("原生运行时请使用 axios（fetch 不可用）"));
+        // 真 fetch：桥到 Java 注入的同步 __nativeHttp（OkHttp）。插件里有相当一部分
+        // 直接用 fetch 而不走 axios，之前的「fetch 不可用」硬拒绝会让这些插件在
+        // 原生侧必然解析失败——而后台续播恰恰依赖原生解析，所以这里必须真实现。
+        // 宿主函数是同步的（QuickJS 无事件循环），但 fetch 契约是异步，包一层
+        // resolved Promise 即可；body 只支持文本（宿主接口就是文本进文本出），
+        // 二进制响应按 latin1 还原字节，够插件做二次解析用。
+        g.fetch = (input: any, init?: any) => {
+            const http = (globalThis as any).__nativeHttp;
+            if (typeof http !== "function") {
+                return Promise.reject(new TypeError("原生 HTTP 宿主未注入"));
+            }
+            return Promise.resolve().then(() => {
+                const url = typeof input === "string" ? input : String(input?.url ?? input);
+                const cfg = init ?? {};
+                const method = String(cfg.method ?? (input as any)?.method ?? "GET").toUpperCase();
+                // Headers 归一化：支持 Headers 实例 / 数组 / 普通对象
+                const headers: Record<string, string> = {};
+                const rawHeaders = cfg.headers ?? (input as any)?.headers;
+                if (rawHeaders) {
+                    if (typeof rawHeaders.forEach === "function" && !Array.isArray(rawHeaders)) {
+                        rawHeaders.forEach((v: any, k: any) => {
+                            headers[String(k)] = String(v);
+                        });
+                    } else if (Array.isArray(rawHeaders)) {
+                        rawHeaders.forEach((pair: any) => {
+                            if (pair && pair.length >= 2) headers[String(pair[0])] = String(pair[1]);
+                        });
+                    } else {
+                        Object.entries(rawHeaders).forEach(([k, v]) => {
+                            headers[k] = String(v);
+                        });
+                    }
+                }
+                let body: string | null = null;
+                const rawBody = cfg.body;
+                if (rawBody !== undefined && rawBody !== null) {
+                    if (typeof rawBody === "string") {
+                        body = rawBody;
+                    } else if (typeof (rawBody as any).toString === "function"
+                        && !(rawBody instanceof Uint8Array)
+                        && !ArrayBuffer.isView?.(rawBody)) {
+                        body = String(rawBody);
+                    } else {
+                        const bytes = rawBody instanceof Uint8Array
+                            ? rawBody
+                            : new Uint8Array((rawBody as any).buffer ?? rawBody);
+                        let s = "";
+                        for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+                        body = s;
+                    }
+                }
+                const raw = http(url, method, JSON.stringify(headers), body);
+                if (raw === null || raw === undefined) {
+                    throw new TypeError("Failed to fetch");
+                }
+                const res = JSON.parse(raw);
+                if (res && typeof res.error === "string" && res.error) {
+                    throw new TypeError(`Failed to fetch: ${res.error}`);
+                }
+                return makeFetchResponse(res, url);
+            });
+        };
     }
     if (typeof g.performance !== "object" || !g.performance?.now) {
         g.performance = { now: () => Date.now() };
     }
+}
+
+/** fetch 的 Response 最小同形实现（status/ok/headers/text/json/arrayBuffer/clone） */
+function makeFetchResponse(res: any, url: string): any {
+    const text = String(res?.text ?? "");
+    const headerMap: Record<string, string> = {};
+    const rawHeaders = res?.headers ?? {};
+    Object.keys(rawHeaders).forEach((k) => {
+        headerMap[k.toLowerCase()] = String(rawHeaders[k]);
+    });
+    const status = Number(res?.status) || 0;
+    const headers = {
+        get: (k: string) => headerMap[String(k).toLowerCase()] ?? null,
+        has: (k: string) => Object.prototype.hasOwnProperty.call(headerMap, String(k).toLowerCase()),
+        forEach: (cb: (v: string, k: string) => void) =>
+            Object.keys(headerMap).forEach((k) => cb(headerMap[k], k)),
+        entries: () => Object.keys(headerMap).map((k) => [k, headerMap[k]] as [string, string]),
+        keys: () => Object.keys(headerMap),
+        values: () => Object.keys(headerMap).map((k) => headerMap[k]),
+    };
+    const toBytes = (): Uint8Array => {
+        const out = new Uint8Array(text.length);
+        for (let i = 0; i < text.length; i++) {
+            out[i] = text.charCodeAt(i) & 0xff;
+        }
+        return out;
+    };
+    const response: any = {
+        ok: status >= 200 && status < 300,
+        status,
+        statusText: "",
+        url,
+        redirected: false,
+        type: "basic",
+        headers,
+        text: () => Promise.resolve(text),
+        json: () => {
+            try {
+                return Promise.resolve(JSON.parse(text));
+            } catch (e: any) {
+                return Promise.reject(new SyntaxError(e?.message ?? "JSON 解析失败"));
+            }
+        },
+        arrayBuffer: () => Promise.resolve(toBytes().buffer),
+        blob: () =>
+            Promise.resolve({
+                size: text.length,
+                type: headerMap["content-type"] ?? "",
+                text: () => Promise.resolve(text),
+                arrayBuffer: () => Promise.resolve(toBytes().buffer),
+            }),
+        clone: () => response,
+    };
+    return response;
 }
 
 polyfillGlobals();
