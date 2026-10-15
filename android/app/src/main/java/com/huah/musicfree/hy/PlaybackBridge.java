@@ -28,9 +28,9 @@ import java.util.List;
  * 服务的事件经 setPlaybackListener 回到这里 notifyListeners("audioEvent")，
  * JS 侧 src/core/nativeAudio.ts 的 NativeAudioElement 代理接收。
  *
- * 队列归属：JS 把整条播放计划（元数据 + 可空 src）推给 pushQueuePlan，
- * 队列推进状态机在原生；原生缺源时经 needsource 事件索要，JS supplySource
- * 补源——JS 只是遥控器，后台连播不依赖 JS 存活。
+ * 队列归属：JS 把整条队列（元数据 + 可空 src + 曲目快照）经 setQueue 交给原生，
+ * 队列推进与音源解析都在原生（缺源条目临播前由 LazyAudioDataSource 跑 QuickJS
+ * 自己解析）；shuffle/repeat 也归原生。JS 只是遥控器，后台连播不依赖 JS 存活。
  */
 @CapacitorPlugin(
     name = "PlaybackBridge",
@@ -87,21 +87,25 @@ public class PlaybackBridge extends Plugin {
     }
 
     /**
-     * 整条播放计划入档：items = [{ mediaId, src, title, artist, album, artworkUri,
-     * payload, quality }]，按 JS 计算好的播放顺序排列（src 可为空串 = 顺序已定、
-     * 音源未解析）。payload 是曲目快照、quality 是请求音质：JS 冻结/被杀之后
-     * 原生引擎靠它俩自己跑 getMediaSource，把队列续下去。
-     * 替换当前可播窗之后的原生 shadow 队列；窗内条目不动（通知栏不闪）。
+     * 整条队列入档：items = [{ mediaId, src, title, artist, album, artworkUri,
+     * payload, quality }]，按播放顺序排列。
+     *
+     * src 可空：空表示「这条交给原生临播前解析」——条目以占位 URI 进播放器，
+     * ExoPlayer 预缓冲到它时由 LazyAudioDataSource 跑 QuickJS 拿直链。因此
+     * `payload` 是缺源条目的**必需**字段（没它就解析不了，会按坏条目跳过）。
+     *
+     * currentMediaId：新队列里哪一首是当前曲（保持不打断；传空则从队首开始）。
+     * shuffle/mode：播放顺序（mode = off | queue | single；queue 即随机播放）。
      */
     @PluginMethod
-    public void pushQueuePlan(PluginCall call) {
+    public void setQueue(PluginCall call) {
         MediaPlaybackService svc = activeService;
         if (svc == null) {
             call.reject("service unavailable");
             return;
         }
         JSArray items = call.getArray("items");
-        List<MediaPlaybackService.Planned> plan = new ArrayList<>();
+        List<MediaPlaybackService.Planned> queue = new ArrayList<>();
         if (items != null) {
             try {
                 for (int i = 0; i < items.length(); i++) {
@@ -113,7 +117,7 @@ public class PlaybackBridge extends Plugin {
                     if (mediaId.isEmpty()) {
                         continue;
                     }
-                    plan.add(new MediaPlaybackService.Planned(
+                    queue.add(new MediaPlaybackService.Planned(
                         mediaId,
                         o.optString("src", ""),
                         o.optString("title", ""),
@@ -125,15 +129,35 @@ public class PlaybackBridge extends Plugin {
                     ));
                 }
             } catch (Exception e) {
-                call.reject("pushQueuePlan failed: " + e.getMessage());
+                call.reject("setQueue failed: " + e.getMessage());
                 return;
             }
         }
-        svc.pushQueuePlan(plan);
+        svc.setQueue(
+            queue,
+            call.getString("currentMediaId", ""),
+            Boolean.TRUE.equals(call.getBoolean("shuffle", Boolean.FALSE)),
+            call.getString("mode", "off")
+        );
         call.resolve();
     }
 
-    /** payload 上限：超过就不进 shadow（原生解析用不到这么大快照，防内存膨胀） */
+    /** 播放顺序（shuffle/repeat 归原生）：mode = off | queue（随机）| single */
+    @PluginMethod
+    public void setPlaybackOrder(PluginCall call) {
+        MediaPlaybackService svc = activeService;
+        if (svc == null) {
+            call.reject("service unavailable");
+            return;
+        }
+        svc.setPlaybackOrder(
+            Boolean.TRUE.equals(call.getBoolean("shuffle", Boolean.FALSE)),
+            call.getString("mode", "off")
+        );
+        call.resolve();
+    }
+
+    /** payload 上限：超过就不收（原生解析用不到这么大快照，防内存膨胀） */
     private static final int MAX_PAYLOAD_JSON = 64 * 1024;
 
     /** 取条目里的曲目快照 JSON（缺失/超限/异常一律给空串 = 放弃原生解析该条） */
@@ -162,7 +186,7 @@ public class PlaybackBridge extends Plugin {
         }
     }
 
-    /** 补一条已解析音源（needsource 往返 / 缓存落盘本地化升级）；等源态补上即自动续播 */
+    /** 补一条已解析音源（JS 侧缓存落盘本地化 / 主动补源）：就地替换条目地址 */
     @PluginMethod
     public void supplySource(PluginCall call) {
         MediaPlaybackService svc = activeService;
@@ -174,7 +198,7 @@ public class PlaybackBridge extends Plugin {
         call.resolve();
     }
 
-    /** 撤下一条计划（JS 解析失败/冷却跳过）：shadow 或窗内命中都移除 */
+    /** 撤一条队列条目（JS 解析失败/冷却跳过） */
     @PluginMethod
     public void dropPlanned(PluginCall call) {
         MediaPlaybackService svc = activeService;
@@ -291,17 +315,6 @@ public class PlaybackBridge extends Plugin {
         }
         Double volume = call.getDouble("volume", 1d);
         svc.setVolume(volume == null ? 1f : volume.floatValue());
-        call.resolve();
-    }
-
-    @PluginMethod
-    public void setRepeatMode(PluginCall call) {
-        MediaPlaybackService svc = activeService;
-        if (svc == null) {
-            call.reject("service unavailable");
-            return;
-        }
-        svc.setRepeatMode(Boolean.TRUE.equals(call.getBoolean("repeatOne", Boolean.FALSE)));
         call.resolve();
     }
 

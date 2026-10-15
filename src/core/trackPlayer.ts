@@ -173,20 +173,18 @@ function bufferedEndAfter(audio: AudioBackend, position: number): number {
     return end;
 }
 
-/** ---------- 队列计划下沉（原生状态机的根基） ---------- */
+/** ---------- 队列下沉（原生播放器持有整条队列） ---------- */
 
 /**
- * 原生播放内核持有整条播放计划：JS 把播放顺序（含元数据）经 pushQueuePlan
- * 推给 ExoPlayer 侧的 shadow 队列，src 解析不出来的先占位（src=""）。
- * 预缓冲、逐首自动续播、通知栏切歌全原生完成；轮到未解析条目时原生发
- * needsource 索要，JS 解析后 supplySource 补上——等源态下补上即续播，
- * 不需要 JS「正好在换歌那一刻」活着。WebView 后端仍走下面的 probe 预载路径。
+ * v1.0.15：原生的播放列表就是**整条队列本身**（不再是「接下来 50 首」的计划
+ * 快照）。JS 把队列（顺序 + 元数据 + 曲目快照）经 setQueue 交给原生，缺源的
+ * 条目带上 payload 进列表，播放器预缓冲到它时由原生惰性解析——解析时机贴近
+ * 播放，直链不过期；shuffle/repeat 也归原生（ShuffleOrder / REPEAT_MODE_*）。
+ * JS 只剩三件事：装队列、簿记 transition、缓存预热（纯优化，不承担救场）。
+ * WebView 后端（浏览器 dev）仍走下面的 probe 预载路径。
  */
 
-/** 一次推给原生的计划条数（覆盖常见歌单长度；队列变动即重推，成本仅元数据） */
-const PLAN_MAX = 50;
-
-/** 主动补源的前瞻条数：JS 活着时多备几首，减少 needsource 往返 */
+/** 队列缓存预热的前瞻条数（纯优化：多备几首省一次解析，不做救场） */
 const PLAN_SUPPLY_AHEAD = 3;
 
 /** 结尾多少秒开始预加载下一首（仅 WebView 后端的 probe 路径使用） */
@@ -435,7 +433,7 @@ export function setDownloadedSourceResolver(
 
 /**
  * 「预载曲目元数据预登记」机制已随旧架构移除：队列计划条目自带元数据
- * （title/artist/album/artworkUri 随 pushQueuePlan 下发），通知栏由
+ * （title/artist/album/artworkUri 随队列下发），通知栏由
  * Media3 直接从 MediaItem 渲染，不再需要 JS 侧另行登记。
  */
 
@@ -509,7 +507,7 @@ class TrackPlayer extends EventEmitter {
     private planPushing = false;
     /** 计划会话序号：换歌 / 队列变动时作废在途推送 */
     private planSeq = 0;
-    /** 补源在途标记（needsource / 主动前瞻共用） */
+    /** 缓存预热在途标记（避免重入） */
     private planSupplying = false;
     /** 补源解析失败的曲键与时间：冷却期内不再撞同一个坏音源，冷却过 drop 跳过 */
     private supplyFailed = new Map<string, number>();
@@ -728,12 +726,8 @@ class TrackPlayer extends EventEmitter {
         }
         this.syncMediaSessionState();
         if (trackChanged || !this.planEntries.length) {
-            // 对齐后计划可能已经不对（推进过/被换过）：重推
+            // 对齐后队列可能已经不对（推进过/被换过）：重推
             this.maybePushPlan();
-        }
-        if (state.awaitingSource) {
-            // 原生停在等源态：立即补源续播（needsource 事件可能在冻结期丢了）
-            void this.supplyPlannedSources();
         }
     }
 
@@ -785,8 +779,6 @@ class TrackPlayer extends EventEmitter {
         audio.addEventListener("stalled", this.onAudioStall);
         // 仅原生后端会发：ExoPlayer 播完当前曲目自动续播预载的下一首
         audio.addEventListener("itemtransition", this.onItemTransition);
-        // 仅原生后端会发：计划轮到未解析的条目，向 JS 索要音源（补上即续播）
-        audio.addEventListener("needsource", this.onNeedSource);
     }
 
     private detachAudioListeners(audio: AudioBackend) {
@@ -800,7 +792,6 @@ class TrackPlayer extends EventEmitter {
         audio.removeEventListener("waiting", this.onAudioWaiting);
         audio.removeEventListener("stalled", this.onAudioStall);
         audio.removeEventListener("itemtransition", this.onItemTransition);
-        audio.removeEventListener("needsource", this.onNeedSource);
     }
 
     /** 彻底弃用一个播放器实例：摘掉监听，免得它的 pause/error 事件回头改状态 */
@@ -1337,16 +1328,22 @@ class TrackPlayer extends EventEmitter {
         if (!this._currentMusic) {
             return;
         }
-        // 原生后端 + 计划未完：只是下一条还没源（等源态）。补源即可让原生就地
-        // 续播——不走下面的 skipToNext/loadTrack 重装链路（那会清空通知栏尾部，
-        // 也和 needsource 的往返重复）。
+        // 原生后端 + 队列里还有歌：ended 只是「这首放完了」，下一首的装载与
+        // 解析全在原生（队列就在播放器里）——JS 不该再插手换歌，否则会和
+        // 原生的推进打架。这里只做簿记兜底：若原生已切到别的曲而 JS 还没跟上，
+        // 对账会把它拉齐（onItemTransition 正常路径更早生效）。
         {
             const audio = this.audio;
             if (audio instanceof NativeAudioElement) {
                 const st = await audio.queryNativeState();
-                if (st && (st.awaitingSource || st.plannedCount > 0)) {
-                    void this.supplyPlannedSources();
-                    return;
+                if (st && (st.currentMediaId || st.plannedCount > 0 || st.hasNext)) {
+                    if (st.currentMediaId && st.currentMediaId !== playListKey(this._currentMusic)) {
+                        await this.reconcileWithNative();
+                        return;
+                    }
+                    if (st.hasNext) {
+                        return; // 原生会自己续播下一条
+                    }
                 }
             }
         }
@@ -1574,47 +1571,42 @@ class TrackPlayer extends EventEmitter {
     }
 
     /**
-     * 队列计划推送：算出整条播放顺序 → 推给原生（连同元数据；已解析出源的条目
-     * 带上 src，其余 src 空由原生 needsource 往返补齐）。
-     * 推送本身只有顺序+元数据成本，队列变动/换歌/对账都可随做，不打扰窗内条目。
+     * 队列推送（v1.0.15 架构）：把**整条播放队列**交给原生，原生侧它就是
+     * ExoPlayer 的播放列表本身（不是「计划快照」）。
+     *
+     * 与旧 pushUpcomingPlan 的关键差别：
+     *  - 不截断（旧实现只推 computeUpcoming(50) 的「接下来 50 首」）；
+     *  - 不在这里解析音源——缺源的条目带 payload 进原生，播放器预缓冲到它时
+     *    才由 LazyAudioDataSource 解析（解析时机贴近播放，直链不过期）；
+     *  - 顺序由原生的 shuffle/repeat 决定，JS 不再「模拟消费」算顺序。
+     *
+     * 推送成本只是元数据 + payload 的 JSON，队列变动/开播/对账都可随做。
      */
-    private async pushUpcomingPlan() {
+    private async pushQueue() {
         const audio = this.audio;
         if (
             this.planPushing ||
             !(audio instanceof NativeAudioElement) ||
-            !this._currentMusic ||
-            !this._playList.length
+            !this._currentMusic
         ) {
             return;
         }
         this.planPushing = true;
         const seq = ++this.planSeq;
         try {
-            if (this._repeatMode === "single") {
-                // 单曲循环交给原生 REPEAT_ONE：计划清空即不续播
-                this.planSources.clear();
-                this.planEntries = [];
-                await audio.pushQueuePlan([]);
-                return;
-            }
-            const upcoming = await this.computeUpcoming(PLAN_MAX);
-            if (seq !== this.planSeq || this.audio !== audio) {
+            const queue = this._playList;
+            if (!queue.length) {
+                await audio.setQueue([], "", false, this._repeatMode);
                 return;
             }
             const items: IQueuePlanItem[] = [];
             const entries: string[] = [];
-            const nextSources = new Map<string, IPlanSource>();
-            for (const musicItem of upcoming) {
+            for (const musicItem of queue) {
                 const key = playListKey(musicItem);
-                // 解析失败的曲在冷却期内直接不进计划（与旧窗口镜像同规则）
-                const failedAt = this.supplyFailed.get(key);
-                if (failedAt && Date.now() - failedAt < NEXT_PRELOAD_RETRY_AFTER) {
-                    continue;
-                }
-                // 已有的解析记录随计划带走（src 不重复解析），元数据换新
+                // 已有的解析记录复用（本地文件 / 已落盘缓存 / 已解析直链）
                 const rec: IPlanSource = this.planSources.get(key) ?? { musicItem };
                 rec.musicItem = musicItem;
+                this.planSources.set(key, rec);
                 items.push({
                     mediaId: key,
                     src: rec.playSrc ?? "",
@@ -1626,29 +1618,35 @@ class TrackPlayer extends EventEmitter {
                         musicItem.artwork.length <= MAX_PERSISTED_ARTWORK
                             ? musicItem.artwork
                             : "",
-                    // 原生缺源时的自救依据：曲目快照 + 请求音质（JS 被冻结也能解析）
+                    // 原生惰性解析的依据：曲目快照 + 请求音质（JS 冻结也能解析）
                     payload: toPlanPayload(musicItem),
                     quality: planRequestedQuality(musicItem),
                 });
                 entries.push(key);
-                nextSources.set(key, rec);
             }
-            this.planSources = nextSources;
+            if (seq !== this.planSeq || this.audio !== audio) {
+                return;
+            }
             this.planEntries = entries;
-            await audio.pushQueuePlan(items);
-            console.info(
-                `[trackPlayer] 队列计划就位：${items.length} 首（已带源 ${items.filter((it) => it.src).length} 首）`,
+            await audio.setQueue(
+                items,
+                playListKey(this._currentMusic),
+                this._repeatMode === "queue",
+                this._repeatMode,
             );
-            // 计划就位后立刻补源：把计划里的缺失音源解析出来写回原生
-            void this.supplyPlannedSources();
+            console.info(
+                `[trackPlayer] 队列就位：${items.length} 首（已带源 ${items.filter((it) => it.src).length} 首，模式 ${this._repeatMode}）`,
+            );
+            // 队列就位后顺路预热缓存（纯优化：命中本地就省一次原生解析）
+            void this.warmQueueCache();
         } catch (e: any) {
-            console.warn("[trackPlayer] 队列计划推送失败", e?.message ?? e);
+            console.warn("[trackPlayer] 队列推送失败", e?.message ?? e);
         } finally {
             this.planPushing = false;
         }
     }
 
-    /** 计划推送触发守卫：原生后端、有装载中的曲、没有在途推送 */
+    /** 队列推送触发守卫：原生后端、有装载中的曲、没有在途推送 */
     private maybePushPlan() {
         const audio = this.audio;
         if (
@@ -1661,7 +1659,19 @@ class TrackPlayer extends EventEmitter {
         ) {
             return;
         }
-        void this.pushUpcomingPlan();
+        void this.pushQueue();
+    }
+
+    /**
+     * 顺序/循环模式变化（原生的 shuffle/repeat 已就位，这里只通知）：
+     * repeat 语义变化会改变「下一首是谁」，重推队列让原生重排。
+     */
+    private pushPlaybackOrder() {
+        const audio = this.audio;
+        if (!(audio instanceof NativeAudioElement)) {
+            return;
+        }
+        audio.setPlaybackOrder(this._repeatMode === "queue", this._repeatMode);
     }
 
     /**
@@ -1670,57 +1680,61 @@ class TrackPlayer extends EventEmitter {
      * ——等源态下写入即续播。needsource / 计划推送 / 回前台对账都会触发，
      * 前瞻 PLAN_SUPPLY_AHEAD 首减少原生往返。
      */
-    private async supplyPlannedSources() {
+    /**
+     * 队列缓存预热（v1.0.15）：音源解析已归原生（临播前惰性解析），JS 这边
+     * 只做「把队列前几首整首缓存下来」——下次播放直接命中本地文件，
+     * 顺带把已落盘的地址经 supplySource 写回原生（省一次解析）。
+     *
+     * 与旧的 supplyPlannedSources 不同：这里**不负责救场**。解析失败与否
+     * 由原生自己处理（失败就跳歌），JS 死亡也不影响队列推进。
+     */
+    private async warmQueueCache() {
         const audio = this.audio;
         if (this.planSupplying || !(audio instanceof NativeAudioElement)) {
             return;
         }
         this.planSupplying = true;
         try {
+            // 只预热当前曲之后的若干首（PLAN_SUPPLY_AHEAD）：把带宽留给正在播的
             for (let round = 0; round < PLAN_SUPPLY_AHEAD; round++) {
                 if (this.audio !== audio) {
-                    return; // 后端被换 / 彻底拆掉
+                    return;
                 }
                 const key = this.planEntries.find(
                     (id) => !this.planSources.get(id)?.playSrc,
                 );
                 if (!key) {
-                    return; // 计划内都可播：原生自己补窗续播
+                    return;
                 }
                 const rec = this.planSources.get(key)!;
                 try {
-                    const resolved = await this.resolveMediaUrl(rec.musicItem);
+                    // 已在本机（下载/缓存）：直接把本地地址写回原生，省一次解析
+                    const cached = await lookupCachedSrc(
+                        rec.musicItem,
+                        rec.resolved?.quality ?? null,
+                    );
                     if (this.audio !== audio || this.planSources.get(key) !== rec) {
-                        return; // 换歌 / 计划重建，交下一轮触发
+                        return;
                     }
-                    if (!resolved.ok) {
-                        throw new Error(resolved.reason);
+                    if (cached) {
+                        rec.playSrc = cached;
+                        await audio.supplySource(key, cached);
+                        continue;
                     }
-                    let playSrc = resolved.src;
-                    if (!rec.musicItem.localPath && !resolved.localDownload) {
-                        const cached = await lookupCachedSrc(rec.musicItem, resolved.quality);
-                        if (cached) {
-                            playSrc = cached;
-                        } else {
-                            // 顺路启动整首缓存，落盘后经 upgradePlanToLocal 换本地
-                            requestAudioCacheStore(rec.musicItem, resolved.quality, resolved.source);
-                        }
+                    if (rec.musicItem.localPath || rec.resolved?.localDownload) {
+                        continue; // 本地文件：原生自己有地址，不用预热
                     }
-                    rec.resolved = {
-                        src: resolved.src,
-                        source: resolved.source,
-                        quality: resolved.quality,
-                        localDownload: resolved.localDownload,
-                    };
-                    rec.playSrc = playSrc;
-                    await audio.supplySource(key, playSrc);
+                    // 未缓存：顺路启动整首缓存（落盘后 upgradePlanToLocal 换本地）
+                    if (rec.resolved?.source) {
+                        requestAudioCacheStore(
+                            rec.musicItem,
+                            rec.resolved.quality,
+                            rec.resolved.source,
+                        );
+                    }
                 } catch (e: any) {
-                    console.warn(`[trackPlayer] 补源失败 ${rec.musicItem.title}`, e?.message ?? e);
-                    // 记冷却并从计划与原生队列撤下（否则原生永远等在坏源队头）
-                    this.supplyFailed.set(key, Date.now());
-                    this.planEntries = this.planEntries.filter((id) => id !== key);
-                    this.planSources.delete(key);
-                    audio.dropPlanned(key);
+                    // 预热失败无所谓：真正的解析与失败处理都在原生
+                    console.warn(`[trackPlayer] 缓存预热跳过 ${rec.musicItem.title}`, e?.message ?? e);
                 }
             }
         } finally {
@@ -1728,15 +1742,7 @@ class TrackPlayer extends EventEmitter {
         }
     }
 
-    /**
-     * needsource：原生推进到缺源的计划条目（周期重发，JS 被节流/冻结醒来后
-     * 也会收到）。补源即可——等源态下原生补上当场续播，换歌簿记走 itemtransition。
-     */
-    private onNeedSource = () => {
-        void this.supplyPlannedSources();
-    };
-
-    /** 缓存落盘 → 计划条目升级本地文件（supplySource 就地替换，不动其余条目） */
+    /** 缓存落盘 → 队列条目升级本地文件（supplySource 就地替换，不动其余条目） */
     private async upgradePlanToLocal(mediaId: string) {
         const audio = this.audio;
         const rec = this.planSources.get(mediaId);
@@ -1749,7 +1755,7 @@ class TrackPlayer extends EventEmitter {
         }
         rec.playSrc = cached;
         await audio.supplySource(mediaId, cached).catch(() => {});
-        console.info(`[trackPlayer] 缓存落盘，计划条目本地化：${mediaId}`);
+        console.info(`[trackPlayer] 缓存落盘，队列条目本地化：${mediaId}`);
     }
 
     /**
@@ -1814,8 +1820,10 @@ class TrackPlayer extends EventEmitter {
             this.destroyAudioElement(preload.probe);
         }
         if (this.audio instanceof NativeAudioElement) {
-            // 清空计划：推送一个空列表（原生侧同时撤下窗内残留条目）
-            void this.audio.pushQueuePlan([]).catch(() => {});
+            // 清空队列（原生侧同时撤下播放器列表）
+            void this.audio
+                .setQueue([], "", false, this._repeatMode)
+                .catch(() => {});
         }
     }
 
@@ -2745,11 +2753,14 @@ class TrackPlayer extends EventEmitter {
         await this.play(musicItem, true);
     }
 
-    /** 单曲循环交给 audio.loop：播完无缝重头，消除 ended→seek(0)→play 的重新加载间隙 */
+    /** 单曲循环交给后端：原生 REPEAT_MODE_ONE（播完无缝重头）/ WebView audio.loop */
     private syncLoopFlag() {
-        if (this.audio) {
-            this.audio.loop = this._repeatMode === "single";
+        if (!this.audio) {
+            return;
         }
+        this.audio.loop = this._repeatMode === "single";
+        // 原生侧的顺序/循环归它自己：模式变化即通知（shuffle 对应 UI 的「随机」档）
+        this.pushPlaybackOrder();
     }
 
     toggleRepeatMode() {
@@ -2760,7 +2771,7 @@ class TrackPlayer extends EventEmitter {
         setAtom(repeatModeAtom, next);
         localStorage.setItem("repeatMode", next);
         this.syncLoopFlag();
-        // 模式改变计划语义（single=清空 / queue=随机序）：重推
+        // 模式改变队列语义（single=单曲循环 / queue=随机序）：重推队列让原生重排
         this.maybePushPlan();
     }
 

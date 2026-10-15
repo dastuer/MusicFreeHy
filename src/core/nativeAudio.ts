@@ -2,12 +2,12 @@
  * 原生音频后端（Android）：把 MediaPlaybackService 里的 ExoPlayer 伪装成
  * HTMLAudioElement。
  *
- * 播放内核（ExoPlayer + MediaSession）住在前台服务里、持有**整条播放计划**：
- * JS 把播放顺序连同元数据经 pushQueuePlan 推给原生（src 可为空=未解析），
- * 队列推进的状态机在原生：预缓冲/自动续播/通知栏切歌全原生完成；解析位缺源
- * 时原生经 needsource 事件向 JS 索要，JS resolveMediaUrl 后经 supplySource 补上
- * ——若在等源态，补源即自动续播，不依赖回前台对账。后台连播不依赖 JS 存活。
- * JS 侧只做三件事：装载当前曲、推计划、按需补源（+换歌簿记 itemtransition）。
+ * 播放内核（ExoPlayer + MediaSession）住在前台服务里、持有**整条播放队列**：
+ * JS 把队列（顺序 + 元数据 + 曲目快照）经 setQueue 交给原生，它就是播放器
+ * 的播放列表本身。缺源条目以占位 URI 进列表，ExoPlayer 预缓冲到它时才由
+ * 原生（QuickJS）解析真实直链——解析时机贴近播放，直链不过期；队列推进、
+ * shuffle/repeat、通知栏切歌全在原生。JS 只做三件事：装队列、transition
+ * 簿记、缓存预热（纯优化）。后台连播完全不依赖 JS 存活。
  *
  * 对 trackPlayer 呈现与 <audio> 相同的接口（属性 + 事件 + play() 返回
  * promise），播放主流程不用感知后端差异。插件缺失时 createAudioElement()
@@ -78,7 +78,7 @@ export interface INativeAudioState {
     hasNext: boolean;
     /** 队列未完但下一条缺音源，原生已停在等源态（补源即自动续播） */
     awaitingSource: boolean;
-    /** 原生 shadow 计划里未入窗的条目数 */
+    /** 队列里当前曲之后的条目数 */
     plannedCount: number;
 }
 
@@ -171,7 +171,7 @@ export class NativeAudioElement {
             .catch(() => {});
         // 装载元数据随行：通知栏/锁屏直接显示（不再走 metadata 上报通道）。
         // payload/quality 是当前曲的自救依据：直链过期时原生拿它重跑
-        // getMediaSource 原地换源（当前曲不在 pushQueuePlan 里，只能从这里带）。
+        // getMediaSource（这条的自救依据，与队列条目同规则）。
         callNativeMethod(PLUGIN, "loadTrack", {
             src: this._src,
             mediaId: this._mediaId,
@@ -247,7 +247,11 @@ export class NativeAudioElement {
 
     set loop(l: boolean) {
         this._loop = !!l;
-        callNativeMethod(PLUGIN, "setRepeatMode", { repeatOne: this._loop }).catch(() => {});
+        // 单曲循环走原生的顺序/循环接口（repeat 语义由 setPlaybackOrder 统一管）
+        callNativeMethod(PLUGIN, "setPlaybackOrder", {
+            shuffle: this._shuffleRequested,
+            mode: this._loop ? "single" : this._modeRequested,
+        }).catch(() => {});
     }
 
     get autoplay(): boolean {
@@ -267,8 +271,8 @@ export class NativeAudioElement {
 
     /**
      * 当前曲的曲目快照与请求音质（随 loadTrack 下发）。原生侧在直链过期时
-     * 用它重跑 getMediaSource 原地换源——当前曲不在 pushQueuePlan 里
-     * （那推的是「接下来的」），所以只能从 loadTrack 这条路带给原生。
+     * 用它重跑 getMediaSource——队列条目的快照本来就随队列下发，这里给的是
+     * 「当前曲」那一份（JS 装载时顺手带上，成本为零）。
      */
     private _payload: Record<string, unknown> | null = null;
     private _quality: string | null = null;
@@ -429,15 +433,38 @@ export class NativeAudioElement {
     // ---------- 原生播放内核专属 ----------
 
     /**
-     * 整条播放计划入档：按 JS 算好的顺序替换原生 shadow 队列（当前可播窗不动）。
-     * src 为空的条目 = 顺序已定、音源未解析，原生轮到它时经 needsource 索要。
+     * 整条队列入档（v1.0.15）：items 按播放顺序排列，原生侧它就是 ExoPlayer
+     * 的播放列表本身。src 为空的条目 = 交给原生临播前惰性解析（靠 payload）。
+     * currentMediaId 指定当前曲（保持不打断）；shuffle/mode 决定推进顺序。
      */
-    async pushQueuePlan(items: IQueuePlanItem[]): Promise<void> {
+    async setQueue(
+        items: IQueuePlanItem[],
+        currentMediaId: string,
+        shuffle: boolean,
+        mode: string,
+    ): Promise<void> {
         this.plannedSrcs = new Map(items.filter((it) => it.src).map((it) => [it.mediaId, it.src]));
-        await callNativeMethod(PLUGIN, "pushQueuePlan", { items });
+        await callNativeMethod(PLUGIN, "setQueue", {
+            items,
+            currentMediaId,
+            shuffle,
+            mode,
+        });
     }
 
-    /** 补一条已解析音源（needsource 往返 / 缓存落盘本地化升级）；等源态补上即自动续播 */
+    /** 播放顺序（shuffle/repeat 归原生）：mode = off | queue（随机）| single */
+    setPlaybackOrder(shuffle: boolean, mode: string): void {
+        this._shuffleRequested = shuffle;
+        this._modeRequested = mode;
+        this._loop = mode === "single";
+        callNativeMethod(PLUGIN, "setPlaybackOrder", { shuffle, mode }).catch(() => {});
+    }
+
+    /** 最近一次声明的顺序设置：loop setter 重发时要带上它，避免把 shuffle 抹掉 */
+    private _shuffleRequested = false;
+    private _modeRequested = "off";
+
+    /** 补一条已解析音源（缓存落盘本地化 / 主动补源）：就地替换条目地址 */
     async supplySource(mediaId: string, src: string): Promise<void> {
         if (src) this.plannedSrcs.set(mediaId, src);
         await callNativeMethod(PLUGIN, "supplySource", { mediaId, src });
@@ -632,12 +659,6 @@ export class NativeAudioElement {
                 }
                 this._ended = false;
                 payload = { mediaId, index: Number(data.index) || 0 };
-                break;
-            }
-            case "needsource": {
-                // 原生缺源索求：trackPlayer 解析后经 supplySource 补上（等源态下补上即续播）
-                const mediaId = String(data.mediaId ?? "");
-                payload = { mediaId, plannedCount: Number(data.plannedCount) || 0 };
                 break;
             }
             case "error": {
