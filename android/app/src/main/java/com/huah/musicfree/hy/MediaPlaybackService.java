@@ -775,6 +775,35 @@ public class MediaPlaybackService extends MediaSessionService {
             applyOrderMode(shuffle, mode);
 
             String current = currentMediaId == null ? "" : currentMediaId;
+            // 幂等 guard：JS 的 playing/对账路径会重复推送完全相同的队列，
+            // setMediaItems 即使内容不变也会 reset 播放器（pause→playing 拉锯，
+            // 前台有 JS 存活时复现、后台冻结时自愈）。列表一致时只做增量替换。
+            if (isSamePlaylist(mediaItems)) {
+                for (int i = 0; i < mediaItems.size() && i < player.getMediaItemCount(); i++) {
+                    MediaItem cur = player.getMediaItemAt(i);
+                    MediaItem next = mediaItems.get(i);
+                    String curUri = cur != null && cur.localConfiguration != null
+                        && cur.localConfiguration.uri != null
+                        ? cur.localConfiguration.uri.toString() : "";
+                    String nextUri = next.localConfiguration != null
+                        && next.localConfiguration.uri != null
+                        ? next.localConfiguration.uri.toString() : "";
+                    if (!curUri.equals(nextUri)) {
+                        player.replaceMediaItem(i, next);
+                    }
+                }
+                // 当前曲已是原生正在播的：不动播放位置与播放意图
+                if (!current.isEmpty() && !current.equals(currentMediaId())) {
+                    int targetSame = indexOfMediaId(current);
+                    if (targetSame >= 0) {
+                        player.seekTo(targetSame, 0L);
+                        player.prepare();
+                        player.setPlayWhenReady(true);
+                    }
+                }
+                scheduleQueuePersist();
+                return;
+            }
             int existingIndex = indexOfMediaId(current);
             int target = 0;
             if (!current.isEmpty()) {
@@ -789,11 +818,12 @@ public class MediaPlaybackService extends MediaSessionService {
                 && current.equals(currentMediaId())
                 && player.getPlaybackState() != Player.STATE_IDLE;
             if (keepPlaying) {
-                // 当前曲没变、也没被换掉：只重排其后的列表，不打断正在播的这首。
-                // 做法与旧 pushQueuePlan 的「窗内条目保留」同思路，但范围是整队。
+                // 当前曲没变：把新列表定位到该曲在**新列表**中的位置（target），
+                // 保留播放位置与播放意图。注意不能用 existingIndex——它是旧播放器
+                // 列表里的下标（如 loadTrack 后的单条列表里恒为 0），用它会跳回第一首。
                 long pos = player.getCurrentPosition();
                 boolean wasPlaying = player.getPlayWhenReady();
-                player.setMediaItems(mediaItems, existingIndex, pos);
+                player.setMediaItems(mediaItems, target, pos);
                 player.setPlayWhenReady(wasPlaying);
             } else {
                 boolean wasPlaying = player.getPlayWhenReady();
@@ -1144,6 +1174,26 @@ public class MediaPlaybackService extends MediaSessionService {
             }
         }
         return -1;
+    }
+
+    /** 新队列与播放器现有列表的 mediaId 顺序是否完全一致（幂等 guard 用） */
+    private boolean isSamePlaylist(java.util.List<MediaItem> next) {
+        if (player == null || next == null) {
+            return false;
+        }
+        if (player.getMediaItemCount() != next.size()) {
+            return false;
+        }
+        for (int i = 0; i < next.size(); i++) {
+            MediaItem a = player.getMediaItemAt(i);
+            MediaItem b = next.get(i);
+            String ida = a == null ? "" : String.valueOf(a.mediaId);
+            String idb = b == null ? "" : String.valueOf(b.mediaId);
+            if (!ida.equals(idb)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** 占位 URI：惰性解析的触发标记（ExoPlayer 预缓冲到它才去要真实直链） */

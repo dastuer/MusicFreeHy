@@ -503,6 +503,9 @@ class TrackPlayer extends EventEmitter {
     private planSources: Map<string, IPlanSource> = new Map();
     /** 推送给原生的计划顺序（mediaId 列表）：补源按此序推进 */
     private planEntries: string[] = [];
+    /** 上次完整推送的签名（队列+当前曲+模式）：相同则跳过 setQueue，
+     * 否则每次 playing 事件重推都会 reset 播放器导致 前台 pause/play 拉锯 */
+    private lastPushSignature = "";
     /** 计划推送流程启动中（防 transition / visibilitychange / 队列变动重入） */
     private planPushing = false;
     /** 计划会话序号：换歌 / 队列变动时作废在途推送 */
@@ -1597,6 +1600,8 @@ class TrackPlayer extends EventEmitter {
             const queue = this._playList;
             if (!queue.length) {
                 await audio.setQueue([], "", false, this._repeatMode);
+                this.planEntries = [];
+                this.lastPushSignature = "";
                 return;
             }
             const items: IQueuePlanItem[] = [];
@@ -1627,6 +1632,15 @@ class TrackPlayer extends EventEmitter {
             if (seq !== this.planSeq || this.audio !== audio) {
                 return;
             }
+            const currentKey = this._currentMusic ? playListKey(this._currentMusic) : "";
+            const signature = `${entries.join(",")}#${currentKey}#${this._repeatMode}`;
+            if (signature === this.lastPushSignature && this.planEntries.length === entries.length) {
+                // 队列/当前曲/模式都没变：原生侧列表已是这个样子，
+                // 重推 setMediaItems 会打断正在播的歌（前台 pause/play 拉锯，
+                // 后台因 JS 冻结不推反而能播）。直接跳过，只补缓存预热。
+                void this.warmQueueCache();
+                return;
+            }
             this.planEntries = entries;
             await audio.setQueue(
                 items,
@@ -1634,6 +1648,7 @@ class TrackPlayer extends EventEmitter {
                 this._repeatMode === "queue",
                 this._repeatMode,
             );
+            this.lastPushSignature = signature;
             console.info(
                 `[trackPlayer] 队列就位：${items.length} 首（已带源 ${items.filter((it) => it.src).length} 首，模式 ${this._repeatMode}）`,
             );
@@ -1805,8 +1820,10 @@ class TrackPlayer extends EventEmitter {
 
     /**
      * 作废在途预加载与队列计划：队列变动 / 换歌 / 换音质 / 改重复模式都会走到这里。
-     * WebView 后端要销毁预缓冲元素；原生后端要撤下已推送的计划（含窗内条目），否则
-     * ExoPlayer 会在当前曲播完自动续播一首 JS 侧已经不认的歌。
+     * 只做 JS 侧簿记（序号作废、计划记录清空、预缓冲元素销毁），不碰原生播放器列表：
+     * 换歌路径由 detachAudio（removeAttribute("src") → stop）负责清空，队列追加/删除/
+     * 排序/切循环模式只会触发重推（keepPlaying 分支原位保留当前曲），若在这里整队
+     * 清空会导致当前曲被 stop 后从头重播。
      * 队列变动后应紧跟一次 maybePushPlan 重建计划（换歌链路由 playing 事件重建）。
      */
     abortNextTrackPreload() {
@@ -1816,14 +1833,9 @@ class TrackPlayer extends EventEmitter {
         this.nextPreload = null;
         this.planSources.clear();
         this.planEntries = [];
+        this.lastPushSignature = "";
         if (preload?.probe) {
             this.destroyAudioElement(preload.probe);
-        }
-        if (this.audio instanceof NativeAudioElement) {
-            // 清空队列（原生侧同时撤下播放器列表）
-            void this.audio
-                .setQueue([], "", false, this._repeatMode)
-                .catch(() => {});
         }
     }
 
