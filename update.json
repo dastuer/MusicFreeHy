@@ -1,7 +1,7 @@
 {
-  "versionCode": 14,
-  "versionName": "1.0.13",
-  "changelog": "- 修复：备份到本地在 Android/iOS 原生包上没落盘（<a download> 被 WebView 静默丢弃），改走原生写盘：Android 到 内部存储/Download，iOS 到「文件」App / MusicFree\n- 备份成功提示带完整路径；缺「所有文件访问」权限时明确失败并跳系统授权页，不再静默",
-  "apkUrl": "https://gitee.com/huaihui/MusicFreeHy/releases/download/v1.0.13/MusicFreeHy-1.0.13.apk",
-  "publishedAt": "2026-10-15"
+  "versionCode": 15,
+  "versionName": "1.0.14",
+  "changelog": "- 后台播放架构收口：整条队列交给原生播放器，直链临近播放才解析；页面被冻结、进程被杀都能续播到底，随机/循环/下一首由播放器自己推进\n- 进程被系统回收后重进：队列、当前曲、进度、随机与循环原样恢复，不再回到第一首\n- 直链失效先原地换源续播，不再直接跳歌；缺源整队跳歌问题修复\n- 锁屏/通知栏卡片可点回 App，上一首·暂停·下一首可用\n- 修复回到前台后 pause/play 反复横跳打断播放",
+  "apkUrl": "https://gitee.com/huaihui/MusicFreeHy/releases/download/v1.0.14/MusicFreeHy-1.0.14.apk",
+  "publishedAt": "2026-10-16"
 }
