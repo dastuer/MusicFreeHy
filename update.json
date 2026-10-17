@@ -1,7 +1,7 @@
 {
-  "versionCode": 15,
-  "versionName": "1.0.14",
-  "changelog": "- 后台播放架构收口：整条队列交给原生播放器，直链临近播放才解析；页面被冻结、进程被杀都能续播到底，随机/循环/下一首由播放器自己推进\n- 进程被系统回收后重进：队列、当前曲、进度、随机与循环原样恢复，不再回到第一首\n- 直链失效先原地换源续播，不再直接跳歌；缺源整队跳歌问题修复\n- 锁屏/通知栏卡片可点回 App，上一首·暂停·下一首可用\n- 修复回到前台后 pause/play 反复横跳打断播放",
-  "apkUrl": "https://gitee.com/huaihui/MusicFreeHy/releases/download/v1.0.14/MusicFreeHy-1.0.14.apk",
-  "publishedAt": "2026-10-16"
+  "versionCode": 16,
+  "versionName": "1.0.15",
+  "changelog": "- 新增「硬件音频直通（后台防卡顿）」开关（默认开）：解码交给 DSP，打开其他应用抢 CPU 时后台播放不再卡顿；个别 ROM 兼容问题可在设置关闭\n- 「上一首」改为按真实播放历史回退（重启后也有效），不再受队列顺序影响\n- 修复排行榜左滑进「我的」过渡途中底部一行被截断\n- 进度条游标加载中常显；点歌、播放队列不再闪背景",
+  "apkUrl": "https://gitee.com/huaihui/MusicFreeHy/releases/download/v1.0.15/MusicFreeHy-1.0.15.apk",
+  "publishedAt": "2026-10-17"
 }
