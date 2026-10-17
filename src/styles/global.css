@@ -499,9 +499,10 @@ img {
 .mine-cross-pane {
     margin-top: calc(-50px - var(--safe-top));
     height: calc(100% + 50px + var(--safe-top));
-    /* 内容底部多补一段被上移借走的高度：跨页滑动经过时最后一行歌单
-       不被底部播放条 / Tab 栏盖住（确认后由 .home-pane 的 padding 接管） */
-    padding-bottom: calc(16px + var(--safe-bottom));
+    /* 跨页副本必须与路由层真实「我的」页逐像素一致：这里只补回被上移借走的
+       顶栏高度，滚动视口不能再缩（.home-pane 自带的 padding-bottom 会让副本
+       视口比真实页少 16px+safe-bottom，过渡途中底部整行被裁、切完才恢复） */
+    padding-bottom: 0;
 }
 
 .home-topbar {
