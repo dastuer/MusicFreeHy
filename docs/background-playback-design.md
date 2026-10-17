@@ -30,7 +30,8 @@ MediaPlaybackService（Media3 MediaSessionService 前台服务，Android 原生�
    │   excludeUrl）；重试上限后跳下一首；连续多首失败才停
    ├─ 队列快照（v1.0.14 起）：整队 + 当前索引/位置/模式/焦点落盘，
    │   冷启动 restoreQueueState 挂回（不自动开播）+ onPlaybackResumption
-   ├─ ExoPlayer：OkHttp 数据源 / 30~60s 大缓冲 / WAKE_MODE_NETWORK / 输出缓冲≥500ms
+   ├─ ExoPlayer：OkHttp 数据源 / 30~60s 大缓冲 / WAKE_MODE_NETWORK /
+   │   音频硬件直通（offload）+ 输出缓冲 1~2s（回退路径）
    │   └─ ResolvingDataSource：按 URI 注入插件返回的请求头
    └─ MediaSession：通知栏、耳机、蓝牙、锁屏（系统渲染，不经 JS）
 ```
@@ -157,8 +158,21 @@ ExoPlayer **默认不入音频焦点仲裁**（`focusEnabled=false`）：抖音�
 
 ### 2.9 性能
 
-- 输出缓冲下限 500ms（`DefaultRenderersFactory.buildAudioSink` 覆写
-  `setMinPcmBufferDurationUs`）——吸收新应用冷启动的调度尖峰；
+后台播放时「打开其他应用就卡顿」的根因是**应用 CPU 被对方冷启动抢占**：
+普通解码路径下渲染/灌音线程要被调度才出声，被饿死即欠载。两层应对：
+
+- **音频硬件直通（Audio Offload，v1.0.15 新增，默认开）**：`ExoPlayer` 经
+  `TrackSelectionParameters#setAudioOffloadPreferences`（`AUDIO_OFFLOAD_MODE_ENABLED`，
+  gapless/倍速要求均为 false）把 MP3/AAC/FLAC 等交给 DSP 解码，硬件按自己的
+  时钟推进、几乎不吃应用 CPU——其他应用冷启动抢 CPU 也压不垮。仅设备与格式
+  都支持时生效，否则 Media3 自动回退普通解码（无副作用）。用户改倍速时自动
+  回退。设置页「硬件音频直通（后台防卡顿）」可关（个别 ROM 直通有兼容问题）。
+  开关随队列快照落盘（`audioOffload` 字段）并在服务重建后重申。
+- **输出缓冲 1~2s**（`DefaultRenderersFactory.buildAudioSink` 覆写
+  `setMinPcmBufferDurationUs(1s)` / `setMaxPcmBufferDurationUs(2s)`）——**回退
+  路径**（格式不支持直通时）抗调度尖峰的主力，替代此前的 500ms；Software-only
+  解码时靠它顶着出声。注意 offload 走独立的 50s 预灌缓冲，不经过这里的 PCM
+  缓冲设置；
 - ~~WebView 静音保活 WAV + MainActivity 钉 renderer IMPORTANT~~（v1.0.14 删除）：
   实测对 renderer 冻结无效，续播可靠性完全由原生侧承担；
 - `ensureService` 用普通 `startService`（前台服务 5s 超时被杀的教训），
@@ -233,6 +247,10 @@ timeupdate(每 1s 带数值载荷)/durationchange/itemtransition(mediaId,index)/
 13. **队列快照恢复后不自动开播**：进程被杀重启后面板显示上次队列、停在暂停态，
     需用户点播放（或从系统媒体恢复卡片）。这是有意选择（与原生播放器语义一致），
     若希望「开机自动续播」需另做开关。
+14. **硬件直通（offload）缺机型覆盖验证**：offload 在设备与格式都支持时启用，
+    不支持自动回退；`AudioOffloadListener` 的「已启用/回退」日志可用来确认某
+    机型/某音源是否真的走了直通。少数 ROM 直通实现有兼容问题（无声/爆音），
+    设置页开关可关。真机长时后台 + 弱网 + 直通组合仍需回归（接 §四.6）。
 
 ## 五、验证方式速查
 

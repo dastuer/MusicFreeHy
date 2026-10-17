@@ -14,6 +14,7 @@ import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MediaMetadata;
 import androidx.media3.common.Player;
+import androidx.media3.common.TrackSelectionParameters;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.datasource.DataSource;
 import androidx.media3.datasource.DefaultDataSource;
@@ -220,6 +221,20 @@ public class MediaPlaybackService extends MediaSessionService {
      * 设置页「允许与其他应用同时播放」可显式切回独占模式（true）。
      */
     private volatile boolean focusEnabled = false;
+    /**
+     * 音频硬件直通（Audio Offload）开关，默认 true。
+     *
+     * 「打开其他应用时卡顿」的根因是**应用 CPU 被对方冷启动抢占**：普通路径下
+     * ExoPlayer 的渲染/灌音线程要被调度才出声，被饿死就欠载、听感卡顿（大输出
+     * 缓冲只能吸收到缓冲区时长内的尖峰）。直通模式把解码交给 DSP，音频硬件按
+     * 自己的时钟推进，几乎不依赖应用 CPU——这正是所有主流音乐 App 的后台方案。
+     *
+     * 只在设备与音源格式都支持时生效（MP3/AAC/FLAC 等，Android 10 起较普遍），
+     * 不支持时 Media3 自动回退普通解码（无副作用）；部分 ROM 直通实现有兼容
+     * 问题可由设置项关闭。另注意：offload 会走独立的 50s 预灌缓冲，PCM 输出
+     * 缓冲（见 createPlayer）只在回退路径生效。
+     */
+    private volatile boolean audioOffloadEnabled = true;
     private final android.os.Handler main =
         new android.os.Handler(android.os.Looper.getMainLooper());
 
@@ -508,10 +523,12 @@ public class MediaPlaybackService extends MediaSessionService {
             )
             .build();
 
-        // 音频输出缓冲下限 500ms（平台默认约 20~100ms）：其他应用冷启动的调度
-        // 尖峰（CPU/IO 被抢占、音频线程短暂饿死）只要不超过这个余量，AudioTrack
-        // 靠存量数据顶着继续出声，听感上就是「无感平滑」。Media3 的 ExoPlayer.Builder
-        // 没有直接的 setAudioSink，经 RenderersFactory 覆写 buildAudioSink 注入。
+        // 音频输出缓冲 1~2s（平台默认约 20~100ms，Media3 默认下限 250ms/上限
+        // 750ms）：这是**回退路径**（音源不支持直通时）抗 CPU 调度尖峰的主力——
+        // 其他应用冷启动抢占 CPU/IO、音频线程短暂饿死时，AudioTrack 靠存量数据
+        // 顶着继续出声。1s 余量足够覆盖绝大多数冷启动尖峰，2s 上限留足余量。
+        // Media3 的 ExoPlayer.Builder 没有直接的 setAudioSink，经 RenderersFactory
+        // 覆写 buildAudioSink 注入。
         DefaultRenderersFactory renderersFactory =
             new DefaultRenderersFactory(this) {
                 @Override
@@ -522,7 +539,8 @@ public class MediaPlaybackService extends MediaSessionService {
                     return new DefaultAudioSink.Builder(context)
                         .setAudioTrackBufferSizeProvider(
                             new DefaultAudioTrackBufferSizeProvider.Builder()
-                                .setMinPcmBufferDurationUs(500_000) // 500ms（单位：微秒）
+                                .setMinPcmBufferDurationUs(1_000_000) // 下限 1s（微秒）
+                                .setMaxPcmBufferDurationUs(2_000_000) // 上限 2s
                                 .build())
                         .build();
                 }
@@ -542,7 +560,48 @@ public class MediaPlaybackService extends MediaSessionService {
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build();
         p.setAudioAttributes(attrs, focusEnabled);
+        // 音频硬件直通：默认偏好开关见字段注释。TrackSelectionParameters 只能经
+        // Player.setTrackSelectionParameters 下发（ExoPlayer.Builder 没有对应入口）。
+        applyAudioOffload(p);
+        p.addAudioOffloadListener(new ExoPlayer.AudioOffloadListener() {
+            @Override
+            public void onOffloadedPlayback(boolean isOffloaded) {
+                Log.i(TAG, "音频直通(offload)：" + (isOffloaded ? "已启用（DSP 解码）" : "未启用/回退"));
+            }
+        });
         return p;
+    }
+
+    /**
+     * 把硬件直通偏好下发给轨道选择器。offload 只在「设备支持该格式 + 单音轨」
+     * 时生效，不支持则选普通轨自动回退，不会导致播不出声。
+     * gapless/倍速要求都设为 false：本应用音源多为单曲流，且倍速为低频功能——
+     * 要求满足会大幅收窄可用直通的机型；用户改倍速时 Media3 会自动回退普通解码。
+     */
+    private void applyAudioOffload(ExoPlayer p) {
+        TrackSelectionParameters.AudioOffloadPreferences prefs =
+            new TrackSelectionParameters.AudioOffloadPreferences.Builder()
+                .setAudioOffloadMode(audioOffloadEnabled
+                    ? TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED
+                    : TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED)
+                .setIsGaplessSupportRequired(false)
+                .setIsSpeedChangeSupportRequired(false)
+                .build();
+        p.setTrackSelectionParameters(
+            new TrackSelectionParameters.Builder(this)
+                .setAudioOffloadPreferences(prefs)
+                .build());
+    }
+
+    /** 设置页「硬件音频直通」开关（默认开）：改完即时生效，无需重装载 */
+    void setAudioOffloadEnabled(boolean enabled) {
+        audioOffloadEnabled = enabled;
+        runOnMain(() -> {
+            if (player != null) {
+                applyAudioOffload(player);
+                Log.i(TAG, "音频直通(offload)偏好更新：" + (enabled ? "开启" : "关闭"));
+            }
+        });
     }
 
     @Override
@@ -1354,6 +1413,7 @@ public class MediaPlaybackService extends MediaSessionService {
                 : rm == Player.REPEAT_MODE_ALL ? "queue" : "off");
             root.put("shuffle", player.getShuffleModeEnabled());
             root.put("focusEnabled", focusEnabled);
+            root.put("audioOffload", audioOffloadEnabled);
             root.put("savedAt", System.currentTimeMillis());
             return root.toString();
         } catch (Throwable t) {
@@ -1415,6 +1475,7 @@ public class MediaPlaybackService extends MediaSessionService {
             applyOrderMode(root.optBoolean("shuffle", false),
                 root.optString("mode", "off"));
             setAudioFocusMode(root.optBoolean("focusEnabled", false));
+            setAudioOffloadEnabled(root.optBoolean("audioOffload", true));
             // 不 prepare、不 setPlayWhenReady：等用户按播放
             Log.i(TAG, "队列快照恢复：" + mediaItems.size() + " 首，停在索引 " + index
                 + "（缺源的条目播放时再解析）");

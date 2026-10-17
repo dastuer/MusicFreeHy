@@ -2,11 +2,18 @@ import { useEffect, useMemo, useState } from "react";
 import { useAtomValue } from "jotai";
 import { goBack, navigate } from "@/core/router";
 import { useThemeSetting, setTheme } from "@/core/theme";
-import { getQuality, setQuality, getAllowCoPlay, setAllowCoPlay } from "@/core/appConfig";
+import {
+    getQuality,
+    setQuality,
+    getAllowCoPlay,
+    setAllowCoPlay,
+    getAllowAudioOffload,
+    setAllowAudioOffload,
+} from "@/core/appConfig";
 import { getDownloadSaveTarget, downloadSaveTargetLabel } from "@/core/musicDownload";
 import { APP_VERSION } from "@/core/backup";
 import { manualCheckForUpdate, getLocalVersion } from "@/core/appUpdate";
-import { setDefaultQuality, applyCoPlaySessionType } from "@/core/trackPlayer";
+import { setDefaultQuality, applyCoPlaySessionType, applyAudioOffloadSetting } from "@/core/trackPlayer";
 import { getProxyBase } from "@/core/net";
 import { isNative } from "@/core/native";
 import {
@@ -52,6 +59,7 @@ const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
         localStorage.getItem("rememberProgress") !== "false",
     );
     const [allowCoPlay, setAllowCoPlayState] = useState(getAllowCoPlay());
+    const [allowAudioOffload, setAllowAudioOffloadState] = useState(getAllowAudioOffload());
     const [cacheLimit, setCacheLimitState] = useState(getAudioCacheLimitMB());
     // 检查更新：value 常驻展示版本号（原生读安装包真实版本，浏览器回退内置常量）
     const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -225,6 +233,25 @@ const QUALITY_OPTIONS: { key: IMusic.IQualityKey; label: string }[] = [
                     <span className="settings-row-label">允许与其他应用同时播放</span>
                     <div className={`plugin-switch ${allowCoPlay ? "on" : ""}`} />
                 </div>
+                {isAndroidNative() && (
+                    <div
+                        className="settings-row"
+                        onClick={() => {
+                            const next = !allowAudioOffload;
+                            setAllowAudioOffloadState(next);
+                            setAllowAudioOffload(next);
+                            applyAudioOffloadSetting();
+                            showToast(
+                                next
+                                    ? "已开启硬件音频直通，后台播放更稳"
+                                    : "已关闭硬件音频直通，回退普通解码",
+                            );
+                        }}
+                    >
+                        <span className="settings-row-label">硬件音频直通（后台防卡顿）</span>
+                        <div className={`plugin-switch ${allowAudioOffload ? "on" : ""}`} />
+                    </div>
+                )}
                 {isAndroidNative() && (
                     <div
                         className="settings-row"

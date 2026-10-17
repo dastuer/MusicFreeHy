@@ -33,3 +33,16 @@ export function getAllowCoPlay(): boolean {
 export function setAllowCoPlay(v: boolean) {
     setConfig("allowCoPlay", v);
 }
+
+/**
+ * 硬件音频直通（Audio Offload）：默认开。
+ * 打开其他应用抢占 CPU 时由 DSP 解码出声、几乎不吃应用 CPU，后台更稳；
+ * 个别 ROM 直通兼容性差（无声/爆音）时可关，回退普通解码。
+ */
+export function getAllowAudioOffload(): boolean {
+    return getConfig("allowAudioOffload", true);
+}
+
+export function setAllowAudioOffload(v: boolean) {
+    setConfig("allowAudioOffload", v);
+}

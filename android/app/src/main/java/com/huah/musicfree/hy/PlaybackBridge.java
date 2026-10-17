@@ -331,6 +331,23 @@ public class PlaybackBridge extends Plugin {
         call.resolve();
     }
 
+    /**
+     * 音频硬件直通（Audio Offload）开关：默认开。打开其他应用时 CPU 被抢占，
+     * 直通让 DSP 解码出声、几乎不吃应用 CPU，是后台防卡顿的主力手段；个别
+     * ROM 直通有兼容问题（无声/爆音）时可在设置页关闭，回退普通解码。
+     */
+    @PluginMethod
+    public void setAudioOffloadMode(PluginCall call) {
+        MediaPlaybackService svc = activeService;
+        if (svc == null) {
+            call.reject("service unavailable");
+            return;
+        }
+        Boolean enabled = call.getBoolean("enabled");
+        svc.setAudioOffloadEnabled(enabled == null || enabled);
+        call.resolve();
+    }
+
     /** 播放器真实状态快照（回前台对账用）。ExoPlayer 只许主线程访问：统一切主线程再读。 */
     @PluginMethod
     public void getState(PluginCall call) {

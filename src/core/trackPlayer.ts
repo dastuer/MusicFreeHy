@@ -9,7 +9,7 @@ import {
     pluginCall,
 } from "./ipc";
 import { setMusicHistory } from "./musicHistory";
-import { getQuality, setQuality, getConfig, getAllowCoPlay } from "./appConfig";
+import { getQuality, setQuality, getConfig, getAllowCoPlay, getAllowAudioOffload } from "./appConfig";
 import { localFileUrl } from "./native";
 import {
     lookupCachedSrc,
@@ -548,6 +548,7 @@ class TrackPlayer extends EventEmitter {
             this.destroyAudioElement(previous);
             this.syncLoopFlag();
             this.applyNativeFocusMode();
+            this.applyNativeAudioOffload();
             if (wasPlaying && this._currentMusic) {
                 if (backend instanceof NativeAudioElement) {
                     backend.mediaId = playListKey(this._currentMusic);
@@ -1020,6 +1021,18 @@ class TrackPlayer extends EventEmitter {
         const audio = this.audio;
         if (audio instanceof NativeAudioElement) {
             audio.setAudioFocusMode(!getAllowCoPlay());
+        }
+    }
+
+    /**
+     * 把「硬件音频直通」开关同步给原生后端：offload 让 DSP 解码，打开其他应用
+     * 抢占 CPU 时不易卡顿；个别 ROM 直通兼容性差时用户可关（回退普通解码）。
+     * WebView 回退后端没有这个能力，静默跳过。
+     */
+    applyNativeAudioOffload() {
+        const audio = this.audio;
+        if (audio instanceof NativeAudioElement) {
+            audio.setAudioOffloadEnabled(getAllowAudioOffload());
         }
     }
 
@@ -3116,6 +3129,11 @@ export function applyCoPlaySessionType() {
     } catch {
         // 内核不认这个属性就算了，别影响播放
     }
+}
+
+/** 设置页切换「硬件音频直通」后即时下发给原生后端 */
+export function applyAudioOffloadSetting() {
+    TrackPlayerSingleton.applyNativeAudioOffload();
 }
 
 /** ---------- hooks ---------- */

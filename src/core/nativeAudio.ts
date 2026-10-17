@@ -169,6 +169,10 @@ export class NativeAudioElement {
         // JS 侧设置页改过独占模式的话，这里把用户选择重新声明一遍
         callNativeMethod(PLUGIN, "setAudioFocusMode", { focusEnabled: this._focusRequested })
             .catch(() => {});
+        // 硬件直通同理：服务被系统杀掉重建后原生侧回到默认（开启），
+        // 用户若在设置页关过，这里把选择重新声明一遍
+        callNativeMethod(PLUGIN, "setAudioOffloadMode", { enabled: this._offloadRequested })
+            .catch(() => {});
         // 装载元数据随行：通知栏/锁屏直接显示（不再走 metadata 上报通道）。
         // payload/quality 是当前曲的自救依据：直链过期时原生拿它重跑
         // getMediaSource（这条的自救依据，与队列条目同规则）。
@@ -264,6 +268,8 @@ export class NativeAudioElement {
 
     /** 最近一次设置给原生的焦点模式（装载时随行重发，服务重建后恢复用户选择） */
     private _focusRequested = false;
+    /** 硬件直通（offload）开关的 JS 侧记忆：服务重建/首次装载时重申用户选择，默认开 */
+    private _offloadRequested = true;
 
     /** 装载当前曲时随行的元数据（通知栏/锁屏显示；由 trackPlayer 在赋 src 前设置） */
     private _meta: { title: string; artist: string; album: string; artworkUri: string } | null =
@@ -505,6 +511,12 @@ export class NativeAudioElement {
     setAudioFocusMode(focusEnabled: boolean) {
         this._focusRequested = focusEnabled;
         callNativeMethod(PLUGIN, "setAudioFocusMode", { focusEnabled }).catch(() => {});
+    }
+
+    /** 硬件音频直通（offload）开关：默认开，DSP 解码后台抗 CPU 抢占 */
+    setAudioOffloadEnabled(enabled: boolean) {
+        this._offloadRequested = enabled;
+        callNativeMethod(PLUGIN, "setAudioOffloadMode", { enabled }).catch(() => {});
     }
 
     /**
