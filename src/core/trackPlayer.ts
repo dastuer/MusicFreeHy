@@ -8,7 +8,7 @@ import {
     pluginHost,
     pluginCall,
 } from "./ipc";
-import { setMusicHistory } from "./musicHistory";
+import { getMusicHistory, setMusicHistory } from "./musicHistory";
 import { getQuality, setQuality, getConfig, getAllowCoPlay, getAllowAudioOffload } from "./appConfig";
 import { localFileUrl } from "./native";
 import {
@@ -866,6 +866,13 @@ class TrackPlayer extends EventEmitter {
             if (savedRepeat) {
                 this._repeatMode = savedRepeat as MusicRepeatMode;
                 setAtom(repeatModeAtom, this._repeatMode);
+            }
+
+            // 上一首回退栈用持久化播放历史打底（旧的在最底、最新的在栈顶）：
+            // 重启后按「上一首」回到的仍是真实听过的歌
+            const persistedHistory = getMusicHistory();
+            if (persistedHistory.length) {
+                this._history = persistedHistory.slice(0, MAX_HISTORY).reverse();
             }
         } catch (e) {
             console.warn("[trackPlayer] 恢复上次播放失败", e);
@@ -2714,29 +2721,45 @@ class TrackPlayer extends EventEmitter {
     }
 
     private takePreviousFromHistory() {
-        const prev = this._history[this._history.length - 2];
-        if (!prev) {
+        const last = this._history[this._history.length - 1];
+        if (!last) {
             return null;
         }
-        if (this.isCurrentMusic(this._history[this._history.length - 1])) {
+        // 栈顶一般是当前曲：取它之前的一首，并把栈回退到该位置
+        if (this.isCurrentMusic(last)) {
+            const prev = this._history[this._history.length - 2];
+            if (!prev) {
+                return null;
+            }
             this._history.pop();
+            return prev;
         }
-        return prev;
+        // 当前曲还没入栈（会话恢复等）：栈顶就是最近听过的上一首
+        return last;
     }
 
     async skipToPrevious() {
-        // 原生队列直切优先（服务保留最近 2 首已播条目）
+        // 上一首按「播放历史」回退（真实听过的上一首），而不是队列里的前一首
+        const prev = this.takePreviousFromHistory();
+        if (prev && !this.isCurrentMusic(prev)) {
+            // 已在原生队列里：直切（无缝且免重解析），簿记由 itemtransition 对账完成
+            const audio = this.audio;
+            if (audio instanceof NativeAudioElement && audio.src && !this.isLoading) {
+                const jumped = await audio.jumpToNative(playListKey(prev));
+                if (jumped) {
+                    return;
+                }
+            }
+            await this.play(prev, false, this.isInPlayList(prev));
+            return;
+        }
+        // 历史里没有更早的记录：退回队列上一首（原生队列直切优先）
         const audio = this.audio;
         if (audio instanceof NativeAudioElement && audio.src && !this.isLoading) {
             const mediaId = await audio.skipNative("previous");
             if (mediaId) {
                 return;
             }
-        }
-        const prev = this.takePreviousFromHistory();
-        if (prev) {
-            await this.play(prev, true, this.isInPlayList(prev));
-            return;
         }
         if (!this.isInPlayList(this._currentMusic)) {
             return;

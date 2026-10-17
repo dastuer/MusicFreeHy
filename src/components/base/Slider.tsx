@@ -60,10 +60,7 @@ export default function Slider({
         >
             <div className="slider-track" ref={trackRef} style={{ height }}>
                 <div className="slider-fill" style={{ width: `${pct}%` }} />
-                <div
-                    className="slider-thumb"
-                    style={{ left: `${pct}%`, opacity: dragValue !== null || pct > 0 ? 1 : 0 }}
-                />
+                <div className="slider-thumb" style={{ left: `${pct}%` }} />
             </div>
         </div>
     );
