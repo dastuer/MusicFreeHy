@@ -187,6 +187,22 @@ ExoPlayer **默认不入音频焦点仲裁**（`focusEnabled=false`）：抖音�
 以 `getState` 的原生现实为准校准 JS：曲目对齐（含收养分支：JS 无源但原生在播）、
 播放态对齐、`isLoading` 卡死清理（>45s）、按需重推队列。
 
+**顺序很重要**：回前台先做 `reconcileWithNative`（对齐当前曲），再做补播/队列校准。
+反过来会在「长时间后台」场景里出错：JS 冻结期间原生已自行续播到第 N 首，
+过渡事件没送达，JS 的当前曲还停在切后台前那首；补播/推送拿旧曲当播放意图，
+于是把播放器拽回去（表现为「回前台自动切回切后台前那首继续播放」）。
+
+配套的两条约束：
+- **曲目对齐不再看暂停态**：旧实现只在 `!state.paused` 时同步当前曲，暂停/被系统
+  停住的后台回归就一直对不上；现在只要原生 `currentMediaId` 与 JS 不一致就采信原生，
+  并把代理的 `src/mediaId`（`followNativeTrack`）一并跟上——否则重连/补播仍会读旧地址。
+- **`setQueue` 只是队列刷新，不是换歌指令**：原生侧以「自己的当前曲」为锚点，
+  JS 传的 `currentMediaId` 只用于「原生还没有当前条目」的恢复场景；同列表增量替换时
+  还跳过正在播放的条目（`replaceMediaItem` 会让它从头重解析）。
+  队列换血也不再强制 `setPlayWhenReady(true)`，只延续原有播放意图。
+- **暂停发起方随 `getState` 回传**（`pausedByUser`）：JS 冻结时收不到通知栏/耳机的
+  pause 事件，回前台只对「非用户暂停」补播，避免用户按了暂停、回 App 歌自己响起来。
+
 ## 三、桥接协议备忘
 
 | 方法 | 说明 |
@@ -198,7 +214,7 @@ ExoPlayer **默认不入音频焦点仲裁**（`focusEnabled=false`）：抖音�
 | play/pause/stop/seekTo/setRate/setVolume/setRepeatMode/setAudioFocusMode | 直达播放器（play 在 ENDED 且有计划时自动补窗续播；IDLE 且列表非空时先 prepare——队列快照恢复的场景） |
 | skip(direction) | 原生队列直切，返回切到的 mediaId（空=无目标） |
 | jumpToItem(mediaId) | 原生队列定点跳转（计划内已解析条目，含 shadow 深处）；命中返回 mediaId，未命中空串 |
-| getState | currentMediaId/currentSrc/positionMs/bufferedMs/durationMs/paused/ended/playing/hasNext/**awaitingSource/plannedCount**/plannedHead/rate/volume |
+| getState | currentMediaId/currentSrc/positionMs/bufferedMs/durationMs/paused/**pausedByUser**/ended/playing/hasNext/**awaitingSource/plannedCount**/plannedHead/rate/volume |
 | ensurePermission | Android 13+ 通知权限一次到位（首播时 JS 触发；FGS 晋升前提） |
 | otherMediaPlaying | 活跃媒体会话数（排除自家），缓存下载共播让路用 |
 
@@ -281,6 +297,12 @@ timeupdate(每 1s 带数值载荷)/durationchange/itemtransition(mediaId,index)/
   再用 `Capacitor.nativePromise("PlaybackBridge","getState")` 核对 currentMediaId/paused；
   快照文件在 `filesDir/playback-queue.json`（`run-as <pkg> cat` 可查看；
   `stop()` 后应被删除）；
+- 长时间后台回前台回归（v1.0.16 修复的 bug）：造 5 首以上队列开播 → 切后台（或
+  `cdp-eval.mjs --freeze`）等原生自己推进 2 首以上 → 回前台。应满足：
+  （a）界面停在原生实际所在的那首，不是切后台前那首；
+  （b）不会自动倒回旧歌重播；
+  （c）后台若在通知栏按过暂停，回前台保持暂停、不自动出声。
+  日志侧可看「后台续播对账：播放器已停在《…》」与之后不再出现旧曲的 `loadTrack`；
 - 当前曲换源验证（v1.0.14）：`loadTrack` 传一条 404 的 src，但 payload 指向一个
   能解析出可用直链的曲目 → 日志应见「当前曲换源重试 → 当前曲换源成功，原地续播」，
   且 `getState` 的 currentSrc 变成新直链、仍在播（不跳歌）；

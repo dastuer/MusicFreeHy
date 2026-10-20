@@ -21,6 +21,7 @@ import {
 import {
     createAudioElement,
     destroyAudioBackend,
+    INativeAudioState,
     IQueuePlanItem,
     NativeAudioElement,
 } from "./nativeAudio";
@@ -587,15 +588,16 @@ class TrackPlayer extends EventEmitter {
                     this.maybePushPlan();
                 }, 5000);
             } else {
-                // 回前台：取消延后的镜像（马上会由对账流程补），并对齐状态
+                // 回前台：取消延后的镜像（马上会由对账流程补），并对齐状态。
+                // 对账内部**先**把 JS 当前曲对齐到播放器的现实，再做补播/队列
+                // 校准——否则补播路径会拿冻结前的旧当前曲去装载，把播放器拽回
+                // 切后台前那首（长时间后台回前台「自动切回旧歌」的根因）。
                 if (this.hiddenMirrorTimer) {
                     clearTimeout(this.hiddenMirrorTimer);
                     this.hiddenMirrorTimer = null;
                 }
-                // 页面被冻结期间原生可能已自行续播，先把 JS 状态对齐播放器的现实
-                void this.reconcileWithNative();
+                void this.reconcileAfterForeground();
             }
-            this.reconcileAfterForeground();
         });
         window.addEventListener("pagehide", persist);
 
@@ -668,14 +670,34 @@ class TrackPlayer extends EventEmitter {
         if (audio !== this.audio || this.isLoading) {
             return;
         }
-        // 收养分支：JS 侧无源但原生有（页面重建等极端对账）——直接认领原生现状
-        if (!this._currentMusic || (!audio.src && state.currentSrc)) {
+        await this.alignToNativeState(audio, state);
+    }
+
+    /**
+     * 把 JS 状态对齐到原生播放器的现实（reconcileWithNative 的主体）。
+     *
+     * 关键点：**原生当前曲与 JS 当前曲不一致时一律采信原生**，不论原生是
+     * 在播、暂停还是已停。旧实现只在 `!state.paused` 时同步曲目，于是
+     * 「后台连播推进若干首后暂停/被系统停住」这种最常见的长时后台场景里，
+     * JS 会一直认为当前曲还是切后台前那首；此后任何一次队列推送
+     * （setQueue 的 currentMediaId、或补播路径的 loadTrack）都会把播放器
+     * 拽回那首——正是「回前台自动切回切后台前那首」的根因。
+     */
+    private async alignToNativeState(audio: NativeAudioElement, state: INativeAudioState) {
+        // 收养分支：JS 侧没有可用的播放源（页面重建 / 冻结期间被清源），而原生
+        // 有明确的当前曲——直接认领原生现状。判断只看「JS 有没有源」，不看
+        // 原生记没记到直链：原生正在播的条目 currentSrc 可能为空（惰性解析
+        // 尚未回填），这时仍要把当前曲对齐过来，否则 JS 会一直拿着切后台前
+        // 那首，后续任何一次补播都会把它重新装载回播放器。
+        if (!this._currentMusic || !audio.src) {
             const nativeMusic = state.currentMediaId
                 ? this._playList.find((it) => playListKey(it) === state.currentMediaId)
                 : null;
             if (nativeMusic) {
                 console.info(`[trackPlayer] 对账收养：原生正在播《${nativeMusic.title}》，对齐 JS 状态`);
                 audio.adoptNativeState(state);
+                // JS 若之后需要重装这首（src 未知、用户点播放），从原生当前位置续上
+                this.pendingStartPosition = state.position;
                 this._currentMusic = nativeMusic;
                 this.consumePendingNext(nativeMusic);
                 this.pushHistory(nativeMusic);
@@ -695,17 +717,25 @@ class TrackPlayer extends EventEmitter {
         }
         const currentKey = this._currentMusic ? playListKey(this._currentMusic) : "";
         const trackChanged = !!state.currentMediaId && state.currentMediaId !== currentKey;
-        if (trackChanged && !state.paused) {
+        if (trackChanged) {
             const nativeMusic = this._playList.find(
                 (it) => playListKey(it) === state.currentMediaId,
             );
             if (nativeMusic) {
                 console.info(
-                    `[trackPlayer] 后台续播对账：播放器已在放《${nativeMusic.title}》，同步 JS 状态`,
+                    `[trackPlayer] 后台续播对账：播放器已停在《${nativeMusic.title}》，同步 JS 状态`,
                 );
-                // 播放器自行推进过了：计划记录以原生现实为准（清掉旧记录，重推重建）
+                // 播放器自行推进过了：计划记录以原生现实为准（清掉旧记录，重推重建）。
+                // 重推时当前曲的 URI 原生会原样保留（见 setQueue 的当前条目保护），
+                // 不会因为这里少了 src 就把正在播的条目换掉
                 this.planSources.clear();
                 this.planEntries = [];
+                // 代理的 src/mediaId 跟上播放器的现实：别让后续的补播/重连
+                // 继续拿着旧曲（它们都按 audio.src / _currentMusic 行动）
+                audio.followNativeTrack(state);
+                // 原生没回填直链（JS 拿着空源）：之后重新装载这首时从当前位置
+                // 续上，别让用户感觉进度被重置
+                this.pendingStartPosition = audio.src ? 0 : state.position;
                 this._currentMusic = nativeMusic;
                 this.consumePendingNext(nativeMusic);
                 this.pushHistory(nativeMusic);
@@ -727,6 +757,10 @@ class TrackPlayer extends EventEmitter {
                 position: state.position,
                 duration: state.duration || this._currentMusic?.duration || 0,
             });
+            // 当前曲变了：队列要按新的当前曲重推一次（签名里含 currentKey），
+            // 但原生侧有自己更准确的锚点（见 MediaPlaybackService.setQueue），
+            // 不会因为这次推送被拽回旧曲
+            this.lastPushSignature = "";
         }
         this.syncMediaSessionState();
         if (trackChanged || !this.planEntries.length) {
@@ -750,9 +784,6 @@ class TrackPlayer extends EventEmitter {
         if (!(audio instanceof NativeAudioElement)) {
             return;
         }
-        if (!this._currentMusic || this.reconnecting) {
-            return;
-        }
         // 解析卡死自愈：冻结期间 isLoading 被冻住的话先清掉（细节在 reconcileWithNative）
         if (this.isLoading && this.loadingSince > 0 && Date.now() - this.loadingSince > 45000) {
             this.isLoading = false;
@@ -760,8 +791,28 @@ class TrackPlayer extends EventEmitter {
         if (this.isLoading) {
             return;
         }
+        // 必须先把 JS 的当前曲对齐到播放器的现实，再做补播/游标校准：
+        // 冻结期间原生可能已经自行推进过若干首，JS 侧还停在切后台前那首。
+        // 顺序反了的话，下面的补播会拿旧曲去装载，把播放器拽回去。
+        await this.reconcileWithNative();
+        if (document.visibilityState !== "visible" || audio !== this.audio) {
+            return;
+        }
+        if (!this._currentMusic || this.reconnecting) {
+            return;
+        }
         await audio.refreshState();
         const music = this._currentMusic;
+        // 用户自己按的暂停（通知栏/耳机/锁屏，或 JS 侧暂停）：回前台不能替他开播。
+        // 原生记着这次暂停的发起方——冻结期间 JS 收不到 pause 事件，userPaused
+        // 还停在 false，光看它会把用户暂停误判成系统静默暂停而自动补播。
+        if (audio.lastNativePausedByUser) {
+            this.userPaused = true;
+        } else if (!audio.paused) {
+            // 出声中：用户显然要播，清掉两侧残留的暂停标记，别让以后的外部暂停
+            // 被当成用户意图而不再补播
+            this.userPaused = false;
+        }
         if (audio.paused && !audio.ended && !audio.error && !this.userPaused && !this.coPlayResumeTimer) {
             // 熄屏断流等场景里被系统静默暂停：非用户意图，补播回来
             this.resume();
@@ -1890,14 +1941,8 @@ class TrackPlayer extends EventEmitter {
         if (!mediaId) {
             return; // loadTrack 引起的过渡（无 mediaId），不是自动续播
         }
-        const planned = this.planSources.get(mediaId);
-        if (!planned?.playSrc) {
-            // 兜底：计划记录已不在（页面冻结期间推进过多首 / 队列被换过）。
-            // 以原生播放器的现实为准对齐状态——避免按过期记录把状态往回改。
-            await this.reconcileWithNative();
-            return;
-        }
-        // 页面冻结期间可能已经播过不止一首：与原生现实对不上时走对账
+        // 页面冻结期间可能已经播过不止一首：先问原生的现实。对不上就交给
+        // 对账做统一对齐（含冻结期间的多次推进），别按过期记录往回改。
         const audio = this.audio;
         if (audio instanceof NativeAudioElement) {
             const state = await audio.queryNativeState();
@@ -1905,6 +1950,18 @@ class TrackPlayer extends EventEmitter {
                 await this.reconcileWithNative();
                 return;
             }
+            if (state) {
+                // 播放器已推进到这首：代理的 src/mediaId 跟上，后续补播/重连
+                // 才不会拿着上一首的地址把播放器拽回去
+                audio.followNativeTrack(state);
+            }
+        }
+        const planned = this.planSources.get(mediaId);
+        if (!planned?.playSrc) {
+            // 兜底：计划记录已不在（页面冻结期间推进过多首 / 队列被换过）。
+            // 以原生播放器的现实为准对齐状态——避免按过期记录把状态往回改。
+            await this.reconcileWithNative();
+            return;
         }
         this.planSources.delete(mediaId);
         await this.commitPreloadedNext(planned);

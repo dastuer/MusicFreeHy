@@ -73,6 +73,8 @@ export interface INativeAudioState {
     position: number;
     duration: number;
     paused: boolean;
+    /** 这次暂停是否用户发起（通知栏/耳机/锁屏/UI）：回前台只对非用户暂停补播 */
+    pausedByUser: boolean;
     ended: boolean;
     /** 原生队列里「当前曲之后」还有没有预载条目 */
     hasNext: boolean;
@@ -195,6 +197,13 @@ export class NativeAudioElement {
 
     get paused(): boolean {
         return this._pausedOptimistic ?? this.lastReport.paused;
+    }
+
+    /** 最近一次原生暂停是否用户发起（回前台补播判据；仅原生后端有值） */
+    private _lastNativePausedByUser = false;
+
+    get lastNativePausedByUser(): boolean {
+        return this._lastNativePausedByUser;
     }
 
     get ended(): boolean {
@@ -537,6 +546,9 @@ export class NativeAudioElement {
             }
             this.lastReport.paused = !!res.paused;
             this._pausedOptimistic = null;
+            if (res.pausedByUser !== undefined) {
+                this._lastNativePausedByUser = !!res.pausedByUser;
+            }
             if (res.ended && !this._ended) {
                 this._ended = true;
                 this.lastReport.paused = true;
@@ -563,6 +575,7 @@ export class NativeAudioElement {
                 position: (Number(res.positionMs) || 0) / 1000,
                 duration: (Number(res.durationMs) || 0) / 1000,
                 paused: !!res.paused,
+                pausedByUser: !!res.pausedByUser,
                 ended: !!res.ended,
                 hasNext: !!res.hasNext,
                 awaitingSource: !!res.awaitingSource,
@@ -571,6 +584,28 @@ export class NativeAudioElement {
         } catch {
             return null;
         }
+    }
+
+    /**
+     * 对账时跟上原生播放器已推进到的曲目（回前台常见：冻结期间自动续播，
+     * 过渡事件没送达 JS）。
+     *
+     * 与 adoptNativeState 的差别：只更新「当前曲是谁」相关的状态，不把
+     * _ended 强行翻过来（ended 的补发交给随后的 refreshState），也不假装
+     * 自己重新装载过——播放器本身没被碰，这里只是让代理的指针跟上现实。
+     */
+    followNativeTrack(state: INativeAudioState): void {
+        this._mediaId = state.currentMediaId;
+        this._src = state.currentSrc || this.plannedSrcs.get(state.currentMediaId) || "";
+        this._hasSource = !!this._src;
+        this._pendingSeekMs = null;
+        this._error = null;
+        this.lastReport.positionMs = state.position * 1000;
+        if (state.duration > 0) {
+            this.lastReport.durationMs = state.duration * 1000;
+        }
+        this.lastReport.paused = state.paused;
+        this._pausedOptimistic = null;
     }
 
     /**

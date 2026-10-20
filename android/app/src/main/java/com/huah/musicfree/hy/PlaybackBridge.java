@@ -370,6 +370,8 @@ public class PlaybackBridge extends Plugin {
             long dur = svc.currentDurationMs();
             ret.put("durationMs", dur == androidx.media3.common.C.TIME_UNSET ? 0L : dur);
             ret.put("paused", svc.isPaused());
+            // 暂停是否用户发起：JS 回前台只对「非用户暂停」补播
+            ret.put("pausedByUser", svc.isPausedByUser());
             ret.put("ended", svc.isEnded());
             ret.put("playing", svc.isPlaying());
             ret.put("hasNext", svc.hasNext());

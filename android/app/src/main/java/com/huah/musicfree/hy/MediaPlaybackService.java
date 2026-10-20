@@ -235,6 +235,16 @@ public class MediaPlaybackService extends MediaSessionService {
      * 缓冲（见 createPlayer）只在回退路径生效。
      */
     private volatile boolean audioOffloadEnabled = true;
+    /**
+     * 最近一次「暂停」是谁发起的：true = 用户意图（通知栏/耳机/锁屏/UI），
+     * false = 非用户（系统焦点让位、缓冲抑制等）。
+     *
+     * JS 被冻结时通知栏的暂停事件送不到 WebView，回前台 JS 会以「原生是
+     * 暂停态且不是我暂停的」为依据判定为系统静默暂停，于是自动补播——
+     * 用户明明按了暂停，回 App 歌自己响起来。这里把原生知道的原因记下来，
+     * 经 getState 的 pausedByUser 交给 JS，让它只对真正的系统暂停补播。
+     */
+    private volatile boolean pausedByUser = false;
     private final android.os.Handler main =
         new android.os.Handler(android.os.Looper.getMainLooper());
 
@@ -379,6 +389,14 @@ public class MediaPlaybackService extends MediaSessionService {
             public void onPlayWhenReadyChanged(boolean playWhenReady, int reason) {
                 // 播放态翻转（含焦点让位导致的暂停）：转成 play/pause 事件给 JS。
                 // onIsPlayingChanged 不覆盖「缓冲中暂停/恢复」的边缘。
+                // 记下暂停的发起方：通知栏/耳机/锁屏/UI 发起的都是 USER_REQUEST，
+                // 系统焦点让位、suppressed 属于非用户意图（回前台可补播）。
+                if (!playWhenReady) {
+                    pausedByUser =
+                        reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST;
+                } else {
+                    pausedByUser = false;
+                }
                 emitPlaybackEvent(playWhenReady ? "play" : "pause", currentMediaId(), null);
             }
 
@@ -834,11 +852,18 @@ public class MediaPlaybackService extends MediaSessionService {
             applyOrderMode(shuffle, mode);
 
             String current = currentMediaId == null ? "" : currentMediaId;
+            String nativeCurrent = currentMediaId();
             // 幂等 guard：JS 的 playing/对账路径会重复推送完全相同的队列，
             // setMediaItems 即使内容不变也会 reset 播放器（pause→playing 拉锯，
             // 前台有 JS 存活时复现、后台冻结时自愈）。列表一致时只做增量替换。
             if (isSamePlaylist(mediaItems)) {
+                int currentIndex = player.getCurrentMediaItemIndex();
                 for (int i = 0; i < mediaItems.size() && i < player.getMediaItemCount(); i++) {
+                    if (i == currentIndex) {
+                        // 正在播的条目一律不动：replaceMediaItem 会把它的数据源
+                        // 换掉、缓冲区作废，播放中表现为从头重解析/重播
+                        continue;
+                    }
                     MediaItem cur = player.getMediaItemAt(i);
                     MediaItem next = mediaItems.get(i);
                     String curUri = cur != null && cur.localConfiguration != null
@@ -851,30 +876,41 @@ public class MediaPlaybackService extends MediaSessionService {
                         player.replaceMediaItem(i, next);
                     }
                 }
-                // 当前曲已是原生正在播的：不动播放位置与播放意图
-                if (!current.isEmpty() && !current.equals(currentMediaId())) {
+                // **setQueue 只是队列刷新，不是"换在这首播"的指令**：播放器已有
+                // 有效的当前条目时，以它为准，绝不因为 JS 传了另一个 currentMediaId
+                // 就 seek 过去。JS 长时间后台被冻结后并不知播放器已经自行续播到
+                // 第几首，回前台若先推一次队列，就会拿冻结前的旧当前曲把播放器
+                // 拽回那首——本 bug 的主路径（对齐后 JS 自己会把 current 修正）。
+                if (nativeCurrent.isEmpty() && !current.isEmpty()) {
+                    // 播放器还没有当前条目（服务重建后的恢复态）：按 JS 的 current 定位
                     int targetSame = indexOfMediaId(current);
                     if (targetSame >= 0) {
                         player.seekTo(targetSame, 0L);
                         player.prepare();
-                        player.setPlayWhenReady(true);
                     }
                 }
                 scheduleQueuePersist();
                 return;
             }
-            int existingIndex = indexOfMediaId(current);
+            // 锚点：原生当前曲（它在新列表里时）优先，其次 JS 的 current，最后队首。
+            String anchor = "";
+            if (!nativeCurrent.isEmpty() && containsMediaId(mediaItems, nativeCurrent)) {
+                anchor = nativeCurrent;
+            } else if (!current.isEmpty() && containsMediaId(mediaItems, current)) {
+                anchor = current;
+            }
+            int existingIndex = indexOfMediaId(nativeCurrent);
             int target = 0;
-            if (!current.isEmpty()) {
+            if (!anchor.isEmpty()) {
                 for (int i = 0; i < mediaItems.size(); i++) {
-                    if (current.equals(mediaItems.get(i).mediaId)) {
+                    if (anchor.equals(mediaItems.get(i).mediaId)) {
                         target = i;
                         break;
                     }
                 }
             }
             boolean keepPlaying = existingIndex >= 0
-                && current.equals(currentMediaId())
+                && anchor.equals(nativeCurrent)
                 && player.getPlaybackState() != Player.STATE_IDLE;
             if (keepPlaying) {
                 // 当前曲没变：把新列表定位到该曲在**新列表**中的位置（target），
@@ -888,7 +924,9 @@ public class MediaPlaybackService extends MediaSessionService {
                 boolean wasPlaying = player.getPlayWhenReady();
                 player.setMediaItems(mediaItems, target, 0L);
                 player.prepare();
-                player.setPlayWhenReady(wasPlaying || !current.isEmpty());
+                // 只延续原有的播放意图：队列换血不替用户开播（旧实现在 current
+                // 非空时强制 true，回前台拿陈旧 current 推队列就会"自动播放"）
+                player.setPlayWhenReady(wasPlaying);
             }
             scheduleQueuePersist();
         });
@@ -1163,6 +1201,11 @@ public class MediaPlaybackService extends MediaSessionService {
         return player == null || !player.getPlayWhenReady();
     }
 
+    /** 当前暂停态是否用户发起的（getState 用：回前台据此决定要不要补播） */
+    boolean isPausedByUser() {
+        return pausedByUser;
+    }
+
     boolean isEnded() {
         return player != null && player.getPlaybackState() == Player.STATE_ENDED;
     }
@@ -1233,6 +1276,19 @@ public class MediaPlaybackService extends MediaSessionService {
             }
         }
         return -1;
+    }
+
+    /** mediaId 是否在这批待装载的列表里（setQueue 锚点选择用） */
+    private static boolean containsMediaId(java.util.List<MediaItem> items, String mediaId) {
+        if (items == null || mediaId == null || mediaId.isEmpty()) {
+            return false;
+        }
+        for (MediaItem it : items) {
+            if (it != null && mediaId.equals(it.mediaId)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 新队列与播放器现有列表的 mediaId 顺序是否完全一致（幂等 guard 用） */
