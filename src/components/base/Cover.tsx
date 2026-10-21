@@ -16,8 +16,12 @@ export default function Cover({
     fallbackSize?: number;
     children?: React.ReactNode;
 }) {
-    const [failed, setFailed] = useState(false);
-    const showFallback = !src || failed;
+    /* 记住的是「哪个地址失败了」，不是一个布尔：
+       本地音乐匹配到封面、或重新匹配覆盖了同一路径的文件后 src 会换成新地址，
+       这时必须重新尝试加载，否则这一格会永远停在占位音符上
+       （播放条、最近在听、播放历史都因此看不见刚匹配好的封面）。 */
+    const [failedSrc, setFailedSrc] = useState<string | undefined>(undefined);
+    const showFallback = !src || failedSrc === src;
     return (
         <div
             className={`cover ${showFallback ? "cover-fallback" : ""} ${className}`}
@@ -31,7 +35,7 @@ export default function Cover({
                 <img
                     src={src}
                     loading="lazy"
-                    onError={() => setFailed(true)}
+                    onError={() => setFailedSrc(src)}
                     alt=""
                     draggable={false}
                 />

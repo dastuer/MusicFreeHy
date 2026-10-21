@@ -19,7 +19,7 @@ import {
     IconChevronDown,
 } from "@/components/base/Icons";
 import { TrackPlayerSingleton } from "@/core/trackPlayer";
-import { getMusicHistory } from "@/core/musicHistory";
+import { getMusicHistory, musicHistoryVersionAtom } from "@/core/musicHistory";
 import { formatPlayCount } from "@/core/utils";
 import { useTabSwipe } from "./useTabSwipe";
 import SheetTagsPanel from "./SheetTagsPanel";
@@ -141,12 +141,17 @@ function RecommendTab({
         );
     }, []);
 
+    /* 播放历史的版本号：本地音乐匹配到封面 / 歌词后会刷新历史里的同曲条目。
+       播放页是浮层（不切路由），本页的 visible/active 不会变——只靠那两个依赖
+       就刷不到刚匹配好的封面，所以把版本号也算进来。 */
+    const historyVersion = useAtomValue(musicHistoryVersionAtom);
+
     // 「最近在听」是本地数据，代价低：每次回到本页（路由或 tab）都同步一次播放记录
     useEffect(() => {
         if (visible && active) {
             loadHistory();
         }
-    }, [visible, active, loadHistory]);
+    }, [visible, active, historyVersion, loadHistory]);
 
     const registerRowRefresh = useCallback<RegisterRefresh>((fn) => {
         rowRefreshRef.current = fn;

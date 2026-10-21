@@ -8,7 +8,7 @@ import {
     pluginHost,
     pluginCall,
 } from "./ipc";
-import { getMusicHistory, setMusicHistory } from "./musicHistory";
+import { getMusicHistory, setMusicHistory, patchMusicHistoryMeta } from "./musicHistory";
 import { getQuality, setQuality, getConfig, getAllowCoPlay, getAllowAudioOffload } from "./appConfig";
 import { localFileUrl } from "./native";
 import {
@@ -42,6 +42,8 @@ export const enum TrackPlayerEvents {
     StateChanged = "StateChanged",
     /** 音源解析 / 音频加载失败（payload 见 IPlayFailurePayload） */
     PlayFailed = "PlayFailed",
+    /** 后端换成原生 ExoPlayer 代理（异步探测完成）：定时关闭据此把倒计时补交给原生 */
+    NativeBackendReady = "NativeBackendReady",
 }
 
 /** 播放失败事件的载荷 */
@@ -550,6 +552,12 @@ class TrackPlayer extends EventEmitter {
             this.syncLoopFlag();
             this.applyNativeFocusMode();
             this.applyNativeAudioOffload();
+            if (backend instanceof NativeAudioElement) {
+                // 通知定时关闭把自己接过去：冷启动探测窗口里它可能已经按页面
+                // setTimeout 设好了倒计时，切后台会被冻结——必须补交给原生服务。
+                // 用事件而不是直接 import，避免 trackPlayer ↔ scheduleClose 循环依赖。
+                this.emit(TrackPlayerEvents.NativeBackendReady);
+            }
             if (wasPlaying && this._currentMusic) {
                 if (backend instanceof NativeAudioElement) {
                     backend.mediaId = playListKey(this._currentMusic);
@@ -2069,6 +2077,10 @@ class TrackPlayer extends EventEmitter {
     get repeatMode() {
         return this._repeatMode;
     }
+    /** 当前音频后端（定时关闭据此判断要不要下沉到原生；可能为 null/占位 <audio>） */
+    getAudioBackend(): AudioBackend | null {
+        return this.audio;
+    }
 
     private persistPlayList() {
         const slim = (item: IMusic.IMusicItem): IMusic.IMusicItem =>
@@ -2108,6 +2120,11 @@ class TrackPlayer extends EventEmitter {
      * 播放期间曲目的展示元数据被外部更新（本地音乐匹配到歌词 / 封面）时同步进来：
      * 替换当前曲目与队列里的同曲目条目并落盘，不影响音频播放。
      * currentMusic 换新对象还会驱动播放页重载歌词。
+     *
+     * 同时刷新另外两处「这首歌的快照」：
+     *  - 上一首回退栈（_history）——不同步的话回退到这首又用旧封面，
+     *    而且那次播放会把旧封面重新写回播放历史，把刚修好的数据打回去；
+     *  - 播放历史（「最近在听」/ 播放历史页读的本地数据）。
      */
     updateMusicItemMeta(item: IMusic.IMusicItem) {
         const sameKey = (a?: IMusic.IMusicItem | null) =>
@@ -2125,6 +2142,8 @@ class TrackPlayer extends EventEmitter {
             setAtom(playListAtom, this._playList);
             touched = true;
         }
+        this._history = this._history.map((it) => (sameKey(it) ? { ...it, ...item } : it));
+        patchMusicHistoryMeta(item);
         if (touched) {
             this.persistPlayList();
         }

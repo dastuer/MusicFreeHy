@@ -248,6 +248,80 @@ public class MediaPlaybackService extends MediaSessionService {
     private final android.os.Handler main =
         new android.os.Handler(android.os.Looper.getMainLooper());
 
+    /* ---------------- 定时关闭 ---------------- */
+
+    /**
+     * 到点时间戳（epoch ms；0 = 未开启）。
+     *
+     * 倒计时必须活在原生服务里：WebView 切后台后 JS 定时器被系统冻结，
+     * 页面侧 setTimeout 到点根本不会执行，而 ExoPlayer 照常出声——这就是
+     * 「后台播放时定时关闭不生效」的根因。前台服务在播放期间持有唤醒锁，
+     * main Handler 照常走，到点在原生暂停即可，不依赖页面存活。
+     */
+    private long sleepDeadlineMs = 0L;
+    /** 到点后等当前这首播完再停（Media3 的 pauseAtEndOfMediaItems） */
+    private boolean sleepCloseAfterTrack = false;
+    /** 已在等当前曲播完（暂停由片尾的 END_OF_MEDIA_ITEM 触发） */
+    private boolean sleepAwaitingTrackEnd = false;
+    /** 淡出起始音量（暂停后还原，下次播放回到用户设定值；<0 表示没有进行中的淡出） */
+    private float sleepFadeStartVolume = -1f;
+    private long sleepFadeStartedAt = 0L;
+    private static final long SLEEP_FADE_MS = 2000L;
+    private static final long SLEEP_FADE_TICK_MS = 100L;
+    /**
+     * 定时关闭把播放器停在了片尾（STATE_ENDED）：吞掉这次 ended 事件，
+     * 否则页面 JS 的换歌链路会把歌重新放起来（队尾 repeat off 时最典型）。
+     * 任何一次重新开播都会清掉它。
+     */
+    private boolean sleepSuppressEnded = false;
+
+    /**
+     * 倒计时心跳：每秒对一次**墙上时钟**再决定下一次唤醒间隔。
+     * 不用一次性 postDelayed(剩余毫秒)——它基于 uptimeMillis，设备深睡时
+     * 不推进，睡醒后会一次性晚到（定时关闭拖后甚至不触发）。
+     */
+    private final Runnable sleepTimerTick = new Runnable() {
+        @Override
+        public void run() {
+            if (sleepDeadlineMs <= 0) {
+                return;
+            }
+            long remaining = sleepDeadlineMs - System.currentTimeMillis();
+            if (remaining <= 0) {
+                onSleepTimerReached();
+                return;
+            }
+            main.postDelayed(this, Math.min(remaining, 1000L));
+        }
+    };
+
+    /** 淡出：每 100ms 降一次音量，2s 降到 0 后暂停 */
+    private final Runnable sleepFadeTick = new Runnable() {
+        @Override
+        public void run() {
+            if (player == null) {
+                finishSleepTimer();
+                return;
+            }
+            if (!player.getPlayWhenReady()) {
+                // 淡出途中用户手动暂停/换歌：恢复音量，本次定时作废（与页面侧旧行为一致）
+                cancelSleepFade(true);
+                sleepDeadlineMs = 0L;
+                sleepAwaitingTrackEnd = false;
+                emitSleepTimerEvent();
+                return;
+            }
+            float t = Math.min(
+                (System.currentTimeMillis() - sleepFadeStartedAt) / (float) SLEEP_FADE_MS, 1f);
+            player.setVolume(sleepFadeStartVolume * (1f - t));
+            if (t >= 1f) {
+                finishSleepTimer();
+            } else {
+                main.postDelayed(this, SLEEP_FADE_TICK_MS);
+            }
+        }
+    };
+
     /** 进度心跳：播放中每秒向 JS 推 timeupdate（对齐 HTMLAudioElement 节奏） */
     private static final long PROGRESS_INTERVAL_MS = 1000L;
     private final Runnable progressTick = new Runnable() {
@@ -394,8 +468,28 @@ public class MediaPlaybackService extends MediaSessionService {
                 if (!playWhenReady) {
                     pausedByUser =
                         reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST;
+                    // 「播完再关」的收尾：片尾暂停由我们主动挂上，暂停即完成定时关闭。
+                    // 用户在片尾前自己暂停不算完成（恢复播放后仍要在曲末停），
+                    // 与页面侧旧实现「挂 PlayEnd 等歌播完」的语义一致。
+                    if (sleepAwaitingTrackEnd
+                        && reason == Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM) {
+                        sleepAwaitingTrackEnd = false;
+                        sleepCloseAfterTrack = false;
+                        sleepDeadlineMs = 0L;
+                        sleepSuppressEnded = true;
+                        main.removeCallbacks(sleepTimerTick);
+                        main.removeCallbacks(sleepFadeTick);
+                        setPauseAtTrackEnd(false);
+                        // 这不是用户按的暂停，但必须当成用户意图上报：否则回前台
+                        // 对账会把这次暂停当作系统静默暂停而自动补播
+                        pausedByUser = true;
+                        emitSleepTimerEvent();
+                        Log.i(TAG, "定时关闭已执行：当前曲播完，播放暂停");
+                    }
                 } else {
                     pausedByUser = false;
+                    // 用户重新开播：定时关闭已经结束，别再吞下一次 ended
+                    sleepSuppressEnded = false;
                 }
                 emitPlaybackEvent(playWhenReady ? "play" : "pause", currentMediaId(), null);
             }
@@ -424,6 +518,12 @@ public class MediaPlaybackService extends MediaSessionService {
                     // 队列内前进由它自己完成）：翻暂停态，通知栏显示播放键
                     player.seekTo(0);
                     player.setPlayWhenReady(false);
+                    // 定时关闭刚好把这最后一首停在片尾：这次 ended 不再上报，
+                    // 否则页面 JS 的换歌链路（onEnded → skipToNext）会把歌重新放起来
+                    if (sleepSuppressEnded) {
+                        sleepSuppressEnded = false;
+                        return;
+                    }
                     emitPlaybackEvent("ended", currentMediaId(), null);
                 }
             }
@@ -1170,6 +1270,182 @@ public class MediaPlaybackService extends MediaSessionService {
         });
     }
 
+    // ---------- 定时关闭（倒计时在原生，页面冻结也照常生效） ----------
+
+    /**
+     * 设置 / 取消定时关闭。deadlineMs 语义：
+     *  - > 0：到点时间戳（epoch ms），重设定时；
+     *  - = 0：取消定时；
+     *  - < 0：**只改「播完再关」开关**，不动已设定的倒计时（到点后仍在等
+     *    片尾时用户改勾选走这条，取消勾选就当场停）。
+     *
+     * closeAfterTrack = true 时到点不立刻停，而是挂 Media3 的
+     * pauseAtEndOfMediaItems：当前这首放完由播放器自己暂停
+     * （PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM）。
+     */
+    @OptIn(markerClass = UnstableApi.class)
+    void setSleepTimer(long deadlineMs, boolean closeAfterTrack) {
+        runOnMain(() -> {
+            if (deadlineMs < 0) {
+                // 只改开关：倒计时/等待片尾的现状都不动
+                sleepCloseAfterTrack = closeAfterTrack;
+                if (sleepAwaitingTrackEnd && !closeAfterTrack) {
+                    // 到点后已在等片尾，用户又取消了勾选：立刻停（与页面侧旧行为一致）
+                    finishSleepTimer();
+                } else {
+                    emitSleepTimerEvent();
+                }
+                return;
+            }
+            main.removeCallbacks(sleepTimerTick);
+            main.removeCallbacks(sleepFadeTick);
+            // 上一次的淡出没走完就改了定时：先把音量还原
+            cancelSleepFade(true);
+            sleepAwaitingTrackEnd = false;
+            sleepCloseAfterTrack = closeAfterTrack;
+            sleepSuppressEnded = false;
+            if (player != null) {
+                // 单曲循环下 ExoPlayer 也停在曲末（每个 MediaItem 都是独立的
+                // timeline window），正是「播完再关」要的语义
+                setPauseAtTrackEnd(false);
+            }
+            if (deadlineMs <= 0) {
+                sleepDeadlineMs = 0L;
+                emitSleepTimerEvent();
+                scheduleQueuePersist();
+                return;
+            }
+            long delay = deadlineMs - System.currentTimeMillis();
+            if (delay <= 0) {
+                // 传了个已过期的时间戳：视同现在就关
+                sleepDeadlineMs = 0L;
+                onSleepTimerReached();
+                return;
+            }
+            sleepDeadlineMs = deadlineMs;
+            main.postDelayed(sleepTimerTick, Math.min(delay, 1000L));
+            emitSleepTimerEvent();
+            // 定时状态落盘：服务被系统回收重建后倒计时还能接上
+            scheduleQueuePersist();
+            Log.i(TAG, "定时关闭已设置：" + (delay / 1000) + "s 后"
+                + (closeAfterTrack ? "（等当前曲播完）" : ""));
+        });
+    }
+
+    /** 到点：等播完就挂片尾暂停，否则淡出后暂停 */
+    private void onSleepTimerReached() {
+        // 截止时间已到：倒计时结束（页面侧据此收起剩余时间显示）。
+        // 「等当前曲播完」是到点之后的等待态，不靠 deadline 表达。
+        sleepDeadlineMs = 0L;
+        main.removeCallbacks(sleepTimerTick);
+        if (player == null) {
+            finishSleepTimer();
+            return;
+        }
+        if (sleepCloseAfterTrack) {
+            // 单曲循环下 ExoPlayer 也停在曲末（每个 MediaItem 都是独立的
+            // timeline window），正是「播完再关」要的语义；没在播（已暂停）
+            // 就当场收尾，不必等
+            if (player.getPlayWhenReady()) {
+                sleepAwaitingTrackEnd = true;
+                setPauseAtTrackEnd(true);
+                emitSleepTimerEvent();
+                scheduleQueuePersist();
+                Log.i(TAG, "定时关闭到点：等当前曲播完再停");
+                return;
+            }
+            finishSleepTimer();
+            return;
+        }
+        if (player.getPlayWhenReady()) {
+            startSleepFade();
+        } else {
+            finishSleepTimer();
+        }
+    }
+
+    /** 2 秒音量渐弱（到点即掐断显得突兀） */
+    private void startSleepFade() {
+        if (player == null) {
+            finishSleepTimer();
+            return;
+        }
+        float start = player.getVolume();
+        if (start <= 0.01f) {
+            finishSleepTimer();
+            return;
+        }
+        sleepFadeStartVolume = start;
+        sleepFadeStartedAt = System.currentTimeMillis();
+        main.removeCallbacks(sleepFadeTick);
+        main.postDelayed(sleepFadeTick, SLEEP_FADE_TICK_MS);
+    }
+
+    /** 中止淡出：restoreVolume=true 时把音量还原到淡出前 */
+    private void cancelSleepFade(boolean restoreVolume) {
+        main.removeCallbacks(sleepFadeTick);
+        if (restoreVolume && sleepFadeStartVolume >= 0 && player != null) {
+            player.setVolume(sleepFadeStartVolume);
+        }
+        sleepFadeStartVolume = -1f;
+    }
+
+    /**
+     * 收尾：暂停并复位定时状态。不开 stop() —— 与页面侧实现一致，
+     * 保留播放进度与队列，用户回来按播放即可续上。
+     */
+    private void finishSleepTimer() {
+        float restoreVolume = sleepFadeStartVolume;
+        cancelSleepFade(false);
+        main.removeCallbacks(sleepTimerTick);
+        sleepDeadlineMs = 0L;
+        sleepAwaitingTrackEnd = false;
+        sleepSuppressEnded = true;
+        sleepCloseAfterTrack = false;
+        if (player != null) {
+            setPauseAtTrackEnd(false);
+            player.setPlayWhenReady(false);
+            // 淡出到 0 后暂停：音量还原，下次播放回到用户设定值
+            if (restoreVolume >= 0f) {
+                player.setVolume(restoreVolume);
+            }
+        }
+        emitSleepTimerEvent();
+        scheduleQueuePersist();
+        Log.i(TAG, "定时关闭已执行：播放暂停");
+    }
+
+    /** 当前定时状态（getState 用）：未开启时 deadline=0 */
+    long sleepTimerDeadline() {
+        return sleepDeadlineMs;
+    }
+
+    /**
+     * 挂/撤「曲末暂停」。Media3 里这条 API 属 UnstableApi，集中在这里
+     * 加注解，调用点（事件回调、淡出、收尾）就不必各自标注。
+     */
+    @OptIn(markerClass = UnstableApi.class)
+    private void setPauseAtTrackEnd(boolean pauseAtEnd) {
+        if (player != null) {
+            player.setPauseAtEndOfMediaItems(pauseAtEnd);
+        }
+    }
+
+    /** 定时关闭状态变更事件：页面侧据此即时同步倒计时（不依赖页面轮询） */
+    private void emitSleepTimerEvent() {
+        emitPlaybackData(
+            "sleeptimer",
+            currentMediaId(),
+            "{\"sleepDeadline\":" + sleepDeadlineMs
+                + ",\"sleepCloseAfterTrack\":" + (sleepCloseAfterTrack && sleepAwaitingTrackEnd) + "}"
+        );
+    }
+
+    /** 定时关闭是否在等当前曲播完（getState 用） */
+    boolean sleepTimerCloseAfterTrack() {
+        return sleepCloseAfterTrack && sleepAwaitingTrackEnd;
+    }
+
     // ---------- 状态查询（PlaybackBridge.getState 用，须在主线程调） ----------
 
     String currentMediaId() {
@@ -1470,6 +1746,9 @@ public class MediaPlaybackService extends MediaSessionService {
             root.put("shuffle", player.getShuffleModeEnabled());
             root.put("focusEnabled", focusEnabled);
             root.put("audioOffload", audioOffloadEnabled);
+            // 定时关闭一并落盘：服务被系统回收重建后，倒计时还能接上
+            root.put("sleepDeadline", sleepDeadlineMs);
+            root.put("sleepCloseAfterTrack", sleepCloseAfterTrack);
             root.put("savedAt", System.currentTimeMillis());
             return root.toString();
         } catch (Throwable t) {
@@ -1532,6 +1811,16 @@ public class MediaPlaybackService extends MediaSessionService {
                 root.optString("mode", "off"));
             setAudioFocusMode(root.optBoolean("focusEnabled", false));
             setAudioOffloadEnabled(root.optBoolean("audioOffload", true));
+            // 定时关闭接上：服务被系统回收重建时倒计时不能丢，否则「放着歌睡
+            // 着、中途服务被回收」之后定时就失效了
+            long restoredDeadline = root.optLong("sleepDeadline", 0L);
+            if (restoredDeadline > System.currentTimeMillis()) {
+                boolean restoredCloseAfter =
+                    root.optBoolean("sleepCloseAfterTrack", false);
+                setSleepTimer(restoredDeadline, restoredCloseAfter);
+                Log.i(TAG, "定时关闭随队列快照恢复："
+                    + ((restoredDeadline - System.currentTimeMillis()) / 1000) + "s 后");
+            }
             // 不 prepare、不 setPlayWhenReady：等用户按播放
             Log.i(TAG, "队列快照恢复：" + mediaItems.size() + " 首，停在索引 " + index
                 + "（缺源的条目播放时再解析）");

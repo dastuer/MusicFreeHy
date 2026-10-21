@@ -332,6 +332,26 @@ public class PlaybackBridge extends Plugin {
     }
 
     /**
+     * 定时关闭：倒计时活在原生服务里（WebView 切后台后 JS 定时器被冻结，
+     * 页面侧 setTimeout 到点不会执行，而播放器照常出声）。
+     * deadline 为到点的 epoch 毫秒，<= 0 表示取消；closeAfterTrack 表示到点后
+     * 等当前这首播完再停。
+     */
+    @PluginMethod
+    public void setSleepTimer(PluginCall call) {
+        MediaPlaybackService svc = activeService;
+        if (svc == null) {
+            call.reject("service unavailable");
+            return;
+        }
+        Double deadline = call.getDouble("deadline");
+        boolean closeAfterTrack =
+            Boolean.TRUE.equals(call.getBoolean("closeAfterTrack", Boolean.FALSE));
+        svc.setSleepTimer(deadline == null ? 0L : deadline.longValue(), closeAfterTrack);
+        call.resolve();
+    }
+
+    /**
      * 音频硬件直通（Audio Offload）开关：默认开。打开其他应用时 CPU 被抢占，
      * 直通让 DSP 解码出声、几乎不吃应用 CPU，是后台防卡顿的主力手段；个别
      * ROM 直通有兼容问题（无声/爆音）时可在设置页关闭，回退普通解码。
@@ -380,6 +400,9 @@ public class PlaybackBridge extends Plugin {
             ret.put("plannedHead", svc.plannedHeadMediaId());
             ret.put("rate", svc.currentRate());
             ret.put("volume", svc.currentVolume());
+            // 定时关闭（页面侧回前台对账用）：deadline 为 0 表示未开启
+            ret.put("sleepDeadline", svc.sleepTimerDeadline());
+            ret.put("sleepCloseAfterTrack", svc.sleepTimerCloseAfterTrack());
             pending.resolve(ret);
         });
     }

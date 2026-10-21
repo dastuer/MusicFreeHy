@@ -203,6 +203,12 @@ export function toMusicItem(record: ILocalMusicRecord): IMusic.IMusicItem {
         return cached;
     }
     const artwork = record.matchedArtwork || record.artwork;
+    /* 匹配时间做地址版本号：重新匹配时封面文件路径不变（cover_<hash>.img），
+       但内容是新的。不加版本号的话各个 <img> 会认为 src 没变而继续用旧图
+       （播放页、播放条、最近在听、播放历史都受影响）。
+       Capacitor 本地文件服务只看路径，查询串不影响取文件。 */
+    const artworkStamp =
+        record.matchedArtwork && record.matchedAt ? `?v=${record.matchedAt}` : "";
     const item: IMusic.IMusicItem = {
         id: record.localPath,
         platform: "local",
@@ -211,7 +217,7 @@ export function toMusicItem(record: ILocalMusicRecord): IMusic.IMusicItem {
         album: record.album,
         duration: record.duration,
         localPath: record.localPath,
-        artwork: artwork ? localFileUrl(artwork) : "",
+        artwork: artwork ? `${localFileUrl(artwork)}${artworkStamp}` : "",
         // 匹配到的歌词随条目带给播放器（loadCurrentLyric 优先读 musicItem.lyric）
         ...(record.lyricPath ? { lyric: { lrc: localFileUrl(record.lyricPath) } } : {}),
     };
@@ -229,6 +235,54 @@ export function findLocalRecord(musicItem: {
         return undefined;
     }
     return readLibrary().find((it) => it.localPath === key || it.id === key);
+}
+
+/**
+ * 匹配结果文件是否还在：Android 的封面放在 cacheDir 里，系统清缓存后会
+ * 变成记录里留着路径、文件已没了，播放页据此判断「缺不缺」才不会误判
+ * 成已就绪而把一键获取入口藏掉。旧 APK 没有 statFile 时按存在处理。
+ */
+function matchFileExists(absPath?: string): Promise<boolean> {
+    if (!absPath) {
+        return Promise.resolve(false);
+    }
+    return (async () => {
+        if (currentPlatform() === "ios") {
+            // iOS 的匹配文件都在 DATA 沙盒内：转成相对路径问 Filesystem
+            const base = await iosAbsPathFor("DATA", ".");
+            if (!base || !absPath.startsWith(`${base}/`)) {
+                return true;
+            }
+            try {
+                const st = await callNativeMethod("Filesystem", "stat", {
+                    path: absPath.slice(base.length + 1),
+                    directory: "DATA",
+                });
+                return !!st?.exists;
+            } catch {
+                return true;
+            }
+        }
+        try {
+            const st = await callNativeMethod("Storage", "statFile", { path: absPath });
+            return !!st?.exists;
+        } catch {
+            // 旧 APK 没有这个 bridge 方法：按存在处理，行为与修复前一致
+            return true;
+        }
+    })();
+}
+
+/** 歌词 / 封面是否仍可用（路径存在且文件没被清掉） */
+export async function hasMatchedMeta(
+    record: ILocalMusicRecord,
+    kind: "lyric" | "cover",
+): Promise<boolean> {
+    if (kind === "lyric") {
+        return record.lyricPath ? matchFileExists(record.lyricPath) : false;
+    }
+    const path = record.matchedArtwork || record.artwork;
+    return path ? matchFileExists(path) : false;
 }
 
 /* ---------- 扫描目录配置 ---------- */
@@ -1033,6 +1087,14 @@ async function runMatchLoop(session: IMatchSession): Promise<void> {
             );
             try {
                 const r = await matchOneRecord(rec, plugin, options);
+                if (r.matched) {
+                    // 批量匹配也可能轮到「正在播 / 在队列 / 播放历史里」的那首：
+                    // 把新封面同步进播放器与历史，别让它停在旧封面上
+                    const fresh = readLibrary().find((it) => it.id === rec.id);
+                    if (fresh) {
+                        TrackPlayerSingleton.updateMusicItemMeta(toMusicItem(fresh));
+                    }
+                }
                 if (Date.now() - lastBump > 1200) {
                     bumpLocalMusicVersion();
                     lastBump = Date.now();
@@ -1099,6 +1161,51 @@ function searchCandidates(
             Array.isArray(res?.data) ? (res.data.filter((it) => it?.title) as IMusic.IMusicItem[]) : [],
         )
         .catch(() => []);
+}
+
+/**
+ * 搜索关键词变体，从最具体到最宽泛：
+ *  - 标题 + 歌手（音源命中率最高）；
+ *  - 去掉「-《影视剧名》插曲」这类尾巴后的标题 + 歌手
+ *    （本地文件名常带这个尾巴，音源里反而不带）；
+ *  - 纯标题。
+ * 候选打分仍按原始记录走，变体只影响召回。
+ */
+function keywordVariants(rec: ILocalMusicRecord): string[] {
+    const title = (rec.title || "").trim();
+    if (!title) {
+        return [];
+    }
+    const hasArtist = !!rec.artist && rec.artist !== "未知歌手";
+    // "不潮不用花钱-《乌鸦嘴妙女郎》电视剧插曲" → "不潮不用花钱"
+    const stripped = title.replace(/[-–—]\s*《[^》]*》.*$/, "").trim();
+    const names = stripped && stripped !== title ? [title, stripped] : [title];
+    const out: string[] = [];
+    for (const name of names) {
+        if (hasArtist) {
+            out.push(`${name} ${rec.artist}`);
+        }
+        out.push(name);
+    }
+    return [...new Set(out.filter(Boolean))];
+}
+
+/** 依次用关键词变体搜索，返回第一个能选出合格候选的条目 */
+async function findBestCandidate(
+    rec: ILocalMusicRecord,
+    plugin: SerializedPlugin,
+): Promise<IMusic.IMusicItem | null> {
+    for (const kw of keywordVariants(rec)) {
+        const candidates = await searchCandidates(plugin, kw);
+        if (!candidates.length) {
+            continue;
+        }
+        const best = pickBestCandidate(rec, candidates);
+        if (best) {
+            return best;
+        }
+    }
+    return null;
 }
 
 /** 归一化：去括号备注（Live / Remix…）、去空白标点，只留字母数字 */
@@ -1395,16 +1502,7 @@ async function matchOneRecord(
     plugin: SerializedPlugin,
     options: IMatchOptions,
 ): Promise<{ matched: boolean; gotLyric: boolean; gotCover: boolean }> {
-    const hasArtist = rec.artist && rec.artist !== "未知歌手";
-    const kw = hasArtist ? `${rec.title} ${rec.artist}` : rec.title;
-    let candidates = await searchCandidates(plugin, kw);
-    if (!candidates.length && kw !== rec.title) {
-        candidates = await searchCandidates(plugin, rec.title);
-    }
-    if (!candidates.length) {
-        return { matched: false, gotLyric: false, gotCover: false };
-    }
-    const best = pickBestCandidate(rec, candidates);
+    const best = await findBestCandidate(rec, plugin);
     if (!best) {
         return { matched: false, gotLyric: false, gotCover: false };
     }
@@ -1444,12 +1542,19 @@ async function matchOneRecord(
 /**
  * 播放详情页「获取封面歌词」：只匹配当前播放的这一首，缺什么补什么
  * （已有歌词就不再拉歌词；扫描提取的内嵌封面还在就不换封面）。
+ *
+ * 与批量匹配的差异：这里没有选源面板，用户点一下就得有结果，所以按
+ * 「默认音源 → 能出歌词的音源 → 其余可搜索音源」的顺序逐个试，
+ * 直到歌词和封面都拿到为止。历史上这里只试排序后的第一个插件，
+ * 而排序第一的往往是不支持 getLyric 的听书类插件（搜索音乐返回空），
+ * 于是点击必弹「没有匹配到合适的歌词或封面」。
+ *
  * 成功后把新封面 / 歌词同步进播放器的当前曲目与队列条目（不打断播放），
  * 并 bump 曲库版本号驱动本地音乐列表刷新。
  */
 export async function matchSingleLocalMusic(
     musicItem: IMusic.IMusicItem,
-): Promise<{ matched: boolean; gotLyric: boolean; gotCover: boolean }> {
+): Promise<{ matched: boolean; gotLyric: boolean; gotCover: boolean; source: string }> {
     if (currentPlatform() === "web") {
         throw new Error("当前环境不支持匹配，请在手机 App 中使用");
     }
@@ -1457,23 +1562,62 @@ export async function matchSingleLocalMusic(
     if (!rec) {
         throw new Error("本地曲库里没有这首歌的记录");
     }
+    // 记录里存了路径不代表文件还在（Android 封面落在 cacheDir，系统清缓存会清掉）：
+    // 按文件实际存在与否决定缺什么
+    const [hasLyric, hasCover] = await Promise.all([
+        hasMatchedMeta(rec, "lyric"),
+        hasMatchedMeta(rec, "cover"),
+    ]);
     const options: IMatchOptions = {
-        matchLyric: !rec.lyricPath,
-        matchCover: !(rec.matchedArtwork || rec.artwork),
+        matchLyric: !hasLyric,
+        matchCover: !hasCover,
         skipMatched: false,
     };
     if (!options.matchLyric && !options.matchCover) {
-        return { matched: false, gotLyric: false, gotCover: false };
+        return { matched: false, gotLyric: false, gotCover: false, source: "" };
     }
     const searchable = await getSortedSearchablePlugins();
     if (!searchable.length) {
         throw new Error("没有可用的音源插件，请先安装并启用");
     }
-    // 单首匹配没有选源面板：跟随用户设置的默认音源，没设置就用排序后的第一个
+    // 单首匹配没有选源面板：先试默认音源，再试支持歌词的，最后其余可搜索音源
     const defaultHash = localStorage.getItem("defaultPluginHash") || "";
-    const plugin = searchable.find((p) => p.hash === defaultHash) ?? searchable[0];
-    const r = await matchOneRecord(rec, plugin, options);
-    if (r.matched) {
+    const supportsLyric = (p: SerializedPlugin) => p.supportedMethods.includes("getLyric");
+    const ordered = [
+        ...searchable.filter((p) => p.hash === defaultHash),
+        ...searchable.filter((p) => p.hash !== defaultHash && supportsLyric(p)),
+        ...searchable.filter((p) => p.hash !== defaultHash && !supportsLyric(p)),
+    ];
+    // 歌词只能由支持 getLyric 的插件提供：缺歌词时优先用它们，
+    // 免得在听书类插件上空搜一轮（它们搜索音乐本来就返回空）；
+    // 一个都没有时退回全部，至少把封面补上
+    const lyricCapable = ordered.filter(supportsLyric);
+    const usable = options.matchLyric && lyricCapable.length ? lyricCapable : ordered;
+    // 每个插件都要真发一轮搜索（关键词变体最多 4 次），全试完用户等太久；
+    // 默认音源 + 两个备选足够覆盖单首补全，失败时引导用户去批量匹配里换源
+    const attempts = usable.slice(0, 3);
+    let gotLyric = false;
+    let gotCover = false;
+    let source = "";
+    for (const plugin of attempts) {
+        const r = await matchOneRecord(rec, plugin, {
+            matchLyric: options.matchLyric && !gotLyric,
+            matchCover: options.matchCover && !gotCover,
+            skipMatched: false,
+        });
+        if ((r.gotLyric && !gotLyric) || (r.gotCover && !gotCover)) {
+            source = plugin.name;
+        }
+        gotLyric = gotLyric || r.gotLyric;
+        gotCover = gotCover || r.gotCover;
+        const needLyric = options.matchLyric && !gotLyric;
+        const needCover = options.matchCover && !gotCover;
+        if (!needLyric && !needCover) {
+            break;
+        }
+    }
+    const matched = gotLyric || gotCover;
+    if (matched) {
         // 单首匹配立即落盘，不等防抖窗口（用户可能马上退出 App）
         flushLibrary();
         const fresh = readLibrary().find((it) => it.id === rec.id);
@@ -1482,7 +1626,7 @@ export async function matchSingleLocalMusic(
         }
         bumpLocalMusicVersion();
     }
-    return r;
+    return { matched, gotLyric, gotCover, source };
 }
 
 /* ----- 旧条目的歌词现查（历史 / 歌单里存的本地条目可能没有随匹配更新） ----- */

@@ -25,7 +25,12 @@ import {
     lyricTranslationAtom,
 } from "@/core/uiAtoms";
 import { isLikedMusic, toggleLike, likesVersionAtom } from "@/core/musicSheet";
-import { localMusicVersionAtom, findLocalRecord, matchSingleLocalMusic } from "@/core/localMusic";
+import {
+    localMusicVersionAtom,
+    findLocalRecord,
+    matchSingleLocalMusic,
+    hasMatchedMeta,
+} from "@/core/localMusic";
 import { navigate } from "@/core/router";
 import { useBackLayer } from "@/core/systemBack";
 import { formatSeconds, cssUrl } from "@/core/utils";
@@ -390,17 +395,39 @@ function NowPlayingInner({
         }
     }, [activeLyricIndex, isSeekingLyric]);
 
+    /* 本地音乐的歌词 / 封面就绪状态：曲库记录里存了路径也要看文件是否还在
+       （Android 封面落 cacheDir，系统清缓存会清掉文件）。这里只在原生环境命中，
+       记录缺失或不是本地曲目时两者都是 false，入口自然不显示。 */
+    const localRecord =
+        currentMusic?.platform === "local" ? findLocalRecord(currentMusic) : undefined;
+    // null = 还在查文件（先不显示入口，避免已有词图的歌闪一下按钮）
+    const [metaReady, setMetaReady] = useState<{ lyric: boolean; cover: boolean } | null>(null);
+    useEffect(() => {
+        let alive = true;
+        if (!localRecord) {
+            setMetaReady(null);
+            return;
+        }
+        void Promise.all([
+            hasMatchedMeta(localRecord, "lyric"),
+            hasMatchedMeta(localRecord, "cover"),
+        ]).then(([lyricReady, coverReady]) => {
+            if (alive) {
+                setMetaReady({ lyric: lyricReady, cover: coverReady });
+            }
+        });
+        return () => {
+            alive = false;
+        };
+    }, [localRecord, lmVersion]);
+
     if (!currentMusic) {
         return null;
     }
 
     /* 本地音乐「获取封面歌词」（参考网易云）：歌词或封面没就绪时给一键匹配入口，
        匹配成功后播放器条目被更新，这里经曲库版本号与 currentMusic 自动刷新 */
-    const localRecord =
-        currentMusic.platform === "local" ? findLocalRecord(currentMusic) : undefined;
-    const canFetchMeta =
-        !!localRecord &&
-        (!localRecord.lyricPath || !(localRecord.matchedArtwork || localRecord.artwork));
+    const canFetchMeta = !!localRecord && !!metaReady && (!metaReady.lyric || !metaReady.cover);
 
     const fetchMetaForCurrent = async () => {
         if (matchingMeta) {
@@ -410,12 +437,15 @@ function NowPlayingInner({
         try {
             const r = await matchSingleLocalMusic(currentMusic);
             if (!r.matched) {
-                showToast("没有匹配到合适的歌词或封面");
+                showToast(
+                    "这首没搜到合适的歌词或封面，可到「本地音乐 → 匹配歌词与封面」换个音源再试",
+                    4200,
+                );
             } else {
                 const got = [r.gotLyric ? "歌词" : "", r.gotCover ? "封面" : ""]
                     .filter(Boolean)
                     .join("与");
-                showToast(`已获取${got}`);
+                showToast(`已获取${got}${r.source ? `（${r.source}）` : ""}`);
             }
         } catch (e: any) {
             showToast(e?.message ?? String(e), 3600);
@@ -701,7 +731,14 @@ function NowPlayingInner({
                                     正在获取…
                                 </>
                             ) : (
-                                "获取封面歌词"
+                                // 按缺什么给文案：只缺一样时不必两样都说
+                                !metaReady || (metaReady.lyric && metaReady.cover)
+                                    ? "获取封面歌词"
+                                    : metaReady.lyric
+                                      ? "获取封面"
+                                      : metaReady.cover
+                                        ? "获取歌词"
+                                        : "获取封面歌词"
                             )}
                         </button>
                     </div>

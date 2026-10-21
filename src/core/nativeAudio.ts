@@ -82,6 +82,10 @@ export interface INativeAudioState {
     awaitingSource: boolean;
     /** 队列里当前曲之后的条目数 */
     plannedCount: number;
+    /** 定时关闭的到点时间戳（epoch ms；0 = 未开启） */
+    sleepDeadline: number;
+    /** 定时关闭的截止时间已到，正在等当前曲播完 */
+    sleepCloseAfterTrack: boolean;
 }
 
 /** MediaError 形状（对齐 HTMLMediaElement.error） */
@@ -580,6 +584,8 @@ export class NativeAudioElement {
                 hasNext: !!res.hasNext,
                 awaitingSource: !!res.awaitingSource,
                 plannedCount: Number(res.plannedCount) || 0,
+                sleepDeadline: Number(res.sleepDeadline) || 0,
+                sleepCloseAfterTrack: !!res.sleepCloseAfterTrack,
             };
         } catch {
             return null;
@@ -708,6 +714,15 @@ export class NativeAudioElement {
                 payload = { mediaId, index: Number(data.index) || 0 };
                 break;
             }
+            case "sleeptimer": {
+                // 原生侧定时关闭状态变了（设置/取消/到点执行）：带上最新 deadline
+                this._pausedOptimistic = null;
+                payload = {
+                    deadline: Number(data.sleepDeadline) || 0,
+                    closeAfterTrack: !!data.sleepCloseAfterTrack,
+                };
+                break;
+            }
             case "error": {
                 // detail 是原生错误码（PlaybackException.errorCode），粗映射成 HTML 同形
                 const code = Number(data.detail);
@@ -797,4 +812,71 @@ export function destroyAudioBackend(el: HTMLAudioElement | NativeAudioElement | 
             // ignore
         }
     }
+}
+
+/* ---------- 定时关闭（原生服务侧倒计时） ---------- */
+
+/**
+ * 定时关闭交给原生服务：页面切后台后 JS 定时器被系统冻结，
+ * 页面侧 setTimeout 到点不会执行，播放器却照常出声
+ * （「后台播放时定时关闭不生效」的根因）。倒计时活在原生侧，
+ * 页面冻结/被杀都能按时停。
+ *
+ * deadline 语义：> 0 到点 epoch 毫秒；= 0 取消；< 0 只改「播完再关」开关
+ * （到点后仍在等片尾时改勾选走这条）。
+ *
+ * 返回 false 表示没能把倒计时交出去（服务未就绪 / 桥不可用），
+ * 调用方据此回退到页面计时。
+ */
+export async function setNativeSleepTimer(
+    deadline: number,
+    closeAfterTrack: boolean,
+): Promise<boolean> {
+    try {
+        await callNativeMethod(PLUGIN, "setSleepTimer", {
+            deadline: Math.trunc(deadline),
+            closeAfterTrack,
+        });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/** 原生侧当前定时状态（未开启时 deadline=0） */
+export async function queryNativeSleepTimer(): Promise<{
+    deadline: number;
+    closeAfterTrack: boolean;
+} | null> {
+    try {
+        const res = await callNativeMethod(PLUGIN, "getState");
+        if (!res?.available) {
+            return null;
+        }
+        return {
+            deadline: Number(res.sleepDeadline) || 0,
+            closeAfterTrack: !!res.sleepCloseAfterTrack,
+        };
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * 订阅原生侧的定时关闭变更（设置 / 取消 / 到点执行）。
+ * 用插件级监听而不是某个后端实例：后端是异步替换的，事件不该跟着实例走。
+ * 返回解绑函数。
+ */
+export function addSleepTimerListener(
+    callback: (state: { deadline: number; closeAfterTrack: boolean }) => void,
+): () => void {
+    return addNativeListener(PLUGIN, "audioEvent", (data: any) => {
+        if (String(data?.type ?? "") !== "sleeptimer") {
+            return;
+        }
+        callback({
+            deadline: Number(data.sleepDeadline) || 0,
+            closeAfterTrack: !!data.sleepCloseAfterTrack,
+        });
+    });
 }

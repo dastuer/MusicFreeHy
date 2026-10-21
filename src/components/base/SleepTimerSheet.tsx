@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAtomValue } from "jotai";
 import {
     closeSleepTimer,
@@ -12,6 +12,7 @@ import {
     formatCountdown,
     setCloseAfterPlayEnd,
     setScheduleClose,
+    syncScheduleCloseFromNative,
     useCloseAfterPlayEnd,
     useScheduleCloseCountDown,
 } from "@/core/scheduleClose";
@@ -49,6 +50,11 @@ function SleepTimerBody() {
     // 待确认的分钟数：点行只改选中，按「开始定时」才真正开始倒计时
     const [selected, setSelected] = useState<number | null>(null);
     const isCustom = selected !== null && !SHORTCUT_MINUTES.includes(selected);
+
+    // 打开面板时以原生服务的状态为准：页面冻结期间定时可能已到点执行
+    useEffect(() => {
+        void syncScheduleCloseFromNative();
+    }, []);
 
     const pickCustomMinutes = (raw: string) => {
         const minutes = Number(raw);
