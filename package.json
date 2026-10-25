@@ -1,6 +1,6 @@
 {
   "name": "musicfree-hy",
-  "version": "1.0.17",
+  "version": "1.0.18",
   "private": true,
   "type": "module",
   "description": "MusicFree 手机版 - 基于 Capacitor 的混合 App（Android / iOS），核心功能与 MusicFreeDesktop 对齐，数据/插件/备份互通，UI 对齐网易云音乐手机版",
