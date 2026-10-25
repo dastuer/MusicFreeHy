@@ -198,6 +198,25 @@ public class PlaybackBridge extends Plugin {
         call.resolve();
     }
 
+    /** 就地刷新一条队列条目的展示元数据（本地音乐匹配到封面 / 歌词后调用）：
+     * 只换元数据不动地址，系统媒体卡片（下拉通知栏 / 锁屏）随之换封面，不打断播放。
+     * 见 {@link MediaPlaybackService#updateItemMeta}。 */
+    @PluginMethod
+    public void updateItemMeta(PluginCall call) {
+        MediaPlaybackService svc = activeService;
+        if (svc == null) {
+            call.reject("service unavailable");
+            return;
+        }
+        svc.updateItemMeta(
+            call.getString("mediaId", ""),
+            call.getString("title", ""),
+            call.getString("artist", ""),
+            call.getString("album", ""),
+            call.getString("artworkUri", ""));
+        call.resolve();
+    }
+
     /** 撤一条队列条目（JS 解析失败/冷却跳过） */
     @PluginMethod
     public void dropPlanned(PluginCall call) {
@@ -336,6 +355,10 @@ public class PlaybackBridge extends Plugin {
      * 页面侧 setTimeout 到点不会执行，而播放器照常出声）。
      * deadline 为到点的 epoch 毫秒，<= 0 表示取消；closeAfterTrack 表示到点后
      * 等当前这首播完再停。
+     *
+     * deadline 必须走字符串解析：epoch 毫秒是 13 位整数，org.json 会把它解成
+     * Long，而 Capacitor 的 `getDouble` 只认 Double/Float/Integer，拿到 Long
+     * 会静默返回 null——倒计时就变成了「立刻取消」。
      */
     @PluginMethod
     public void setSleepTimer(PluginCall call) {
@@ -344,11 +367,27 @@ public class PlaybackBridge extends Plugin {
             call.reject("service unavailable");
             return;
         }
-        Double deadline = call.getDouble("deadline");
+        long deadline = parseLongField(call, "deadline");
         boolean closeAfterTrack =
             Boolean.TRUE.equals(call.getBoolean("closeAfterTrack", Boolean.FALSE));
-        svc.setSleepTimer(deadline == null ? 0L : deadline.longValue(), closeAfterTrack);
+        svc.setSleepTimer(deadline, closeAfterTrack);
         call.resolve();
+    }
+
+    /** 读一个可能是整数/长整数/字符串的数值字段；缺失或非法返回 0 */
+    private static long parseLongField(PluginCall call, String name) {
+        Object raw = call.getData().opt(name);
+        if (raw == null) {
+            return 0L;
+        }
+        if (raw instanceof Number) {
+            return ((Number) raw).longValue();
+        }
+        try {
+            return Long.parseLong(String.valueOf(raw).trim());
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
     }
 
     /**
@@ -391,7 +430,7 @@ public class PlaybackBridge extends Plugin {
             ret.put("durationMs", dur == androidx.media3.common.C.TIME_UNSET ? 0L : dur);
             ret.put("paused", svc.isPaused());
             // 暂停是否用户发起：JS 回前台只对「非用户暂停」补播
-            ret.put("pausedByUser", svc.isPausedByUser());
+            ret.put("pausedByUser", svc.isPaused() && svc.isPausedByUser());
             ret.put("ended", svc.isEnded());
             ret.put("playing", svc.isPlaying());
             ret.put("hasNext", svc.hasNext());

@@ -313,6 +313,21 @@ export class NativeAudioElement {
     }
 
     /**
+     * 就地刷新原生队列里某条目的展示元数据（本地音乐匹配到封面 / 歌词后调用）：
+     * 只换元数据不动音频地址，系统媒体卡片（下拉通知栏 / 锁屏）立刻换封面，
+     * 不打断播放。条目不在原生队列里时原生侧什么都不做。
+     */
+    pushNativeItemMeta(
+        mediaId: string,
+        meta: { title: string; artist: string; album: string; artworkUri: string },
+    ) {
+        if (!mediaId) {
+            return;
+        }
+        callNativeMethod(PLUGIN, "updateItemMeta", { mediaId, ...meta }).catch(() => {});
+    }
+
+    /**
      * 当前曲目的标识（platform-id）。与 src 配合：src 决定播什么，
      * mediaId 让原生侧认得出「现在播的是队列里的哪一首」，页面冻结期间
      * 原生自动续播后 JS 才能对上号。

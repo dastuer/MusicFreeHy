@@ -2144,9 +2144,38 @@ class TrackPlayer extends EventEmitter {
         }
         this._history = this._history.map((it) => (sameKey(it) ? { ...it, ...item } : it));
         patchMusicHistoryMeta(item);
+        this.syncNativeItemMeta(item);
         if (touched) {
             this.persistPlayList();
         }
+    }
+
+    /**
+     * 把刷新后的展示元数据推给原生队列条目：本地音乐在播放页匹配到封面后，
+     * 系统媒体卡片（下拉通知栏 / 锁屏）要立刻换图，而不是等下一次装载。
+     *
+     * 只走原生后端的专用通道（WebView `<audio>` 没有系统媒体卡片，直接跳过）；
+     * 当前曲顺手更新本地镜像，之后重装这首时 loadTrack 会带上新封面。
+     */
+    private syncNativeItemMeta(item: IMusic.IMusicItem) {
+        const audio = this.audio;
+        if (!(audio instanceof NativeAudioElement)) {
+            return;
+        }
+        const artworkUri =
+            typeof item.artwork === "string" && item.artwork.length <= MAX_PERSISTED_ARTWORK
+                ? item.artwork
+                : "";
+        const meta = {
+            title: item.title ?? "",
+            artist: item.artist ?? "",
+            album: item.album ?? "",
+            artworkUri,
+        };
+        if (this.isCurrentMusic(item)) {
+            audio.setTrackMeta(meta);
+        }
+        audio.pushNativeItemMeta(playListKey(item), meta);
     }
 
     isInPlayList(musicItem?: IMusic.IMusicItem | null) {

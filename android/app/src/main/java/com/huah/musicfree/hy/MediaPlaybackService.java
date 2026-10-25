@@ -274,6 +274,12 @@ public class MediaPlaybackService extends MediaSessionService {
      * 任何一次重新开播都会清掉它。
      */
     private boolean sleepSuppressEnded = false;
+    /**
+     * 定时关闭已经停过播放：在用户显式重新开播之前，任何自动恢复链路
+     * （坏源自愈的 setPlayWhenReady(true)、回前台补播的判据）都不许把歌拉回来。
+     * 用户按播放 / 通知栏播放 / JS 侧 resume 都会清掉它。
+     */
+    private volatile boolean sleepPausedAfterTimer = false;
 
     /**
      * 倒计时心跳：每秒对一次**墙上时钟**再决定下一次唤醒间隔。
@@ -419,6 +425,9 @@ public class MediaPlaybackService extends MediaSessionService {
                     return com.google.common.util.concurrent.Futures.immediateFuture(out);
                 }
             });
+        // 系统媒体卡片（下拉通知栏 / 锁屏）的封面加载：本地封面是 Capacitor 的
+        // WebView 专用地址，Media3 默认加载器取不到 → 换成能直读文件的实现
+        sessionBuilder.setBitmapLoader(new NotificationArtworkLoader(this));
         if (sessionActivity != null) {
             sessionBuilder.setSessionActivity(sessionActivity);
         }
@@ -477,6 +486,7 @@ public class MediaPlaybackService extends MediaSessionService {
                         sleepCloseAfterTrack = false;
                         sleepDeadlineMs = 0L;
                         sleepSuppressEnded = true;
+                        sleepPausedAfterTimer = true;
                         main.removeCallbacks(sleepTimerTick);
                         main.removeCallbacks(sleepFadeTick);
                         setPauseAtTrackEnd(false);
@@ -490,6 +500,9 @@ public class MediaPlaybackService extends MediaSessionService {
                     pausedByUser = false;
                     // 用户重新开播：定时关闭已经结束，别再吞下一次 ended
                     sleepSuppressEnded = false;
+                    // 这是用户意图（UI / 通知栏 / 耳机 / 系统媒体键都会走到这里）：
+                    // 定时关闭之后的自愈「不许自动开播」也随之解除
+                    sleepPausedAfterTimer = false;
                 }
                 emitPlaybackEvent(playWhenReady ? "play" : "pause", currentMediaId(), null);
             }
@@ -536,8 +549,21 @@ public class MediaPlaybackService extends MediaSessionService {
                 //
                 // 换源重试的实现很直接：惰性数据源是按需解析的，把这条的
                 // 「已解析直链」清掉再重新 prepare，它就会重新跑一次插件
-                // 拿新直链（excludeUrl 用刚失败的那条）。重试次数用尽才跳歌；
+                // 拿新直链（excludeUrl 用刚失败的直链）。重试次数用尽才跳歌；
                 // 连续多首全失败才真正放弃（整队坏源时避免静默空转烧电）。
+                //
+                // 定时关闭已经执行过（sleepPausedAfterTimer）：自愈不能替用户
+                // 开播——坏源重试里的 setPlayWhenReady(true) 会把定时关掉的
+                // 播放重新拉起来，这才是「定时了却还在响」的真实原因。
+                if (sleepPausedAfterTimer) {
+                    Log.i(TAG, "定时关闭后取流失败：只换源不自动开播（" + currentMediaId() + "）");
+                    resolveRetries.remove(currentMediaId());
+                    resolvedSrcByMediaId.remove(currentMediaId());
+                    player.prepare();
+                    emitPlaybackEvent("error", currentMediaId(),
+                        (error == null ? "unknown" : String.valueOf(error.errorCode)));
+                    return;
+                }
                 String failedId = currentMediaId();
                 String failedSrc = currentSrc();
                 if (!failedId.isEmpty() && !failedSrc.isEmpty()) {
@@ -959,11 +985,6 @@ public class MediaPlaybackService extends MediaSessionService {
             if (isSamePlaylist(mediaItems)) {
                 int currentIndex = player.getCurrentMediaItemIndex();
                 for (int i = 0; i < mediaItems.size() && i < player.getMediaItemCount(); i++) {
-                    if (i == currentIndex) {
-                        // 正在播的条目一律不动：replaceMediaItem 会把它的数据源
-                        // 换掉、缓冲区作废，播放中表现为从头重解析/重播
-                        continue;
-                    }
                     MediaItem cur = player.getMediaItemAt(i);
                     MediaItem next = mediaItems.get(i);
                     String curUri = cur != null && cur.localConfiguration != null
@@ -972,7 +993,16 @@ public class MediaPlaybackService extends MediaSessionService {
                     String nextUri = next.localConfiguration != null
                         && next.localConfiguration.uri != null
                         ? next.localConfiguration.uri.toString() : "";
-                    if (!curUri.equals(nextUri)) {
+                    boolean uriChanged = !curUri.equals(nextUri);
+                    if (i == currentIndex && uriChanged) {
+                        // 正在播的条目不能换地址：replaceMediaItem 会把它的数据源
+                        // 换掉、缓冲区作废，播放中表现为从头重解析/重播。
+                        // 只改元数据（封面/标题）的替换 Media3 会走 canUpdateMediaItem
+                        // 就地更新，不重建数据源，所以那种替换放行——本地音乐匹配到
+                        // 封面后，系统媒体卡片就是靠它换图的。
+                        continue;
+                    }
+                    if (uriChanged || !sameMediaMetadata(cur, next)) {
                         player.replaceMediaItem(i, next);
                     }
                 }
@@ -1088,6 +1118,109 @@ public class MediaPlaybackService extends MediaSessionService {
             }
             scheduleQueuePersist();
         });
+    }
+
+    /**
+     * 就地刷新一条队列条目的展示元数据：本地音乐在播放页匹配到封面 / 歌词后，
+     * JS 把新的封面地址推过来，系统媒体卡片（下拉通知栏 / 锁屏）立刻换图。
+     *
+     * 只换元数据、**不动音频地址**：Media3 对「URI 不变、只有元数据变化」的
+     * replaceMediaItem 走 {@code canUpdateMediaItem} 的就地更新（不重建数据源、
+     * 不作废缓冲、播放位置与出声都不断），元数据变化本身也会触发通知卡片重绘。
+     *
+     * 这条不在原生队列里时不做事：JS 下次推整条队列时自然带上新元数据。
+     */
+    void updateItemMeta(String mediaId, String title, String artist, String album,
+                        String artworkUri) {
+        runOnMain(() -> {
+            if (player == null || mediaId == null || mediaId.isEmpty()) {
+                return;
+            }
+            Planned old = plannedById.get(mediaId);
+            if (old == null) {
+                return;
+            }
+            // 计划条目一起换新：之后的队列重推 / 队列快照恢复不会退回旧封面
+            Planned fresh = new Planned(
+                mediaId,
+                old.src,
+                pickMeta(title, old.title),
+                pickMeta(artist, old.artist),
+                pickMeta(album, old.album),
+                pickMeta(artworkUri, old.artworkUri),
+                old.payload,
+                old.quality);
+            plannedById.put(mediaId, fresh);
+            int index = indexOfMediaId(mediaId);
+            if (index < 0) {
+                scheduleQueuePersist();
+                return;
+            }
+            MediaItem cur = player.getMediaItemAt(index);
+            String uri = cur != null && cur.localConfiguration != null
+                && cur.localConfiguration.uri != null
+                ? cur.localConfiguration.uri.toString() : "";
+            if (uri.isEmpty()) {
+                return;
+            }
+            // 用条目**当前**的 URI 重建（地址原样保留 → Media3 走就地更新），只换元数据
+            player.replaceMediaItem(index, buildItem(uri, fresh));
+            scheduleQueuePersist();
+            refreshNotification();
+        });
+    }
+
+    /** 新值非空就用新值，否则保留旧值（JS 没给的字段不该被清空） */
+    private static String pickMeta(String value, String fallback) {
+        return value == null || value.isEmpty() ? fallback : value;
+    }
+
+    /**
+     * 通知卡片的元数据是否一致（标题 / 歌手 / 专辑 / 封面地址）。
+     * setQueue 的增量替换要在「只有元数据变了」时也更新条目——本地音乐匹配到
+     * 封面后队列里那些还没播到的歌也要跟着换图。
+     */
+    private static boolean sameMediaMetadata(@Nullable MediaItem a, @Nullable MediaItem b) {
+        if (a == null || b == null) {
+            return a == b;
+        }
+        MediaMetadata ma = a.mediaMetadata;
+        MediaMetadata mb = b.mediaMetadata;
+        return eq(ma.title, mb.title)
+            && eq(ma.artist, mb.artist)
+            && eq(ma.albumTitle, mb.albumTitle)
+            && sameUri(ma.artworkUri, mb.artworkUri);
+    }
+
+    private static boolean eq(@Nullable CharSequence a, @Nullable CharSequence b) {
+        return a == null ? b == null : a.equals(b);
+    }
+
+    private static boolean sameUri(@Nullable Uri a, @Nullable Uri b) {
+        return a == null ? b == null : a.equals(b);
+    }
+
+    /**
+     * 让系统媒体卡片重绘一次（封面刚被覆盖成新图时用）。
+     *
+     * 走 MediaSessionService 公开的 {@code onUpdateNotification(session, required)}：
+     * required 与 Media3 自己的判据一致（在播 / 缓冲中且 playWhenReady），
+     * 免得把正在前台播放的服务误降出前台态。
+     */
+    private void refreshNotification() {
+        MediaSession session = mediaSession;
+        if (session == null || player == null) {
+            return;
+        }
+        boolean startInForegroundRequired =
+            player.getPlayWhenReady()
+                && (player.getPlaybackState() == Player.STATE_READY
+                    || player.getPlaybackState() == Player.STATE_BUFFERING);
+        try {
+            onUpdateNotification(session, startInForegroundRequired);
+        } catch (Throwable t) {
+            Log.w(TAG, "刷新媒体通知失败：" + t);
+        }
     }
 
     /** 撤一条队列条目（JS 解析失败/冷却跳过） */
@@ -1401,6 +1534,7 @@ public class MediaPlaybackService extends MediaSessionService {
         sleepDeadlineMs = 0L;
         sleepAwaitingTrackEnd = false;
         sleepSuppressEnded = true;
+        sleepPausedAfterTimer = true;
         sleepCloseAfterTrack = false;
         if (player != null) {
             setPauseAtTrackEnd(false);
@@ -1479,7 +1613,9 @@ public class MediaPlaybackService extends MediaSessionService {
 
     /** 当前暂停态是否用户发起的（getState 用：回前台据此决定要不要补播） */
     boolean isPausedByUser() {
-        return pausedByUser;
+        // 定时关闭停下的播放同样不许自动补播——哪怕 reason 判据没覆盖到
+        // （比如服务重建后 pausedByUser 丢了），这条也兜得住
+        return pausedByUser || sleepPausedAfterTimer;
     }
 
     boolean isEnded() {
@@ -1617,7 +1753,10 @@ public class MediaPlaybackService extends MediaSessionService {
             meta.setAlbumTitle(p.album);
         }
         if (p.artworkUri != null && !p.artworkUri.isEmpty()) {
-            meta.setArtworkUri(Uri.parse(p.artworkUri));
+            // 封面地址同样要归一化：本地音乐的封面是 Capacitor 的
+            // `https://localhost/_capacitor_file_/...`，只有 WebView 能拦这个域名，
+            // 系统媒体卡片（Media3）直接请求会失败——还原成 file:// 才能显示
+            meta.setArtworkUri(Uri.parse(normalizeSrc(p.artworkUri)));
         }
         builder.setMediaMetadata(meta.build());
         return builder.build();
