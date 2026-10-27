@@ -6,7 +6,7 @@ import {
     showToast,
 } from "@/core/uiAtoms";
 import { useBackLayer } from "@/core/systemBack";
-import { IconChevronDown, IconClose } from "./Icons";
+import { IconCheck, IconChevronDown, IconClose } from "./Icons";
 import {
     CUSTOM_PRESET_NAME,
     EQ_BAND_LABELS,
@@ -51,8 +51,16 @@ import {
 
 export default function AudioEffectSheet() {
     const open = useAtomValue(audioEffectOpenAtom);
+    /** 二级选择浮层（预设 / 环境音效共用）：原生 <select> 的系统单选框与主题违和 */
+    const [picker, setPicker] = useState<null | {
+        title: string;
+        options: { value: string; label: string }[];
+        value: string;
+        onSelect: (v: string) => void;
+    }>(null);
 
-    // 系统返回先收起面板
+    // 系统返回：选择器浮层在栈顶先消费，然后才是面板
+    useBackLayer(open && picker !== null, "audio-effect-picker", () => setPicker(null));
     useBackLayer(open, "audio-effect", closeAudioEffectSheet);
 
     // 打开面板时把设置补发给原生一次：WebView 冻结期间原生服务可能被杀重建，
@@ -72,13 +80,72 @@ export default function AudioEffectSheet() {
     return (
         <div className="sheet-mask" onClick={() => closeAudioEffectSheet()}>
             <div className="audio-effect-panel" onClick={(e) => e.stopPropagation()}>
-                <AudioEffectBody />
+                <AudioEffectBody openPicker={setPicker} />
             </div>
+            {picker && (
+                /* 二级选择浮层：盖在音效面板之上；点遮罩收起，返回键同效 */
+                <div
+                    className="fx-picker-mask"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        setPicker(null);
+                    }}
+                >
+                    <div className="fx-picker" onClick={(e) => e.stopPropagation()}>
+                        <div className="fx-picker-title">{picker.title}</div>
+                        <div className="fx-picker-list">
+                            {picker.options.map((opt) => {
+                                const active = opt.value === picker.value;
+                                return (
+                                    <button
+                                        key={opt.value}
+                                        ref={
+                                            active
+                                                ? (el) => {
+                                                      // 打开时把当前选中项滚到可视区中部：
+                                                      // 长列表（24 套预设）不滚的话选中项多半在屏幕外
+                                                      if (el) {
+                                                          requestAnimationFrame(() =>
+                                                              el.scrollIntoView({
+                                                                  block: "center",
+                                                              }),
+                                                          );
+                                                      }
+                                                  }
+                                                : undefined
+                                        }
+                                        className={`fx-picker-item${active ? " active" : ""}`}
+                                        onClick={() => {
+                                            picker.onSelect(opt.value);
+                                            setPicker(null);
+                                        }}
+                                    >
+                                        <span className="fx-picker-item-label">{opt.label}</span>
+                                        {active && (
+                                            <span className="source-select-check">
+                                                <IconCheck size={15} />
+                                            </span>
+                                        )}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
 
-function AudioEffectBody() {
+function AudioEffectBody(props: {
+    openPicker: (state: {
+        title: string;
+        options: { value: string; label: string }[];
+        value: string;
+        onSelect: (v: string) => void;
+    }) => void;
+}) {
+    const { openPicker } = props;
     const settings = useAudioEffect();
     const surroundText = (v: number) => `${Math.round(v * 100)}%`;
 
@@ -115,25 +182,32 @@ function AudioEffectBody() {
                 {/* 预设行：下拉 + 保存 */}
                 <div className="eq-preset-row">
                     <span className="eq-preset-label">均衡器</span>
-                    <div className="pill-select-wrap">
-                        <select
-                            className="pill-select"
-                            value={selectValue}
-                            onChange={(e) => applyPreset(e.target.value)}
-                        >
-                            {!presetOptions.includes(settings.preset) && (
-                                <option value={CUSTOM_PRESET_NAME}>{CUSTOM_PRESET_NAME}</option>
-                            )}
-                            {presetOptions.map((name) => (
-                                <option key={name} value={name}>
-                                    {name}
-                                </option>
-                            ))}
-                        </select>
+                    <button
+                        className="pill-select"
+                        onClick={() =>
+                            openPicker({
+                                title: "选择均衡器预设",
+                                options: [
+                                    ...(settings.preset === CUSTOM_PRESET_NAME
+                                        ? [
+                                              {
+                                                  value: CUSTOM_PRESET_NAME,
+                                                  label: CUSTOM_PRESET_NAME,
+                                              },
+                                          ]
+                                        : []),
+                                    ...presetOptions.map((name) => ({ value: name, label: name })),
+                                ],
+                                value: selectValue,
+                                onSelect: (v) => applyPreset(v),
+                            })
+                        }
+                    >
+                        <span className="pill-select-value">{selectValue}</span>
                         <span className="pill-select-caret">
                             <IconChevronDown size={15} />
                         </span>
-                    </div>
+                    </button>
                     <button
                         className="eq-preset-save"
                         onClick={() => {
@@ -214,22 +288,25 @@ function AudioEffectBody() {
                 {/* 环境音效 */}
                 <div className="reverb-row">
                     <span className="reverb-label">环境音效</span>
-                    <div className="pill-select-wrap">
-                        <select
-                            className="pill-select"
-                            value={settings.reverb}
-                            onChange={(e) => setReverbPreset(e.target.value)}
-                        >
-                            {REVERB_PRESETS.map((preset) => (
-                                <option key={preset.name} value={preset.name}>
-                                    {preset.name}
-                                </option>
-                            ))}
-                        </select>
+                    <button
+                        className="pill-select"
+                        onClick={() =>
+                            openPicker({
+                                title: "选择环境音效",
+                                options: REVERB_PRESETS.map((preset) => ({
+                                    value: preset.name,
+                                    label: preset.name,
+                                })),
+                                value: settings.reverb,
+                                onSelect: (v) => setReverbPreset(v),
+                            })
+                        }
+                    >
+                        <span className="pill-select-value">{settings.reverb}</span>
                         <span className="pill-select-caret">
                             <IconChevronDown size={15} />
                         </span>
-                    </div>
+                    </button>
                 </div>
             </div>
         </>
