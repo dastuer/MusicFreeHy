@@ -28,3 +28,5 @@ android/app/musicfree-hy.keystore
 .trae/
 .workbuddy/
 .zcode/
+.tmp-dev/
+.tmp-javac/

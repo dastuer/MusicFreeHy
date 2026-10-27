@@ -21,9 +21,13 @@ import {
     openMusicActions,
     openSingleSelect,
     openAddToSheet,
+    openSleepTimer,
+    openAudioEffectSheet,
     showToast,
     lyricTranslationAtom,
 } from "@/core/uiAtoms";
+import { getAudioEffectSettings } from "@/core/audioEffect";
+import { formatCountdown, useScheduleCloseCountDown } from "@/core/scheduleClose";
 import { isLikedMusic, toggleLike, likesVersionAtom } from "@/core/musicSheet";
 import {
     localMusicVersionAtom,
@@ -64,6 +68,8 @@ import {
     IconDisc,
     IconMic,
     IconSpeed,
+    IconAlarm,
+    IconSoundEffect,
 } from "@/components/base/Icons";
 
 const QUALITY_ORDER: IMusic.IQualityKey[] = ["low", "standard", "high", "super"];
@@ -547,6 +553,9 @@ function NowPlayingInner({
         });
     };
 
+    // 定时关闭剩余时间：更多菜单里实时展示，不用回侧边栏查
+    const sleepCountDown = useScheduleCloseCountDown();
+
     const openMoreSheet = () => {
         openMusicActions({
             musicItem: currentMusic,
@@ -600,6 +609,24 @@ function NowPlayingInner({
                     label: "倍速播放",
                     icon: IconSpeed,
                     onClick: openRateSheet,
+                },
+                {
+                    label:
+                        sleepCountDown !== null
+                            ? `定时关闭 · ${formatCountdown(sleepCountDown)}`
+                            : "定时关闭",
+                    icon: IconAlarm,
+                    onClick: openSleepTimer,
+                },
+                {
+                    // 音效：开着时行内直接标当前预设，一眼可确认生效状态
+                    label: `音效 · ${
+                        getAudioEffectSettings().enabled
+                            ? getAudioEffectSettings().preset
+                            : "关"
+                    }`,
+                    icon: IconSoundEffect,
+                    onClick: openAudioEffectSheet,
                 },
             ],
         });

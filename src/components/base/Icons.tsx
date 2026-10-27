@@ -492,3 +492,11 @@ export const IconPlaying = ({ size = 16 }: IIconProps) => (
         </rect>
     </svg>
 );
+
+/** 音效：三根高低不同的推子（均衡器意象），与桌面版音效图标同形 */
+export const IconSoundEffect = ({ size = 22, strokeWidth = 1.8 }: IIconProps) => (
+    <svg {...base(size)} strokeWidth={strokeWidth}>
+        <path d="M6 4v5.5M6 14.5V20M12 4v8.5M12 17.5V20M18 4v2.5M18 11.5V20" />
+        <path d="M3.6 11.5h4.8M9.6 15h4.8M15.6 8h4.8" />
+    </svg>
+);

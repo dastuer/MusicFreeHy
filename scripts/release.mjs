@@ -6,6 +6,11 @@
  *   export GITEE_TOKEN=<私人令牌（勾 projects 权限）>
  *   node scripts/release.mjs 1.0.1                        # 更新说明自动取最近 10 条提交
  *   node scripts/release.mjs 1.1.0 --notes "- 新增xx\n- 修复yy"
+ *   node scripts/release.mjs 1.1.0 --debug                # 同时构建 debug 渠道包并上传
+ *
+ * debug 渠道：applicationId 带 .debug 后缀（build.gradle），与正式包共存；
+ * 更新清单独立（update-debug.json），两个渠道互不提示对方的更新包。debug 包用
+ * debug keystore 签名，仅供测试，不要分发给普通用户。
  *
  * 前置：已关联名为 gitee 的 remote（git@gitee.com:<user>/<repo>.git，main 分支）。
  * 发版后清单经 Gitee raw 缓存（60~300s）生效，旧包启动 4s 后收到更新提示。
@@ -22,6 +27,7 @@ const GRADLE_PATH = path.join(ROOT, "android/app/build.gradle");
 const PKG_PATH = path.join(ROOT, "package.json");
 const BACKUP_PATH = path.join(ROOT, "src/core/backup.ts");
 const MANIFEST_PATH = path.join(ROOT, "update.json");
+const MANIFEST_DEBUG_PATH = path.join(ROOT, "update-debug.json");
 
 const log = (msg) => console.log(`[release] ${msg}`);
 const die = (msg) => {
@@ -36,6 +42,7 @@ const ver = args[0];
 if (!ver || !/^\d+\.\d+\.\d+$/.test(ver)) {
     die("用法：node scripts/release.mjs <版本号> [--notes \"- 更新说明\"]，版本号形如 1.0.1");
 }
+const WITH_DEBUG = args.includes("--debug");
 const notesIdx = args.indexOf("--notes");
 let notes =
     notesIdx >= 0 && args[notesIdx + 1]
@@ -108,8 +115,9 @@ if (process.platform === "darwin") {
         // 没 java_home 就退回继承的 JAVA_HOME / PATH
     }
 }
-log("开始 assembleRelease（几分钟，输出在 android/ 目录）…");
-const build = spawnSync(gradlew, ["assembleRelease"], {
+const gradleTasks = WITH_DEBUG ? ["assembleRelease", "assembleDebug"] : ["assembleRelease"];
+log(`开始 ${gradleTasks.join(" + ")}（几分钟，输出在 android/ 目录）…`);
+const build = spawnSync(gradlew, gradleTasks, {
     cwd: path.join(ROOT, "android"),
     stdio: "inherit",
     env,
@@ -125,6 +133,20 @@ const apkName = `MusicFreeHy-${ver}.apk`;
 const apkPath = path.join(os.tmpdir(), apkName);
 fs.copyFileSync(apkSrc, apkPath);
 log(`签名包已产出：${apkName}（${(fs.statSync(apkPath).size / 1024 / 1024).toFixed(1)} MB）`);
+
+// debug 渠道包：applicationId 带 .debug 后缀 + debug keystore 签名，可与正式包共存
+let debugApkPath = null;
+let debugApkName = null;
+if (WITH_DEBUG) {
+    const debugSrc = path.join(ROOT, "android/app/build/outputs/apk/debug/app-debug.apk");
+    if (!fs.existsSync(debugSrc)) {
+        die(`找不到产物：${debugSrc}`);
+    }
+    debugApkName = `MusicFreeHy-${ver}-debug.apk`;
+    debugApkPath = path.join(os.tmpdir(), debugApkName);
+    fs.copyFileSync(debugSrc, debugApkPath);
+    log(`debug 包已产出：${debugApkName}（${(fs.statSync(debugApkPath).size / 1024 / 1024).toFixed(1)} MB）`);
+}
 
 /* ---------- 3. Gitee 建发行版 + 上传附件 ---------- */
 
@@ -176,22 +198,52 @@ try {
 const apkUrl = uploaded.browser_download_url;
 log(`附件已上传：${apkUrl}`);
 
+let debugApkUrl = null;
+if (WITH_DEBUG) {
+    const form = new FormData();
+    form.append(
+        "file",
+        new Blob([fs.readFileSync(debugApkPath)], {
+            type: "application/vnd.android.package-archive",
+        }),
+        debugApkName,
+    );
+    const uploadedDebug = await giteeApi(
+        `/repos/${ownerRepo}/releases/${release.id}/attach_files`,
+        { method: "POST", body: form },
+    );
+    debugApkUrl = uploadedDebug.browser_download_url;
+    log(`debug 附件已上传：${debugApkUrl}`);
+}
+
 /* ---------- 4. 更新清单 update.json ---------- */
 
+const publishedAt = new Date().toISOString().slice(0, 10);
 const manifest = {
     versionCode: nextCode,
     versionName: ver,
     changelog: notes,
     apkUrl,
-    publishedAt: new Date().toISOString().slice(0, 10),
+    publishedAt,
 };
 fs.writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + "\n");
+
+if (WITH_DEBUG) {
+    const debugManifest = {
+        versionCode: nextCode,
+        versionName: `${ver}-debug`,
+        changelog: notes,
+        apkUrl: debugApkUrl,
+        publishedAt,
+    };
+    fs.writeFileSync(MANIFEST_DEBUG_PATH, JSON.stringify(debugManifest, null, 2) + "\n");
+}
 
 /* ---------- 5. 提交并推送 ---------- */
 
 execFileSync(
     "git",
-    ["add", "android/app/build.gradle", "package.json", "src/core/backup.ts", "update.json"],
+    ["add", "android/app/build.gradle", "package.json", "src/core/backup.ts", "update.json", "update-debug.json"],
     { cwd: ROOT },
 );
 // 中断重跑时清单/版本号可能已无变化：无 diff 就跳过提交，推送照常

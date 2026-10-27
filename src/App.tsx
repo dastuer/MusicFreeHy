@@ -19,6 +19,7 @@ import { ensureLikesSheet } from "@/core/musicSheet";
 import { resumeSavedMatchTask, getLocalMusicCount } from "@/core/localMusic";
 import { silentCheckForUpdate } from "@/core/appUpdate";
 import { isNative } from "@/core/native";
+import { setupAudioEffectSync } from "@/core/audioEffect";
 import { showToast } from "@/core/uiAtoms";
 import TabBar from "@/components/layout/TabBar";
 import AppDrawer from "@/components/layout/AppDrawer";
@@ -31,6 +32,7 @@ import AddToSheetPanel from "@/components/base/AddToSheetPanel";
 import SourceSelectSheet from "@/components/base/SourceSelectSheet";
 import SingleSelectSheet from "@/components/base/SingleSelectSheet";
 import SleepTimerSheet from "@/components/base/SleepTimerSheet";
+import AudioEffectSheet from "@/components/base/AudioEffectSheet";
 import UpdateSheet from "@/components/base/UpdateSheet";
 import PromptDialog from "@/components/base/PromptDialog";
 import HomePage from "@/pages/home";
@@ -218,6 +220,8 @@ export default function App() {
         TrackPlayerSingleton.setup();
         // 系统媒体通知（Android 下拉栏媒体卡片；仅原生环境生效）
         setupMediaNotification();
+        // 音效设置的时机钩子：原生后端就绪 / 回前台时把设置同步给原生服务
+        setupAudioEffectSync();
         // 上次没跑完的本地音乐匹配任务（应用退出即中断）：启动时自动续跑
         void resumeSavedMatchTask().catch((e: any) =>
             console.warn("[app] 恢复本地匹配任务失败", e),
@@ -281,6 +285,7 @@ export default function App() {
             <SourceSelectSheet />
             <SingleSelectSheet />
             <SleepTimerSheet />
+            <AudioEffectSheet />
             <UpdateSheet />
             <PromptDialog />
             <ToastHost />

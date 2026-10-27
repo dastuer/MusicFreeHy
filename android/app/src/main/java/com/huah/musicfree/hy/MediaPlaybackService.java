@@ -214,6 +214,8 @@ public class MediaPlaybackService extends MediaSessionService {
 
     private MediaSession mediaSession;
     private ExoPlayer player;
+    /** 原生音效链：挂 player 的 audioSessionId（JS 经 PlaybackBridge.setAudioEffect 下发） */
+    private final AudioFx audioFx = new AudioFx();
     /**
      * 音频焦点仲裁开关，默认 false（不入仲裁）。音乐应用与短视频/视频应用
      * 天然共场景：入仲裁则对方每次抢焦点我们都暂停（抖音高频抢焦点时表现为
@@ -371,6 +373,11 @@ public class MediaPlaybackService extends MediaSessionService {
         PlaybackBridge.activeService = this;
         queueStateFile = new File(getFilesDir(), QUEUE_STATE_FILE);
         player = createPlayer();
+        // 音效挂到 player 的 audioSessionId。注意：开播前 getAudioSessionId()
+        // 可能返回 UNSET(0)，所以真正的挂载靠 createPlayer 里注册的
+        // onAudioSessionIdChanged 回调（session 在 AudioSink 初始化时才确定）；
+        // 这里先尝试一次，构造时就有 id 的设备当场挂上
+        audioFx.attach(player.getAudioSessionId());
         // session activity：通知栏媒体卡片的**点击目标**。
         // 不设它 Media3 的通知缺少 contentIntent，部分 ROM（实测 realme/ColorOS）
         // 会把这条通知视为不完整而不展示——前台服务没有可见通知时会被厂商省电
@@ -704,6 +711,14 @@ public class MediaPlaybackService extends MediaSessionService {
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build();
         p.setAudioAttributes(attrs, focusEnabled);
+        // 音效挂载点：audioSessionId 在 AudioTrack 初始化（首次开播）时才确定，
+        // 构造后立刻取多半是 UNSET。session 一确定就挂效果器并恢复最近参数
+        p.addListener(new Player.Listener() {
+            @Override
+            public void onAudioSessionIdChanged(int audioSessionId) {
+                audioFx.attach(audioSessionId);
+            }
+        });
         // 音频硬件直通：默认偏好开关见字段注释。TrackSelectionParameters 只能经
         // Player.setTrackSelectionParameters 下发（ExoPlayer.Builder 没有对应入口）。
         applyAudioOffload(p);
@@ -723,9 +738,13 @@ public class MediaPlaybackService extends MediaSessionService {
      * 要求满足会大幅收窄可用直通的机型；用户改倍速时 Media3 会自动回退普通解码。
      */
     private void applyAudioOffload(ExoPlayer p) {
+        // 音效开着时强制走普通解码：offload（直通）把解码交给 DSP，系统音频效果器
+        // （Equalizer 等）在直通模式下不参与，开着音效却听不到变化。Media3 会在
+        // offload 不满足时自动回退，这里直接禁用 offload 更直接。
+        boolean offloadAllowed = audioOffloadEnabled && !audioFx.isAnyEnabled();
         TrackSelectionParameters.AudioOffloadPreferences prefs =
             new TrackSelectionParameters.AudioOffloadPreferences.Builder()
-                .setAudioOffloadMode(audioOffloadEnabled
+                .setAudioOffloadMode(offloadAllowed
                     ? TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED
                     : TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED)
                 .setIsGaplessSupportRequired(false)
@@ -746,6 +765,32 @@ public class MediaPlaybackService extends MediaSessionService {
                 Log.i(TAG, "音频直通(offload)偏好更新：" + (enabled ? "开启" : "关闭"));
             }
         });
+    }
+
+    /**
+     * 应用音效设置（JSON 来自 JS 侧 audioEffect，全量幂等）。
+     * 首次开启任何效果时要重新评估 offload 偏好——直通模式下音效不生效。
+     */
+    void setAudioEffect(String json) {
+        runOnMain(() -> {
+            try {
+                boolean fxWasOn = audioFx.isAnyEnabled();
+                JSONObject params = new JSONObject(json == null ? "{}" : json);
+                audioFx.apply(params);
+                if (audioFx.isAnyEnabled() != fxWasOn && player != null) {
+                    // 开/关切换会改变 offload 可用性：重下轨道选择偏好
+                    applyAudioOffload(player);
+                }
+                Log.i(TAG, "音效参数已应用：" + (audioFx.isAnyEnabled() ? "开启" : "关闭"));
+            } catch (Throwable t) {
+                Log.w(TAG, "应用音效设置失败：" + t);
+            }
+        });
+    }
+
+    /** 音效状态快照（getState 汇总，调试用）：session 与各效果器支持情况 */
+    String describeAudioFx() {
+        return audioFx.describe();
     }
 
     @Override
@@ -780,6 +825,8 @@ public class MediaPlaybackService extends MediaSessionService {
             mediaSession = null;
         }
         if (player != null) {
+            // 先摘音效再释放 player：AudioEffect 引用着 audio session，顺序反了会泄漏
+            audioFx.release();
             player.release();
             player = null;
         }

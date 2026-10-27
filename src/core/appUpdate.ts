@@ -25,8 +25,40 @@ import {
 } from "./native";
 import { closeUpdateSheet, openUpdateSheet, showToast } from "./uiAtoms";
 
-/** 版本清单地址：Gitee 公开仓库 raw 直链（发版只改仓库里的 update.json，代码不变） */
-const UPDATE_MANIFEST_URL = "https://gitee.com/huaihui/MusicFreeHy/raw/main/update.json";
+/**
+ * 版本清单地址：Gitee 公开仓库 raw 直链（发版只改仓库里的 update.json，代码不变）。
+ *
+ * 两个渠道各一条清单、互不可见：正式包拉 update.json，debug 包（applicationId
+ * 带 .debug 后缀）拉 update-debug.json。这样试验性构建可以先行发出去自测，
+ * 不会提示正式用户；正式发版也不打扰 debug 渠道。
+ */
+const UPDATE_MANIFEST_STABLE_URL =
+    "https://gitee.com/huaihui/MusicFreeHy/raw/main/update.json";
+const UPDATE_MANIFEST_DEBUG_URL =
+    "https://gitee.com/huaihui/MusicFreeHy/raw/main/update-debug.json";
+
+/** 本机渠道：debug 包 applicationId 以 .debug 结尾（build.gradle 的 applicationIdSuffix） */
+export type UpdateChannel = "stable" | "debug";
+
+let cachedChannel: UpdateChannel | null = null;
+
+export async function getUpdateChannel(): Promise<UpdateChannel> {
+    if (cachedChannel) {
+        return cachedChannel;
+    }
+    if (isNative()) {
+        try {
+            const res = await callNativeMethod("AppUpdate", "getAppVersion");
+            const pkg = String(res?.packageName ?? "");
+            cachedChannel = pkg.endsWith(".debug") ? "debug" : "stable";
+            return cachedChannel;
+        } catch {
+            // 读不到按正式渠道处理
+        }
+    }
+    cachedChannel = "stable";
+    return cachedChannel;
+}
 
 export interface IUpdateManifest {
     versionCode: number;
@@ -127,7 +159,10 @@ export async function checkForUpdate(
     options: { manual?: boolean } = {},
 ): Promise<ICheckUpdateResult> {
     const local = await getLocalVersion();
-    const raw = await fetchManifestText(UPDATE_MANIFEST_URL);
+    const channel = await getUpdateChannel();
+    const raw = await fetchManifestText(
+        channel === "debug" ? UPDATE_MANIFEST_DEBUG_URL : UPDATE_MANIFEST_STABLE_URL,
+    );
     const manifest = parseManifest(raw);
     const isNewer =
         manifest.versionCode > local.versionCode ||

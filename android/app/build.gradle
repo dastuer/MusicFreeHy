@@ -34,6 +34,12 @@ android {
         }
     }
     buildTypes {
+        debug {
+            // debug 渠道：包名加后缀与正式版隔离——两个包可共存、数据互不可见，
+            // 应用内更新走独立的版本清单（update-debug.json），不会互推对方的包
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'

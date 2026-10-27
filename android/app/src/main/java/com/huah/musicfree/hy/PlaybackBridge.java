@@ -337,6 +337,34 @@ public class PlaybackBridge extends Plugin {
         call.resolve();
     }
 
+    /**
+     * 应用音效设置：settings 是 JS 侧 audioEffect 的完整参数对象
+     * （enabled/eqs/bass/treble/surroundDepth/surroundStrength/reverb），
+     * 全量下发、幂等；service 未运行时静默成功——服务起来后 JS 会补发一次。
+     */
+    @PluginMethod
+    public void setAudioEffect(PluginCall call) {
+        String settings = call.getString("settings", "{}");
+        MediaPlaybackService svc = activeService;
+        if (svc == null) {
+            // 服务可能还没起（刚装好还没播过歌）：记住不算失败，JS 在服务就绪后会重发
+            call.resolve();
+            return;
+        }
+        svc.setAudioEffect(settings);
+        call.resolve();
+    }
+
+    /** 音效支持情况（各效果器是否可用 + 当前参数），设置页展示与调试用 */
+    @PluginMethod
+    public void getAudioEffectInfo(PluginCall call) {
+        JSObject ret = new JSObject();
+        MediaPlaybackService svc = activeService;
+        ret.put("available", svc != null);
+        ret.put("info", svc == null ? "{}" : svc.describeAudioFx());
+        call.resolve(ret);
+    }
+
     @PluginMethod
     public void setAudioFocusMode(PluginCall call) {
         MediaPlaybackService svc = activeService;

@@ -47,6 +47,10 @@ public class UpdatePlugin extends Plugin {
                 ? info.getLongVersionCode()
                 : info.versionCode);
             res.put("versionName", info.versionName);
+            // 更新渠道：debug 构建的 applicationId 带 ".debug" 后缀（build.gradle），
+            // JS 按它决定拉哪条版本清单（update-debug.json / update.json）——
+            // 正式渠道与 debug 渠道互不提示对方的更新包
+            res.put("packageName", context.getPackageName());
             call.resolve(res);
         } catch (Exception e) {
             call.reject("读取版本信息失败");

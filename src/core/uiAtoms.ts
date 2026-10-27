@@ -133,6 +133,18 @@ export function closeSleepTimer() {
     getDefaultStore().set(sleepTimerOpenAtom, false);
 }
 
+/** ---------- 音效面板（播放页「更多」入口 / 设置页入口） ---------- */
+
+export const audioEffectOpenAtom = atom(false);
+
+export function openAudioEffectSheet() {
+    getDefaultStore().set(audioEffectOpenAtom, true);
+}
+
+export function closeAudioEffectSheet() {
+    getDefaultStore().set(audioEffectOpenAtom, false);
+}
+
 /** ---------- 歌词翻译显示（播放页双行渲染，设置页开关） ---------- */
 
 export const lyricTranslationAtom = atom(
